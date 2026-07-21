@@ -156,6 +156,7 @@ is not on `PATH` in a fresh shell.
 | `review.sh <film>` | Print/open the review URL for a film | — |
 | `render.sh <film>` | Render a clean copy from *approved* findings | 10–40 min |
 | `build-plugin.sh [dir]` | Build and package the Jellyfin plugin | seconds |
+| `install-service.ps1` | Windows only: run the worker at boot (see below) | seconds |
 
 ### A typical run
 
@@ -213,6 +214,53 @@ docker run -p 8765:8765 -v /path/to/media:/media clean-media-worker
 
 Check it: `curl http://localhost:8765/api/health` reports version, GPU,
 installed engines and queue depth.
+
+### Keeping it running (Windows)
+
+The plugin returns no segments whenever the worker is unreachable, and it
+does so silently — playback just stops skipping. If Jellyfin is always on,
+the worker should be too.
+
+From an **elevated** PowerShell in the repo root:
+
+```powershell
+.\scripts\install-service.ps1
+.\scripts\install-service.ps1 -MediaRoots "D:\Movies;D:\TV" -Port 8765
+.\scripts\install-service.ps1 -Uninstall
+```
+
+This registers a scheduled task that starts at boot — before anyone logs
+in — and restarts the worker every minute if it dies. It is Task Scheduler
+rather than a real service because uvicorn is a console program: making it
+a true service needs NSSM or WinSW wrapped around it, for the same
+behaviour.
+
+The script starts the task and then polls `/api/health`, so it tells you
+whether the worker actually came up rather than just that the task
+registered. It prints the LAN addresses to use as the plugin's Worker URL.
+
+| Where | What |
+|---|---|
+| Log | `%LOCALAPPDATA%\CleanMedia\worker.log` (truncated past 10 MB) |
+| Launcher | `%LOCALAPPDATA%\CleanMedia\worker-service.cmd`, regenerated on install |
+| Task | `CleanMediaWorker` in Task Scheduler |
+
+By default the task runs under your account with no stored password
+(`S4U`), which means it has **no network credentials**. That is fine for
+local media roots. If `-MediaRoots` points at a UNC path or mapped drive,
+add `-UsePassword` and the script will prompt for and store your Windows
+password with the task.
+
+```powershell
+Get-Content "$env:LOCALAPPDATA\CleanMedia\worker.log" -Tail 40   # what went wrong
+Get-ScheduledTask CleanMediaWorker | Get-ScheduledTaskInfo       # last run result
+
+# restart it after pulling new worker code
+Stop-ScheduledTask CleanMediaWorker; Start-ScheduledTask CleanMediaWorker
+```
+
+A stale worker serving old code looks exactly like a bug in the new code —
+restart the task after every `git pull`.
 
 ---
 
