@@ -157,6 +157,7 @@ is not on `PATH` in a fresh shell.
 | `render.sh <film>` | Render a clean copy from *approved* findings | 10–40 min |
 | `build-plugin.sh [dir]` | Build and package the Jellyfin plugin | seconds |
 | `install-service.ps1` | Windows only: run the worker at boot (see below) | seconds |
+| `organize-library.ps1` | Windows only: give every movie its own folder (see below) | seconds |
 
 ### A typical run
 
@@ -261,6 +262,42 @@ Stop-ScheduledTask CleanMediaWorker; Start-ScheduledTask CleanMediaWorker
 
 A stale worker serving old code looks exactly like a bug in the new code —
 restart the task after every `git pull`.
+
+### One folder per movie
+
+Clean Media writes up to ten sidecars next to each video — the timeline,
+the shot list, the transcript, the censor plan, the progress file. In a
+flat library that is thousands of files in one directory, with each film's
+sidecars interleaved with every other film's. Jellyfin recommends a folder
+per movie anyway; the sidecars make it worth doing.
+
+```powershell
+.\scripts\organize-library.ps1 -Path "\\NAS\Media\Movies"           # dry run
+.\scripts\organize-library.ps1 -Path "\\NAS\Media\Movies" -Apply
+```
+
+A file joins a movie when its name starts with that movie's name and a
+dot, so `.cleanmedia.json` and `.eng.srt` travel with the video. Where two
+films could claim a file the longer name wins, which is what keeps
+*Iron Man 2 (2010)*'s sidecars away from *Iron Man (2008)*.
+
+Nothing is deleted or overwritten, and files are moved rather than copied,
+so on one volume a 1200 film library takes seconds. Every move is logged
+as it happens, and the log replays backwards:
+
+```powershell
+.\scripts\organize-library.ps1 -Undo -LogPath "\\NAS\Media\organize-20260721-140233.csv" -Apply
+```
+
+Re-running is safe and cheap: only the top level is scanned, so films
+already in folders are untouched, and a sidecar written later — a new
+`.srt`, or analysis run before organizing — joins its film rather than
+being stranded. Add `-IncludeCleaned` to move rendered copies from a
+shared `cleaned\` folder into each movie's own.
+
+Afterwards, point the worker at the library root and let it find films by
+name: `CLEANMEDIA_MEDIA_ROOTS` is searched recursively, so nesting needs
+no configuration change.
 
 ---
 
