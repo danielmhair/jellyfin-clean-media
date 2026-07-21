@@ -1,0 +1,45 @@
+[project]
+name = "clean-media-worker"
+version = "0.1.0"
+description = "Self-hosted AI-powered media analysis worker for Jellyfin"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "pureframe==0.1.0b7",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    # Declared directly (not just via pureframe) so the CUDA index pin below applies.
+    "torch>=2.6,<2.8",
+    "faster-whisper>=1.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "httpx>=0.27",
+]
+
+[tool.uv]
+# OpenCV 5 removed cv2.dnn.readNetFromCaffe, which pureframe 0.1.0b7's face
+# detector needs; pin the whole graph to OpenCV 4.x.
+constraint-dependencies = [
+    "opencv-python>=4.8,<5",
+    "opencv-python-headless>=4.8,<5",
+]
+
+# Use CUDA builds of torch on Windows/Linux so detection runs on the GPU.
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu126", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["worker"]

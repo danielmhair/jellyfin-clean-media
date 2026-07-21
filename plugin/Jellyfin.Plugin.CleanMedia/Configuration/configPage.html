@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>Clean Media</title>
+</head>
+<body>
+<div id="CleanMediaConfigPage" data-role="page" class="page type-interior pluginConfigurationPage"
+     data-controller="__plugin/cleanmedia">
+    <div data-role="content">
+        <div class="content-primary">
+            <form id="CleanMediaConfigForm">
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="WorkerUrl">Worker URL</label>
+                    <input id="WorkerUrl" name="WorkerUrl" type="url" is="emby-input"
+                           placeholder="http://100.x.y.z:8765" />
+                    <div class="fieldDescription">
+                        Base URL of your Clean Media worker, reachable from this Jellyfin server
+                        (over Tailscale, for example).
+                    </div>
+                </div>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="TimeoutSeconds">Timeout (seconds)</label>
+                    <input id="TimeoutSeconds" name="TimeoutSeconds" type="number" is="emby-input" min="1" max="120" />
+                </div>
+
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input id="ProvideSkips" name="ProvideSkips" type="checkbox" is="emby-checkbox" />
+                        <span>Skip approved scenes during playback</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                        Reported to Jellyfin as Commercial segments. Set each client's
+                        Commercial action to "Skip" or "Ask to skip" under Playback settings.
+                    </div>
+                </div>
+
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input id="ApprovedOnly" name="ApprovedOnly" type="checkbox" is="emby-checkbox" />
+                        <span>Only use approved findings</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                        Strongly recommended. With this off, unreviewed AI guesses are skipped
+                        during playback.
+                    </div>
+                </div>
+
+                <br />
+                <div>
+                    <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+                        <span>Save</span>
+                    </button>
+                    <button is="emby-button" type="button" id="TestConnection" class="raised block emby-button">
+                        <span>Test connection</span>
+                    </button>
+                </div>
+                <div id="TestResult" style="margin-top:1em;"></div>
+            </form>
+
+            <br />
+            <div class="fieldDescription">
+                <strong>Note:</strong> Jellyfin can only skip during playback. Muting profanity and
+                blurring require a rendered clean copy from the worker — no Jellyfin client
+                supports them live.
+            </div>
+        </div>
+    </div>
+
+<script type="text/javascript">
+    (function () {
+        var pluginId = '6f1d0a2e-6c2b-4a1f-9a6d-1c5b2f8e4d31';
+
+        function load(page, config) {
+            page.querySelector('#WorkerUrl').value = config.WorkerUrl || '';
+            page.querySelector('#TimeoutSeconds').value = config.TimeoutSeconds || 15;
+            page.querySelector('#ProvideSkips').checked = !!config.ProvideSkips;
+            page.querySelector('#ApprovedOnly').checked = !!config.ApprovedOnly;
+        }
+
+        document.querySelector('#CleanMediaConfigPage')
+            .addEventListener('pageshow', function () {
+                Dashboard.showLoadingMsg();
+                var page = this;
+                ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                    load(page, config);
+                    Dashboard.hideLoadingMsg();
+                });
+            });
+
+        document.querySelector('#CleanMediaConfigForm')
+            .addEventListener('submit', function (e) {
+                e.preventDefault();
+                Dashboard.showLoadingMsg();
+                var page = document.querySelector('#CleanMediaConfigPage');
+                ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                    config.WorkerUrl = page.querySelector('#WorkerUrl').value;
+                    config.TimeoutSeconds = parseInt(page.querySelector('#TimeoutSeconds').value, 10) || 15;
+                    config.ProvideSkips = page.querySelector('#ProvideSkips').checked;
+                    config.ApprovedOnly = page.querySelector('#ApprovedOnly').checked;
+                    ApiClient.updatePluginConfiguration(pluginId, config).then(function (result) {
+                        Dashboard.processPluginConfigurationUpdateResult(result);
+                    });
+                });
+                return false;
+            });
+
+        document.querySelector('#TestConnection')
+            .addEventListener('click', function () {
+                var page = document.querySelector('#CleanMediaConfigPage');
+                var url = page.querySelector('#WorkerUrl').value.replace(/\/$/, '');
+                var out = page.querySelector('#TestResult');
+                out.textContent = 'Checking ' + url + ' ...';
+                fetch(url + '/api/health')
+                    .then(function (r) { return r.json(); })
+                    .then(function (health) {
+                        var engines = Object.keys(health.engines || {}).join(', ');
+                        out.textContent = 'Connected. Worker ' + health.version
+                            + ' | engines: ' + engines
+                            + ' | queue: ' + health.queueSize;
+                    })
+                    .catch(function (err) {
+                        out.textContent = 'Could not reach the worker: ' + err;
+                    });
+            });
+    })();
+</script>
+</div>
+</body>
+</html>

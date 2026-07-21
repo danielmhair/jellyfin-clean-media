@@ -1,0 +1,21 @@
+[
+  {
+    "guid": "6f1d0a2e-6c2b-4a1f-9a6d-1c5b2f8e4d31",
+    "name": "Clean Media",
+    "description": "Skips administrator-approved objectionable scenes using a self-hosted Clean Media worker.",
+    "overview": "Detects objectionable content locally, lets you approve each finding, then skips approved scenes during playback.",
+    "owner": "danielmhair",
+    "category": "General",
+    "imageUrl": "",
+    "versions": [
+      {
+        "version": "0.1.0.0",
+        "changelog": "See the repository for changes.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.1.0.0.zip",
+        "checksum": "ed0827eda757fb268e683018c8c595fa",
+        "timestamp": "2026-07-21T03:48:06Z"
+      }
+    ]
+  }
+]

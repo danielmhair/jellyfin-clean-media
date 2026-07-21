@@ -1,0 +1,14 @@
+movies/
+.venv/
+__pycache__/
+*.pyc
+data/
+*.censorplan.json
+*.cleanmedia.json
+.pytest_cache/
+bin/
+obj/
+*.shots.json
+*.vlm-progress.json
+*.srt
+plugin/dist/
