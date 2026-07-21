@@ -35,6 +35,29 @@ public class Timeline
     [JsonPropertyName("segments")] public List<TimelineSegment> Segments { get; set; } = new();
 }
 
+/// <summary>GPU details from the worker's health endpoint.</summary>
+public class GpuInfo
+{
+    [JsonPropertyName("available")] public bool Available { get; set; }
+
+    [JsonPropertyName("name")] public string? Name { get; set; }
+}
+
+/// <summary>The worker's health response.</summary>
+public class WorkerHealth
+{
+    [JsonPropertyName("status")] public string Status { get; set; } = string.Empty;
+
+    [JsonPropertyName("version")] public string Version { get; set; } = string.Empty;
+
+    [JsonPropertyName("queueSize")] public int QueueSize { get; set; }
+
+    [JsonPropertyName("gpu")] public GpuInfo? Gpu { get; set; }
+
+    [JsonPropertyName("engines")]
+    public Dictionary<string, object> Engines { get; set; } = new();
+}
+
 /// <summary>Talks to the Clean Media worker over HTTP.</summary>
 public class WorkerClient
 {
@@ -84,8 +107,8 @@ public class WorkerClient
         }
     }
 
-    /// <summary>Check worker reachability for the settings page.</summary>
-    public async Task<bool> PingAsync(CancellationToken cancellationToken)
+    /// <summary>Fetch worker health, or null if it cannot be reached.</summary>
+    public async Task<WorkerHealth?> GetHealthAsync(CancellationToken cancellationToken)
     {
         try
         {
@@ -94,12 +117,19 @@ public class WorkerClient
             using var response = await client
                 .GetAsync($"{Config.WorkerUrl.TrimEnd('/')}/api/health", cancellationToken)
                 .ConfigureAwait(false);
-            return response.IsSuccessStatusCode;
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            return await response.Content
+                .ReadFromJsonAsync<WorkerHealth>(cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or NotSupportedException)
         {
             _logger.LogWarning(ex, "Clean Media worker health check failed");
-            return false;
+            return null;
         }
     }
 }

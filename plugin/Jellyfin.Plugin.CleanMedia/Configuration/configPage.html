@@ -114,21 +114,33 @@
 
         document.querySelector('#TestConnection')
             .addEventListener('click', function () {
-                var page = document.querySelector('#CleanMediaConfigPage');
-                var url = page.querySelector('#WorkerUrl').value.replace(/\/$/, '');
                 var out = page.querySelector('#TestResult');
-                out.textContent = 'Checking ' + url + ' ...';
-                fetch(url + '/api/health')
-                    .then(function (r) { return r.json(); })
-                    .then(function (health) {
-                        var engines = Object.keys(health.engines || {}).join(', ');
-                        out.textContent = 'Connected. Worker ' + health.version
-                            + ' | engines: ' + engines
-                            + ' | queue: ' + health.queueSize;
-                    })
-                    .catch(function (err) {
-                        out.textContent = 'Could not reach the worker: ' + err;
-                    });
+                out.textContent = 'Saving settings, then testing from the server...';
+
+                // Test from the Jellyfin server, not the browser: the browser
+                // is a different origin from the worker, so a direct fetch is
+                // blocked by CORS — and the server is the machine that has to
+                // reach the worker during playback anyway.
+                //
+                // Save first, so the test uses the URL currently in the box.
+                ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                    config.WorkerUrl = page.querySelector('#WorkerUrl').value;
+                    config.TimeoutSeconds = parseInt(page.querySelector('#TimeoutSeconds').value, 10) || 15;
+                    return ApiClient.updatePluginConfiguration(pluginId, config);
+                }).then(function () {
+                    return ApiClient.getJSON(ApiClient.getUrl('CleanMedia/TestConnection'));
+                }).then(function (result) {
+                    if (result.ok) {
+                        out.textContent = 'Connected. Worker ' + result.version
+                            + ' | engines: ' + (result.engines || []).join(', ')
+                            + ' | GPU: ' + result.gpu
+                            + ' | queue: ' + result.queueSize;
+                    } else {
+                        out.textContent = result.message;
+                    }
+                }).catch(function (err) {
+                    out.textContent = 'Test failed: ' + err;
+                });
             });
     })();
 </script>
