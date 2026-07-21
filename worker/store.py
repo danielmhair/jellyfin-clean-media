@@ -135,11 +135,31 @@ class Store:
         return None
 
     def _write_sidecar(self, job: Job, timeline: Timeline) -> None:
+        # Imported here, not at module scope: review imports store for the
+        # fingerprint, so a top-level import would be circular.
+        from .review import merge_segments
+
         media = Path(job.mediaPath)
         sidecar = media.with_name(media.stem + ".cleanmedia.json")
         try:
+            prior: list[Segment] = []
+            floor = 0
+            if sidecar.is_file():
+                existing = Timeline.model_validate_json(
+                    sidecar.read_text(encoding="utf-8")
+                )
+                prior, floor = existing.segments, existing.nextSegmentId
+            # Merge, never overwrite. This job ran one engine; the sidecar
+            # may hold another engine's findings and an administrator's own
+            # additions and decisions, none of which this job knows about.
+            segments = merge_segments(prior, timeline.segments, {job.engine}, floor)
+            merged = Timeline(
+                mediaFingerprint=timeline.mediaFingerprint,
+                segments=segments,
+                nextSegmentId=max((s.id for s in segments), default=0) + 1,
+            )
             sidecar.write_text(
-                json.dumps(timeline.model_dump(), indent=2), encoding="utf-8"
+                json.dumps(merged.model_dump(), indent=2), encoding="utf-8"
             )
         except OSError:
             pass  # sidecar is best-effort; the DB remains the source of truth

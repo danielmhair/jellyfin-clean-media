@@ -19,10 +19,15 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Optional
 
-from .models import Timeline
+from .models import Segment, Timeline
+from .store import media_fingerprint
 
 THUMB_WIDTH = 480
 CLIP_PAD_S = 15.0
+
+#: Engine identity for findings an administrator added by hand. Never runs,
+#: so a merge always keeps its segments.
+MANUAL_ENGINE = "manual"
 
 
 def sidecar_for(media: Path) -> Path:
@@ -67,19 +72,164 @@ def load_timeline(media: Path) -> Optional[Timeline]:
     return Timeline.model_validate_json(path.read_text(encoding="utf-8"))
 
 
+def save_timeline(media: Path, timeline: Timeline) -> None:
+    """Write the sidecar. This is the record of every review decision."""
+    sidecar_for(media).write_text(
+        json.dumps(timeline.model_dump(), indent=2), encoding="utf-8"
+    )
+
+
+def next_segment_id(segments: list[Segment], floor: int = 0) -> int:
+    """Ids are allocated monotonically and never reused.
+
+    Renumbering would be tidier on disk but changes the id of a finding
+    an administrator may be looking at, or has open in another tab. The
+    floor is the timeline's own high-water mark, which keeps that true
+    even after the highest-numbered finding is deleted.
+    """
+    return max(max((s.id for s in segments), default=0) + 1, floor)
+
+
 def set_approval(media: Path, segment_id: int, approved: Optional[bool]) -> bool:
     """Persist a decision. Returns False if the segment does not exist."""
+    return update_segment(media, segment_id, approved=approved) is not None
+
+
+def update_segment(
+    media: Path,
+    segment_id: int,
+    *,
+    approved=...,
+    start_ms=...,
+    end_ms=...,
+    action=...,
+) -> Optional[Segment]:
+    """Edit one finding in place. Returns None if it does not exist.
+
+    Sentinel defaults rather than None, because None is a meaningful value
+    for `approved` — it means "no decision yet".
+    """
+    timeline = load_timeline(media)
+    if timeline is None:
+        return None
+    for segment in timeline.segments:
+        if segment.id != segment_id:
+            continue
+        if approved is not ...:
+            segment.approved = approved
+        if start_ms is not ...:
+            segment.startMs = max(0, int(start_ms))
+        if end_ms is not ...:
+            segment.endMs = max(0, int(end_ms))
+        if action is not ...:
+            segment.recommendedAction = action
+        # An inverted span would silently skip nothing, or everything.
+        if segment.endMs < segment.startMs:
+            segment.startMs, segment.endMs = segment.endMs, segment.startMs
+        save_timeline(media, timeline)
+        return segment
+    return None
+
+
+def delete_segment(media: Path, segment_id: int) -> bool:
+    """Remove a finding. Survivors keep their ids."""
     timeline = load_timeline(media)
     if timeline is None:
         return False
-    for segment in timeline.segments:
-        if segment.id == segment_id:
-            segment.approved = approved
-            sidecar_for(media).write_text(
-                json.dumps(timeline.model_dump(), indent=2), encoding="utf-8"
-            )
-            return True
-    return False
+    remaining = [s for s in timeline.segments if s.id != segment_id]
+    if len(remaining) == len(timeline.segments):
+        return False
+    timeline.segments = remaining
+    save_timeline(media, timeline)
+    return True
+
+
+def create_segment(
+    media: Path,
+    start_ms: int,
+    end_ms: int,
+    category: str,
+    action: str,
+    approved: Optional[bool] = True,
+    reasoning: Optional[str] = None,
+) -> Optional[Segment]:
+    """Add a finding by hand.
+
+    Marked with the MANUAL_ENGINE identity so re-analysis can merge fresh
+    detections without discarding it — an administrator's own judgement
+    must outlive any model's.
+
+    Defaults to approved: adding a finding deliberately *is* the decision.
+    """
+    timeline = load_timeline(media)
+    if timeline is None:
+        # First finding on a film nothing has analyzed yet.
+        try:
+            fingerprint = media_fingerprint(media)
+        except OSError:
+            return None
+        timeline = Timeline(mediaFingerprint=fingerprint, segments=[])
+
+    start_ms, end_ms = sorted((max(0, int(start_ms)), max(0, int(end_ms))))
+    segment_id = next_segment_id(timeline.segments, timeline.nextSegmentId)
+    timeline.nextSegmentId = segment_id + 1
+    segment = Segment(
+        id=segment_id,
+        startMs=start_ms,
+        endMs=end_ms,
+        category=category,
+        confidence=1.0,  # a human said so
+        engine=MANUAL_ENGINE,
+        recommendedAction=action,
+        approved=approved,
+        reasoning=reasoning,
+    )
+    timeline.segments.append(segment)
+    timeline.segments.sort(key=lambda s: s.startMs)
+    save_timeline(media, timeline)
+    return segment
+
+
+def merge_segments(
+    prior: list[Segment],
+    fresh: list[Segment],
+    replacing: set[str],
+    floor: int = 0,
+) -> list[Segment]:
+    """Fold a fresh analysis into what is already on disk.
+
+    Two rules, both about not destroying work:
+
+    * Findings from engines that did not just run are kept — including
+      MANUAL_ENGINE, which never runs. Re-running the visual pass must not
+      erase profanity results or an administrator's own additions.
+    * A decision already made carries over onto the matching fresh
+      finding, matched on the engine's own reference. Re-analysis should
+      not send a reviewer back through work they already did.
+
+    Ids are preserved for survivors; fresh findings are allocated above the
+    high-water mark rather than renumbering the lot.
+    """
+    kept = [s for s in prior if s.engine not in replacing or s.engine == MANUAL_ENGINE]
+    decisions = {
+        (s.engine, s.engineRef, s.category): s.approved
+        for s in prior
+        if s.engineRef is not None and s.approved is not None
+    }
+
+    next_id = next_segment_id(kept, floor)
+    # Copy: callers hold these objects (the job's own timeline), and
+    # reassigning their ids underneath them would be a nasty surprise.
+    for segment in (s.model_copy(deep=True) for s in fresh):
+        prior_decision = decisions.get((segment.engine, segment.engineRef, segment.category))
+        if prior_decision is not None:
+            segment.approved = prior_decision
+        segment.id = next_id
+        next_id += 1
+        kept.append(segment)
+
+    kept.sort(key=lambda s: s.startMs)
+    return kept
 
 
 def clip_path(media: Path, start_ms: int, end_ms: int, pad_s: float) -> Path:

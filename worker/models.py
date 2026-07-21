@@ -44,6 +44,11 @@ class Timeline(BaseModel):
     schemaVersion: int = SCHEMA_VERSION
     mediaFingerprint: str
     segments: list[Segment] = Field(default_factory=list)
+    #: High-water mark for id allocation. Without it, deleting the newest
+    #: finding would hand its id to the next one created, and a review UI
+    #: holding the old id would silently act on the wrong segment.
+    #: Absent in timelines written before this existed; 0 means "derive it".
+    nextSegmentId: int = 0
 
 
 class JobCreate(BaseModel):
@@ -73,7 +78,54 @@ class Job(BaseModel):
 class SegmentPatch(BaseModel):
     approved: Optional[bool] = None
     recommendedAction: Optional[str] = None
+    #: Timing edits from the review UI, when a skip cuts off dialogue or
+    #: leaves part of a scene visible. Only applied when explicitly sent.
+    startMs: Optional[int] = None
+    endMs: Optional[int] = None
+
+
+class SegmentCreate(BaseModel):
+    """A finding added by hand, for what the models missed."""
+
+    startMs: int
+    endMs: int
+    category: str = "manual"
+    recommendedAction: str = "skip"
+    #: Adding a finding deliberately is itself the decision, so these
+    #: default to approved rather than waiting for a second confirmation.
+    approved: Optional[bool] = True
+    reasoning: Optional[str] = None
 
 
 class RenderRequest(BaseModel):
     outputPath: Optional[str] = None
+
+
+class JobBrief(BaseModel):
+    """Just enough of a job for the review UI to show progress."""
+
+    id: str
+    status: JobStatus
+    progress: float = 0.0
+    stage: str = ""
+    error: Optional[str] = None
+
+
+class MediaStatus(BaseModel):
+    """Review state of one film, as the library grid needs it."""
+
+    path: str
+    #: Where the worker actually found the file, if anywhere.
+    resolvedPath: Optional[str] = None
+    analyzed: bool = False
+    total: int = 0
+    approved: int = 0
+    rejected: int = 0
+    pending: int = 0
+    job: Optional[JobBrief] = None
+
+
+class StatusRequest(BaseModel):
+    """Ask about a page of the library in one round trip."""
+
+    paths: list[str] = Field(default_factory=list)

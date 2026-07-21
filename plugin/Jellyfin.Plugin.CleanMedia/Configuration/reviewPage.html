@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>Clean Media Review</title>
+</head>
+<body>
+<div id="CleanMediaReviewPage" data-role="page" class="page type-interior pluginConfigurationPage">
+    <div data-role="content">
+        <div class="content-primary">
+
+            <!-- Libraries -->
+            <div id="CmLibraryView">
+                <h2 style="margin-bottom:.2em;">Clean Media Review</h2>
+                <p class="fieldDescription" style="margin-top:0;">
+                    Nothing is skipped during playback until it is approved here.
+                </p>
+                <div id="CmLibraryPicker"></div>
+            </div>
+
+            <!-- One library's videos -->
+            <div id="CmItemsView" style="display:none;">
+                <button is="emby-button" type="button" class="raised emby-button cmBack">
+                    <span>&larr; All libraries</span>
+                </button>
+                <h2 id="CmLibraryName" style="display:inline-block;margin:0 0 0 1em;"></h2>
+
+                <div style="margin:1em 0;display:flex;gap:.6em;flex-wrap:wrap;align-items:center;">
+                    <select is="emby-select" id="CmFilter" style="max-width:220px;">
+                        <option value="all">All videos</option>
+                        <option value="pending">Needs review</option>
+                        <option value="unanalyzed">Not analyzed</option>
+                        <option value="done">Fully reviewed</option>
+                    </select>
+                    <select is="emby-select" id="CmEngine" style="max-width:220px;">
+                        <option value="subtitles">Profanity (subtitles) — fast</option>
+                        <option value="whisper">Profanity (whisper) — slower</option>
+                        <option value="vlm">Visual scenes (VLM) — hours</option>
+                    </select>
+                    <button is="emby-button" type="button" id="CmQueueVisible"
+                            class="raised emby-button"><span>Queue shown videos</span></button>
+                    <span id="CmQueueResult" class="fieldDescription"></span>
+                </div>
+
+                <div id="CmItems"></div>
+            </div>
+
+            <!-- One film's findings -->
+            <div id="CmFilmView" style="display:none;">
+                <button is="emby-button" type="button" class="raised emby-button cmBackToItems">
+                    <span>&larr; Back</span>
+                </button>
+                <h2 id="CmFilmName" style="display:inline-block;margin:0 0 0 1em;"></h2>
+                <span id="CmFilmProgress" class="fieldDescription" style="margin-left:1em;"></span>
+
+                <div class="cmPlayerWrap">
+                    <video id="CmPlayer" controls preload="metadata"></video>
+                    <div id="CmPlayerNote" class="fieldDescription"></div>
+                </div>
+
+                <div style="margin:1em 0;display:flex;gap:.6em;flex-wrap:wrap;align-items:center;">
+                    <button is="emby-button" type="button" id="CmNextUndecided"
+                            class="raised emby-button"><span>Next undecided</span></button>
+                    <button is="emby-button" type="button" id="CmAdd"
+                            class="raised emby-button"><span>+ Add finding at playhead</span></button>
+                </div>
+
+                <div id="CmFindings"></div>
+            </div>
+
+            <div id="CmMessage" class="fieldDescription" style="margin-top:1em;"></div>
+        </div>
+    </div>
+
+<style>
+    .cmGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:1em;}
+    .cmCard{background:#202020;border-radius:6px;overflow:hidden;cursor:pointer;
+            border:1px solid transparent;}
+    .cmCard:hover{border-color:#00a4dc;}
+    .cmCard img{width:100%;aspect-ratio:2/3;object-fit:cover;display:block;background:#111;}
+    .cmCard .cmName{padding:.5em .6em .2em;font-size:13px;}
+    .cmCard .cmState{padding:0 .6em .6em;font-size:12px;opacity:.85;}
+    .cmPending{color:#e3b341;} .cmDone{color:#3fb950;} .cmNone{opacity:.55;}
+    .cmRunning{color:#00a4dc;} .cmFail{color:#f85149;}
+
+    .cmPlayerWrap{margin:1em 0;}
+    #CmPlayer{width:100%;max-height:52vh;background:#000;border-radius:6px;}
+
+    .cmRow{background:#202020;border-radius:6px;padding:.8em;margin-bottom:.8em;
+           border-left:4px solid #444;}
+    .cmRow.cmIsApproved{border-left-color:#3fb950;}
+    .cmRow.cmIsRejected{border-left-color:#f85149;opacity:.65;}
+    .cmRow.cmCurrent{outline:1px solid #00a4dc;}
+    .cmMeta{display:flex;gap:.8em;flex-wrap:wrap;align-items:center;font-size:13px;
+            margin-bottom:.6em;}
+    .cmTag{background:#333;border-radius:10px;padding:.1em .7em;font-size:12px;}
+    .cmTag.cmManual{background:#4b3a6b;}
+    .cmReason{font-size:12px;opacity:.75;margin:.3em 0 .6em;}
+    .cmTimes{display:flex;gap:.5em;flex-wrap:wrap;align-items:center;font-size:13px;}
+    .cmTimes input{width:8.5em;}
+    .cmActions{display:flex;gap:.5em;flex-wrap:wrap;margin-top:.7em;}
+    .cmWarn{color:#e3b341;font-size:12px;margin-top:.5em;}
+    .cmSmall{padding:.3em .8em!important;font-size:12px!important;min-width:0!important;}
+</style>
+
+<script type="text/javascript">
+    (function () {
+        var page = document.querySelector('#CleanMediaReviewPage');
+        var views = {
+            library: page.querySelector('#CmLibraryView'),
+            items: page.querySelector('#CmItemsView'),
+            film: page.querySelector('#CmFilmView')
+        };
+        var message = page.querySelector('#CmMessage');
+        var player = page.querySelector('#CmPlayer');
+
+        var state = { items: [], statuses: {}, film: null, segments: [], poll: null };
+
+        // -- helpers ---------------------------------------------------------
+
+        function show(name) {
+            Object.keys(views).forEach(function (k) {
+                views[k].style.display = k === name ? '' : 'none';
+            });
+            if (name !== 'film') { player.pause(); player.removeAttribute('src'); player.load(); }
+            if (name !== 'items') { stopPolling(); }
+            message.textContent = '';
+        }
+
+        function escapeHtml(s) {
+            return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+                return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+            });
+        }
+
+        function imageUrl(item) {
+            if (!item.ImageTags || !item.ImageTags.Primary) { return ''; }
+            return ApiClient.getImageUrl(item.Id, {
+                type: 'Primary', maxWidth: 300, tag: item.ImageTags.Primary
+            });
+        }
+
+        // 01:23:45.678 — the format the timing boxes read and write
+        function fmt(ms) {
+            ms = Math.max(0, Math.round(ms));
+            var h = Math.floor(ms / 3600000);
+            var m = Math.floor(ms % 3600000 / 60000);
+            var s = Math.floor(ms % 60000 / 1000);
+            var f = ms % 1000;
+            return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m
+                + ':' + (s < 10 ? '0' : '') + s + '.' + ('00' + f).slice(-3);
+        }
+
+        function parseTime(text) {
+            var parts = String(text).trim().split(':');
+            if (!parts.length) { return null; }
+            var seconds = 0;
+            for (var i = 0; i < parts.length; i++) {
+                var n = parseFloat(parts[i]);
+                if (isNaN(n)) { return null; }
+                seconds = seconds * 60 + n;
+            }
+            return Math.round(seconds * 1000);
+        }
+
+        function api(method, path, query, body) {
+            var options = {
+                type: method,
+                url: ApiClient.getUrl('CleanMedia/' + path, query || {}),
+                dataType: 'json'
+            };
+            if (body !== undefined) {
+                options.data = JSON.stringify(body);
+                options.contentType = 'application/json';
+            }
+            return ApiClient.ajax(options);
+        }
+
+        // -- libraries -------------------------------------------------------
+
+        function loadLibraries() {
+            return ApiClient.getJSON(ApiClient.getUrl('Library/MediaFolders')).then(function (res) {
+                var libs = (res.Items || []).filter(function (l) {
+                    return l.CollectionType === 'movies' || l.CollectionType === 'tvshows'
+                        || !l.CollectionType;
+                });
+                var picker = page.querySelector('#CmLibraryPicker');
+                picker.innerHTML = '<div class="cmGrid">' + libs.map(function (l) {
+                    return '<div class="cmCard" data-id="' + l.Id + '" data-name="'
+                        + escapeHtml(l.Name) + '">'
+                        + '<img src="' + imageUrl(l) + '" loading="lazy" />'
+                        + '<div class="cmName">' + escapeHtml(l.Name) + '</div></div>';
+                }).join('') + '</div>';
+
+                picker.querySelectorAll('.cmCard').forEach(function (card) {
+                    card.addEventListener('click', function () {
+                        openLibrary(card.getAttribute('data-id'), card.getAttribute('data-name'));
+                    });
+                });
+            });
+        }
+
+        // -- one library -----------------------------------------------------
+
+        function openLibrary(parentId, name) {
+            show('items');
+            page.querySelector('#CmLibraryName').textContent = name;
+            page.querySelector('#CmItems').innerHTML =
+                '<p class="fieldDescription">Loading&hellip;</p>';
+
+            ApiClient.getJSON(ApiClient.getUrl('Items', {
+                ParentId: parentId,
+                IncludeItemTypes: 'Movie,Episode',
+                Recursive: true,
+                Fields: 'Path',
+                SortBy: 'SortName',
+                Limit: 500
+            })).then(function (res) {
+                state.items = res.Items || [];
+                state.statuses = {};
+                if (!state.items.length) {
+                    page.querySelector('#CmItems').innerHTML =
+                        '<p class="fieldDescription">No videos here.</p>';
+                    return;
+                }
+                renderItems();
+                loadStatus();
+            });
+        }
+
+        function visibleItems() {
+            var filter = page.querySelector('#CmFilter').value;
+            return state.items.filter(function (item) {
+                var s = state.statuses[item.Id];
+                if (filter === 'all' || !s) { return filter === 'all'; }
+                if (filter === 'pending') { return s.analyzed && s.pending > 0; }
+                if (filter === 'unanalyzed') { return !s.analyzed; }
+                if (filter === 'done') { return s.analyzed && s.pending === 0; }
+                return true;
+            });
+        }
+
+        function renderItems() {
+            var items = visibleItems();
+            page.querySelector('#CmItems').innerHTML = items.length
+                ? '<div class="cmGrid">' + items.map(function (i) {
+                    return '<div class="cmCard" data-id="' + i.Id + '">'
+                        + '<img src="' + imageUrl(i) + '" loading="lazy" />'
+                        + '<div class="cmName">' + escapeHtml(i.Name) + '</div>'
+                        + '<div class="cmState cmNone" id="cmState-' + i.Id + '">'
+                        + stateText(state.statuses[i.Id]).text + '</div></div>';
+                }).join('') + '</div>'
+                : '<p class="fieldDescription">Nothing matches that filter.</p>';
+
+            page.querySelectorAll('#CmItems .cmCard').forEach(function (card) {
+                var id = card.getAttribute('data-id');
+                card.addEventListener('click', function () { openFilm(id); });
+                var s = state.statuses[id];
+                if (s) { applyState(page.querySelector('#cmState-' + id), s); }
+            });
+        }
+
+        function stateText(s) {
+            if (!s) { return { cls: 'cmNone', text: 'checking&hellip;' }; }
+            var job = s.job;
+            if (job && (job.status === 'queued' || job.status === 'running')) {
+                return {
+                    cls: 'cmRunning',
+                    text: job.status === 'queued' ? 'queued for analysis'
+                        : 'analyzing ' + Math.round((job.progress || 0) * 100) + '%'
+                            + (job.stage ? ' — ' + escapeHtml(job.stage) : '')
+                };
+            }
+            if (job && job.status === 'failed') {
+                return { cls: 'cmFail', text: 'analysis failed' };
+            }
+            if (!s.analyzed) { return { cls: 'cmNone', text: 'not analyzed' }; }
+            if (s.pending > 0) {
+                return { cls: 'cmPending', text: s.pending + ' of ' + s.total + ' to review' };
+            }
+            return {
+                cls: 'cmDone',
+                text: 'reviewed — ' + s.approved + ' approved, ' + s.rejected + ' ignored'
+            };
+        }
+
+        function applyState(el, s) {
+            if (!el) { return; }
+            var d = stateText(s);
+            el.className = 'cmState ' + d.cls;
+            el.innerHTML = d.text;
+        }
+
+        function loadStatus() {
+            var ids = state.items.map(function (i) { return i.Id; });
+            return api('POST', 'Status', {}, { itemIds: ids }).then(function (res) {
+                if (res.unreachable) {
+                    message.textContent = 'Could not reach the worker. Check the Worker URL '
+                        + 'on the Clean Media settings page.';
+                    return;
+                }
+                (res.items || []).forEach(function (s) {
+                    state.statuses[s.itemId] = s;
+                    applyState(page.querySelector('#cmState-' + s.itemId), s);
+                });
+                schedulePoll();
+            }).catch(function (err) {
+                message.textContent = 'Could not load review status: ' + err;
+            });
+        }
+
+        // Only poll while something is actually moving, so an idle dashboard
+        // is not calling the worker every few seconds forever.
+        function schedulePoll() {
+            stopPolling();
+            var busy = Object.keys(state.statuses).some(function (id) {
+                var job = state.statuses[id].job;
+                return job && (job.status === 'queued' || job.status === 'running');
+            });
+            if (busy && views.items.style.display !== 'none') {
+                state.poll = setTimeout(loadStatus, 5000);
+            }
+        }
+
+        function stopPolling() {
+            if (state.poll) { clearTimeout(state.poll); state.poll = null; }
+        }
+
+        // -- one film --------------------------------------------------------
+
+        function openFilm(itemId) {
+            var item = state.items.filter(function (i) { return i.Id === itemId; })[0];
+            if (!item) { return; }
+            state.film = item;
+            show('film');
+            page.querySelector('#CmFilmName').textContent = item.Name;
+            page.querySelector('#CmFindings').innerHTML =
+                '<p class="fieldDescription">Loading findings&hellip;</p>';
+
+            // Jellyfin's own stream: same origin, already authenticated, and
+            // it gives a real scrub bar over the whole film.
+            player.src = ApiClient.getUrl('Videos/' + itemId + '/stream', {
+                Static: true, api_key: ApiClient.accessToken()
+            });
+            page.querySelector('#CmPlayerNote').textContent = '';
+            player.onerror = function () {
+                page.querySelector('#CmPlayerNote').textContent =
+                    'This browser cannot play this file directly (MKV and DVD sources '
+                    + 'often need transcoding). Use "Play clip" on a finding instead.';
+            };
+
+            loadFindings();
+        }
+
+        function loadFindings() {
+            return api('GET', 'Findings', { itemId: state.film.Id }).then(function (res) {
+                state.segments = res.segments || [];
+                renderFindings();
+            }).catch(function (err) {
+                page.querySelector('#CmFindings').innerHTML =
+                    '<p class="fieldDescription">Could not load findings: '
+                    + escapeHtml(err) + '</p>';
+            });
+        }
+
+        function actionNote(action) {
+            // Jellyfin can only skip during playback; mute and blur need the
+            // worker to render a clean copy. Saying so beats a silent no-op.
+            if (action === 'skip') { return ''; }
+            return '<div class="cmWarn">"' + escapeHtml(action) + '" only takes effect in a '
+                + 'rendered clean copy — Jellyfin can skip during playback, but cannot '
+                + 'mute or blur.</div>';
+        }
+
+        function renderFindings() {
+            var container = page.querySelector('#CmFindings');
+            if (!state.segments.length) {
+                container.innerHTML = '<p class="fieldDescription">No findings yet. '
+                    + 'Analyze this film, or add one by hand.</p>';
+                updateProgress();
+                return;
+            }
+
+            container.innerHTML = state.segments.map(function (s) {
+                var cls = s.approved === true ? ' cmIsApproved'
+                    : (s.approved === false ? ' cmIsRejected' : '');
+                var actions = ['skip', 'mute', 'blur'].map(function (a) {
+                    return '<option value="' + a + '"'
+                        + (s.recommendedAction === a ? ' selected' : '') + '>' + a + '</option>';
+                }).join('');
+                return ''
+                + '<div class="cmRow' + cls + '" id="cmRow-' + s.id + '" data-id="' + s.id + '">'
+                +   '<div class="cmMeta">'
+                +     '<span class="cmTag' + (s.engine === 'manual' ? ' cmManual' : '') + '">'
+                +       escapeHtml(s.engine) + '</span>'
+                +     '<strong>' + escapeHtml(s.category) + '</strong>'
+                +     '<span class="fieldDescription">'
+                +       Math.round((s.confidence || 0) * 100) + '% confident</span>'
+                +     '<span class="fieldDescription">' + fmt(s.startMs) + ' &rarr; '
+                +       fmt(s.endMs) + ' · ' + ((s.endMs - s.startMs) / 1000).toFixed(1) + 's</span>'
+                +   '</div>'
+                +   (s.reasoning ? '<div class="cmReason">' + escapeHtml(s.reasoning) + '</div>' : '')
+                +   '<div class="cmTimes">'
+                +     '<button is="emby-button" type="button" class="raised emby-button cmSmall cmPlay">'
+                +       '<span>Play here</span></button>'
+                +     '<button is="emby-button" type="button" class="raised emby-button cmSmall cmClip">'
+                +       '<span>Play clip</span></button>'
+                +     '<span>Start</span>'
+                +     '<input is="emby-input" type="text" class="cmStart" value="' + fmt(s.startMs) + '" />'
+                +     '<button is="emby-button" type="button" class="raised emby-button cmSmall cmSetStart">'
+                +       '<span>Set from playhead</span></button>'
+                +     '<span>End</span>'
+                +     '<input is="emby-input" type="text" class="cmEnd" value="' + fmt(s.endMs) + '" />'
+                +     '<button is="emby-button" type="button" class="raised emby-button cmSmall cmSetEnd">'
+                +       '<span>Set from playhead</span></button>'
+                +   '</div>'
+                +   '<div class="cmActions">'
+                +     '<button is="emby-button" type="button" class="raised emby-button cmSmall cmApprove">'
+                +       '<span>Bad — act on it</span></button>'
+                +     '<button is="emby-button" type="button" class="raised emby-button cmSmall cmReject">'
+                +       '<span>Fine — ignore</span></button>'
+                +     '<select is="emby-select" class="cmAction">' + actions + '</select>'
+                +     '<button is="emby-button" type="button" class="raised emby-button cmSmall cmDelete">'
+                +       '<span>Delete</span></button>'
+                +   '</div>'
+                +   actionNote(s.recommendedAction)
+                + '</div>';
+            }).join('');
+
+            container.querySelectorAll('.cmRow').forEach(bindRow);
+            updateProgress();
+        }
+
+        function bindRow(row) {
+            var id = parseInt(row.getAttribute('data-id'), 10);
+            var seg = state.segments.filter(function (s) { return s.id === id; })[0];
+
+            row.querySelector('.cmPlay').addEventListener('click', function () {
+                seekTo(seg.startMs);
+            });
+            row.querySelector('.cmClip').addEventListener('click', function () {
+                player.src = ApiClient.getUrl('CleanMedia/Clip', {
+                    itemId: state.film.Id, startMs: seg.startMs, endMs: seg.endMs
+                });
+                player.play().catch(function () { /* user gesture rules vary */ });
+                page.querySelector('#CmPlayerNote').textContent =
+                    'Playing a transcoded clip with 15s of padding either side.';
+            });
+            row.querySelector('.cmSetStart').addEventListener('click', function () {
+                row.querySelector('.cmStart').value = fmt(player.currentTime * 1000);
+                commitTimes(row, seg);
+            });
+            row.querySelector('.cmSetEnd').addEventListener('click', function () {
+                row.querySelector('.cmEnd').value = fmt(player.currentTime * 1000);
+                commitTimes(row, seg);
+            });
+            row.querySelector('.cmStart').addEventListener('change', function () {
+                commitTimes(row, seg);
+            });
+            row.querySelector('.cmEnd').addEventListener('change', function () {
+                commitTimes(row, seg);
+            });
+            row.querySelector('.cmApprove').addEventListener('click', function () {
+                patch(seg.id, { approved: true, fields: ['approved'] });
+            });
+            row.querySelector('.cmReject').addEventListener('click', function () {
+                patch(seg.id, { approved: false, fields: ['approved'] });
+            });
+            row.querySelector('.cmAction').addEventListener('change', function (e) {
+                patch(seg.id, {
+                    recommendedAction: e.target.value, fields: ['recommendedAction']
+                });
+            });
+            row.querySelector('.cmDelete').addEventListener('click', function () {
+                api('DELETE', 'Segments/' + seg.id, { itemId: state.film.Id })
+                    .then(afterChange)
+                    .catch(failed);
+            });
+        }
+
+        function commitTimes(row, seg) {
+            var start = parseTime(row.querySelector('.cmStart').value);
+            var end = parseTime(row.querySelector('.cmEnd').value);
+            if (start === null || end === null) {
+                message.textContent = 'Timestamps must look like 01:23:45.678.';
+                return;
+            }
+            if (start === seg.startMs && end === seg.endMs) { return; }
+            patch(seg.id, { startMs: start, endMs: end, fields: ['startMs', 'endMs'] });
+        }
+
+        function patch(segmentId, body) {
+            return api('PATCH', 'Segments/' + segmentId, { itemId: state.film.Id }, body)
+                .then(afterChange)
+                .catch(failed);
+        }
+
+        function afterChange(res) {
+            if (res && res.segments) {
+                state.segments = res.segments;
+                renderFindings();
+            } else {
+                loadFindings();
+            }
+            // The grid behind this view is now stale.
+            delete state.statuses[state.film.Id];
+        }
+
+        function failed(err) {
+            message.textContent = 'Could not save that change: ' + err;
+        }
+
+        function seekTo(ms) {
+            try {
+                player.currentTime = Math.max(0, ms / 1000);
+                player.play().catch(function () { /* autoplay policy */ });
+            } catch (e) {
+                message.textContent = 'Could not seek — the player may still be loading.';
+            }
+        }
+
+        function updateProgress() {
+            var decided = state.segments.filter(function (s) {
+                return s.approved !== null && s.approved !== undefined;
+            }).length;
+            page.querySelector('#CmFilmProgress').textContent = state.segments.length
+                ? decided + ' of ' + state.segments.length + ' decided'
+                : '';
+        }
+
+        page.querySelector('#CmNextUndecided').addEventListener('click', function () {
+            var next = state.segments.filter(function (s) {
+                return s.approved === null || s.approved === undefined;
+            })[0];
+            if (!next) {
+                message.textContent = 'Every finding in this film has been decided.';
+                return;
+            }
+            var row = page.querySelector('#cmRow-' + next.id);
+            page.querySelectorAll('.cmRow').forEach(function (r) {
+                r.classList.remove('cmCurrent');
+            });
+            row.classList.add('cmCurrent');
+            row.scrollIntoView({ block: 'center' });
+            seekTo(next.startMs);
+        });
+
+        page.querySelector('#CmAdd').addEventListener('click', function () {
+            var start = Math.round(player.currentTime * 1000);
+            api('POST', 'Segments', { itemId: state.film.Id }, {
+                startMs: start,
+                endMs: start + 3000,
+                category: 'manual',
+                recommendedAction: 'skip',
+                reasoning: 'Added during review'
+            }).then(function () {
+                loadFindings();
+                message.textContent = 'Added a 3s finding at the playhead — adjust its timings below.';
+            }).catch(failed);
+        });
+
+        // -- queueing --------------------------------------------------------
+
+        page.querySelector('#CmQueueVisible').addEventListener('click', function () {
+            var items = visibleItems();
+            if (!items.length) { return; }
+            var engine = page.querySelector('#CmEngine').value;
+            var out = page.querySelector('#CmQueueResult');
+            out.textContent = 'Queueing ' + items.length + '…';
+
+            api('POST', 'Analyze', {}, {
+                itemIds: items.map(function (i) { return i.Id; }),
+                engine: engine
+            }).then(function (res) {
+                var queued = (res.queued || []).filter(function (q) { return q.jobId; });
+                out.textContent = 'Queued ' + queued.length + ' of ' + items.length + '.';
+                loadStatus();
+            }).catch(function (err) {
+                out.textContent = 'Could not queue: ' + err;
+            });
+        });
+
+        page.querySelector('#CmFilter').addEventListener('change', renderItems);
+
+        page.querySelectorAll('.cmBack').forEach(function (b) {
+            b.addEventListener('click', function () { show('library'); });
+        });
+        page.querySelectorAll('.cmBackToItems').forEach(function (b) {
+            b.addEventListener('click', function () {
+                show('items');
+                // Counts changed while reviewing; refresh rather than lie.
+                loadStatus();
+            });
+        });
+
+        function refresh() {
+            show('library');
+            loadLibraries().then(function () { Dashboard.hideLoadingMsg(); });
+        }
+
+        // pageshow for return visits, immediate for the first render, where
+        // the event has usually already fired by the time this runs.
+        page.addEventListener('pageshow', refresh);
+        page.addEventListener('pagehide', stopPolling);
+        refresh();
+    })();
+</script>
+</div>
+</body>
+</html>

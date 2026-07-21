@@ -44,5 +44,16 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
             Name = Name,
             EmbeddedResourcePath = $"{GetType().Namespace}.Configuration.configPage.html",
         };
+
+        // A second page, so review lives in the dashboard rather than on a
+        // separate worker URL. Approving here is what makes Jellyfin skip.
+        yield return new PluginPageInfo
+        {
+            Name = "CleanMediaReview",
+            DisplayName = "Clean Media Review",
+            EmbeddedResourcePath = $"{GetType().Namespace}.Configuration.reviewPage.html",
+            EnableInMainMenu = true,
+            MenuIcon = "content_cut",
+        };
     }
 }

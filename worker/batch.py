@@ -21,6 +21,7 @@ from pathlib import Path
 
 from .engines import ENGINES
 from .models import Segment, Timeline
+from .review import merge_segments
 from .store import media_fingerprint
 
 VIDEO_SUFFIXES = {".mkv", ".mp4", ".avi", ".m4v", ".webm", ".mov"}
@@ -47,18 +48,21 @@ def analyze_one(
     media: Path, engines: list[str], options: dict, force: bool
 ) -> Timeline | None:
     sidecar = media.with_name(media.stem + ".cleanmedia.json")
-    existing: dict[str, list[Segment]] = {}
-    if sidecar.exists() and not force:
-        prior = Timeline.model_validate_json(sidecar.read_text(encoding="utf-8"))
-        for segment in prior.segments:
-            existing.setdefault(segment.engine, []).append(segment)
+    prior: list[Segment] = []
+    floor = 0
+    if sidecar.exists():
+        existing = Timeline.model_validate_json(sidecar.read_text(encoding="utf-8"))
+        prior, floor = existing.segments, existing.nextSegmentId
+    present = {s.engine for s in prior}
 
     fingerprint = media_fingerprint(media)
-    merged: list[Segment] = []
+    fresh: list[Segment] = []
+    # Engines that actually re-ran; only their prior findings are replaced.
+    ran: set[str] = set()
     for name in engines:
-        if name in existing:
-            print(f"    {name}: {len(existing[name])} segment(s) (cached)", flush=True)
-            merged += existing[name]
+        if name in present and not force:
+            cached = sum(1 for s in prior if s.engine == name)
+            print(f"    {name}: {cached} segment(s) (cached)", flush=True)
             continue
 
         engine = ENGINES[name]
@@ -81,14 +85,19 @@ def analyze_one(
             f"    {name}: {len(timeline.segments)} segment(s) in {elapsed / 60:.1f} min",
             flush=True,
         )
-        merged += timeline.segments
+        fresh += timeline.segments
+        ran.add(name)
 
+    # Merge rather than overwrite: findings from engines that did not run,
+    # and anything added by hand, must survive a re-analysis.
+    merged = merge_segments(prior, fresh, ran, floor)
     if not merged:
         return None
-    merged.sort(key=lambda s: s.startMs)
-    for i, segment in enumerate(merged, 1):
-        segment.id = i
-    timeline = Timeline(mediaFingerprint=fingerprint, segments=merged)
+    timeline = Timeline(
+        mediaFingerprint=fingerprint,
+        segments=merged,
+        nextSegmentId=max(s.id for s in merged) + 1,
+    )
     sidecar.write_text(json.dumps(timeline.model_dump(), indent=2), encoding="utf-8")
     return timeline
 
