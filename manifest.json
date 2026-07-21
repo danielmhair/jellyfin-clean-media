@@ -14,7 +14,7 @@
         "targetAbi": "10.11.0.0",
         "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.1.0.2.zip",
         "checksum": "86af8f1e1d73a1634f8a1bbe5c7d59e5",
-        "timestamp": "2026-07-21T04:33:19Z"
+        "timestamp": "2026-07-21T04:33:19"
       },
       {
         "version": "0.1.0.1",
@@ -22,7 +22,7 @@
         "targetAbi": "10.11.0.0",
         "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.1.0.1.zip",
         "checksum": "79d63eca706ac74b4f93df48188fde1a",
-        "timestamp": "2026-07-21T04:28:28Z"
+        "timestamp": "2026-07-21T04:28:28"
       },
       {
         "version": "0.1.0.0",
@@ -30,7 +30,7 @@
         "targetAbi": "10.11.0.0",
         "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.1.0.0.zip",
         "checksum": "ed0827eda757fb268e683018c8c595fa",
-        "timestamp": "2026-07-21T03:48:06Z"
+        "timestamp": "2026-07-21T03:48:06"
       }
     ]
   }

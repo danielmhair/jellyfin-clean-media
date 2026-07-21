@@ -108,7 +108,7 @@ entry = {
     "sourceUrl": source_url,
     "checksum": checksum,
     "timestamp": datetime.datetime.now(datetime.timezone.utc)
-        .strftime("%Y-%m-%dT%H:%M:%SZ"),
+        .strftime("%Y-%m-%dT%H:%M:%S"),
 }
 # Newest first: Jellyfin offers the top entry compatible with the server.
 versions = [v for v in manifest[0]["versions"] if v["version"] != version]
