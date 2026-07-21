@@ -5,8 +5,9 @@
     <title>Clean Media</title>
 </head>
 <body>
-<div id="CleanMediaConfigPage" data-role="page" class="page type-interior pluginConfigurationPage"
-     data-controller="__plugin/cleanmedia">
+<!-- No data-controller: naming a controller that does not exist stops
+     Jellyfin dispatching pageshow, which leaves every field blank. -->
+<div id="CleanMediaConfigPage" data-role="page" class="page type-interior pluginConfigurationPage">
     <div data-role="content">
         <div class="content-primary">
             <form id="CleanMediaConfigForm">
@@ -79,15 +80,20 @@
             page.querySelector('#ApprovedOnly').checked = !!config.ApprovedOnly;
         }
 
-        document.querySelector('#CleanMediaConfigPage')
-            .addEventListener('pageshow', function () {
-                Dashboard.showLoadingMsg();
-                var page = this;
-                ApiClient.getPluginConfiguration(pluginId).then(function (config) {
-                    load(page, config);
-                    Dashboard.hideLoadingMsg();
-                });
+        var page = document.querySelector('#CleanMediaConfigPage');
+
+        function refresh() {
+            ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                load(page, config);
+                Dashboard.hideLoadingMsg();
             });
+        }
+
+        // Both: pageshow covers navigating back to the page, and the
+        // immediate call covers the first render, where the event has
+        // usually already fired by the time this script runs.
+        page.addEventListener('pageshow', refresh);
+        refresh();
 
         document.querySelector('#CleanMediaConfigForm')
             .addEventListener('submit', function (e) {
