@@ -140,6 +140,7 @@ public class CleanMediaController : ControllerBase
                 rejected = s.Rejected,
                 pending = s.Pending,
                 job = s.Job,
+                jobs = s.Jobs,
             }),
         });
     }

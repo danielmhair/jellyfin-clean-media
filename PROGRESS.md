@@ -47,9 +47,15 @@ the review-UI PRD):
   "profanity + bad scenes" means queuing twice (subtitles/whisper, then vlm).
   No combined/chained analyze. No per-card Analyze button either — only the
   bulk "Queue shown videos" gated by the filter.
-- **Progress bar + ETA.** Cards show a live text percentage but no graphical
-  bar and no time-remaining; the worker's progress callback records only
-  `fraction` + `stage`, never an ETA (elapsed ÷ progress would give one).
+- **Progress bar + ETA.** _Bar done (plugin 0.2.1.1); ETA still missing._ The
+  grid and film view now show each in-flight pass with its engine label, live
+  percent and a graphical bar, and the film view shows progress on open (no need
+  to click Analyze). Fixed a display bug where a running pass hid behind a
+  queued one of the same file (`/api/status` picked the newest-created job, so a
+  queued profanity pass masked a running visual pass — it read as "stuck");
+  status now returns every in-flight job per film, running first. Still missing:
+  a time-remaining **ETA** — the worker records only `fraction` + `stage`
+  (elapsed ÷ progress would give one).
 - **Cancel button.** _Partly done (plugin 0.2.0.2)._ A bulk **"Cancel all
   analysis"** button now appears in the grid whenever a job is queued/running,
   backed by a new worker `POST /api/jobs/cancel-all` and cooperative
@@ -250,6 +256,21 @@ its box (`[ ]` → `[x]`), and move the **← NEXT** marker on.
   so an interruption costs minutes, not the whole run.
 
 ## Recent changes
+
+### Live analysis progress + running-not-hidden fix (2026-08-09, plugin 0.2.1.1)
+
+- **Root cause of "queued but nothing happening"** — `/api/status` matched one
+  job per file name by *newest created*. A film analyzed for two engines at once
+  (visual + profanity) has two jobs; the profanity one, queued a moment later,
+  masked the running visual pass, so the grid showed "queued" while a multi-hour
+  pass was already 40%+ done.
+- **Worker** — `/api/status` now returns **every** in-flight job per film
+  (`jobs[]`, running/rendering first) plus a headline `job`; `JobBrief` carries
+  its `engine`. Test added for the two-engine case.
+- **Plugin (0.2.1.1)** — grid cards and the film view show each pass with its
+  engine label, live percent and a progress bar; the film view starts showing
+  progress on open (no need to click Analyze) and loads findings the moment the
+  last pass finishes.
 
 ### Slice 3 — render a clean copy from the film view (2026-08-08)
 

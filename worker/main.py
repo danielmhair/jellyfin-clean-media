@@ -343,10 +343,24 @@ def status_for_media(req: StatusRequest) -> list[MediaStatus]:
     queued or running.
     """
     # Match jobs by file name rather than fingerprint: fingerprinting reads
-    # 24MB per film, which is far too slow for a whole page of a library.
-    jobs_by_name: dict[str, Job] = {}
-    for job in store.list_jobs():  # newest first, so the first win is the latest
-        jobs_by_name.setdefault(Path(job.mediaPath).name.lower(), job)
+    # 24MB per film, which is far too slow for a whole page of a library. Keep
+    # every job per name (newest first), not just one: a film can have several
+    # engines queued/running at once, and a running pass hidden behind a queued
+    # one of the same file read as "stuck".
+    jobs_by_name: dict[str, list[Job]] = {}
+    for job in store.list_jobs():  # newest first
+        jobs_by_name.setdefault(Path(job.mediaPath).name.lower(), []).append(job)
+
+    # Show a running/rendering pass before a queued one; both before anything
+    # finished. Within a rank the newest wins (the list is already newest-first
+    # and the sort is stable).
+    active_rank = {JobStatus.running: 0, JobStatus.rendering: 1, JobStatus.queued: 2}
+
+    def brief(job: Job) -> JobBrief:
+        return JobBrief(
+            id=job.id, status=job.status, progress=job.progress,
+            stage=job.stage, error=job.error, engine=job.engine,
+        )
 
     out: list[MediaStatus] = []
     for path in req.paths or []:
@@ -357,21 +371,25 @@ def status_for_media(req: StatusRequest) -> list[MediaStatus]:
             continue
 
         status.resolvedPath = str(media)
-        job = jobs_by_name.get(media.name.lower())
-        if job:
-            status.job = JobBrief(
-                id=job.id,
-                status=job.status,
-                progress=job.progress,
-                stage=job.stage,
-                error=job.error,
-            )
+        film_jobs = jobs_by_name.get(media.name.lower(), [])
+
+        active = sorted(
+            (j for j in film_jobs if j.status in active_rank),
+            key=lambda j: active_rank[j.status],
+        )
+        status.jobs = [brief(j) for j in active]
+        # Headline: the top active job, else the newest job of any kind (so a
+        # lone "failed" still surfaces).
+        headline = active[0] if active else (film_jobs[0] if film_jobs else None)
+        status.job = brief(headline) if headline else None
 
         # Reading the sidecar is a NAS round trip; skip it unless the cached
         # index says one exists, or a finished job means it was just written.
         # An unanalyzed library page then does zero per-film NAS I/O and stays
         # fast (the sequential per-film stat is what timed out the grid).
-        just_analyzed = job is not None and job.status in (JobStatus.completed, JobStatus.rendered)
+        just_analyzed = any(
+            j.status in (JobStatus.completed, JobStatus.rendered) for j in film_jobs
+        )
         if sidecar_exists(media) or just_analyzed:
             timeline = timeline_for(media)
             if timeline is not None:

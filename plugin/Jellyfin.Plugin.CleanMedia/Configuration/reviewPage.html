@@ -86,6 +86,10 @@
                     <span id="CmAnalyzeResult" class="fieldDescription"></span>
                 </div>
 
+                <!-- Live progress for any analysis/render pass on this film,
+                     one line each. Populated by the poller while work runs. -->
+                <div id="CmFilmJobs" class="cmFilmJobs"></div>
+
                 <div style="margin:1em 0;display:flex;gap:.6em;flex-wrap:wrap;align-items:center;">
                     <button is="emby-button" type="button" id="CmNextUndecided"
                             class="raised emby-button"><span>Next undecided</span></button>
@@ -139,6 +143,14 @@
     .cmActions{display:flex;gap:.5em;flex-wrap:wrap;margin-top:.7em;}
     .cmWarn{color:#e3b341;font-size:12px;margin-top:.5em;}
     .cmSmall{padding:.3em .8em!important;font-size:12px!important;min-width:0!important;}
+
+    .cmFilmJobs{margin:.6em 0;}
+    .cmJobLine{font-size:13px;margin:.35em 0;color:#00a4dc;}
+    .cmJobLine.cmQueued{color:#e3b341;}
+    .cmBar{height:6px;background:#333;border-radius:3px;overflow:hidden;
+           margin-top:.25em;max-width:420px;}
+    .cmBarFill{height:100%;background:#00a4dc;transition:width .3s;}
+    .cmState .cmJobLine{margin:.2em 0;font-size:12px;}
 </style>
 
 <script type="text/javascript">
@@ -161,7 +173,7 @@
                 views[k].style.display = k === name ? '' : 'none';
             });
             if (name !== 'film') { player.pause(); player.removeAttribute('src'); player.load(); }
-            if (name !== 'film') { stopRenderPoll(); }
+            if (name !== 'film') { stopRenderPoll(); stopFilmPoll(); }
             if (name !== 'items') { stopPolling(); }
             message.textContent = '';
         }
@@ -200,6 +212,30 @@
                 seconds = seconds * 60 + n;
             }
             return Math.round(seconds * 1000);
+        }
+
+        var ENGINE_LABELS = {
+            subtitles: 'Profanity (subtitles)',
+            whisper: 'Profanity (whisper)',
+            vlm: 'Visual scenes',
+            render: 'Rendering'
+        };
+        function engineLabel(e) { return ENGINE_LABELS[e] || e || 'analysis'; }
+
+        function bar(pct) {
+            pct = Math.max(0, Math.min(100, Math.round(pct)));
+            return '<div class="cmBar"><div class="cmBarFill" style="width:'
+                + pct + '%"></div></div>';
+        }
+
+        // The active analysis/render passes for one film, as jobs[] (with the
+        // one-job `job` as a fallback for an older worker).
+        function activeJobs(s) {
+            var jobs = (s && s.jobs) || (s && s.job ? [s.job] : []);
+            return jobs.filter(function (j) {
+                return j.status === 'running' || j.status === 'rendering'
+                    || j.status === 'queued';
+            });
         }
 
         function api(method, path, query, body) {
@@ -301,16 +337,25 @@
 
         function stateText(s) {
             if (!s) { return { cls: 'cmNone', text: 'checking&hellip;' }; }
-            var job = s.job;
-            if (job && (job.status === 'queued' || job.status === 'running')) {
-                return {
-                    cls: 'cmRunning',
-                    text: job.status === 'queued' ? 'queued for analysis'
-                        : 'analyzing ' + Math.round((job.progress || 0) * 100) + '%'
-                            + (job.stage ? ' — ' + escapeHtml(job.stage) : '')
-                };
+            var active = activeJobs(s);
+            if (active.length) {
+                // One line per pass, each with its own percent — so a running
+                // visual pass and a queued profanity pass both show, rather
+                // than one hiding behind the other.
+                var lines = active.map(function (j) {
+                    if (j.status === 'queued') {
+                        return '<div class="cmJobLine cmQueued">'
+                            + escapeHtml(engineLabel(j.engine)) + ' — queued</div>';
+                    }
+                    var pct = Math.round((j.progress || 0) * 100);
+                    return '<div class="cmJobLine">' + escapeHtml(engineLabel(j.engine))
+                        + ' ' + pct + '%'
+                        + (j.stage ? ' — ' + escapeHtml(j.stage) : '')
+                        + bar(pct) + '</div>';
+                });
+                return { cls: 'cmRunning', text: lines.join('') };
             }
-            if (job && job.status === 'failed') {
+            if (s.job && s.job.status === 'failed') {
                 return { cls: 'cmFail', text: 'analysis failed' };
             }
             if (!s.analyzed) { return { cls: 'cmNone', text: 'not analyzed' }; }
@@ -359,8 +404,7 @@
         function schedulePoll() {
             stopPolling();
             var busy = Object.keys(state.statuses).some(function (id) {
-                var job = state.statuses[id].job;
-                return job && (job.status === 'queued' || job.status === 'running');
+                return activeJobs(state.statuses[id]).length > 0;
             });
             // Only offer "Cancel all" while something is actually queued/running.
             var cancelBtn = page.querySelector('#CmCancelAll');
@@ -386,6 +430,7 @@
             page.querySelector('#CmFilmName').textContent = item.Name;
             page.querySelector('#CmAnalyzeResult').textContent = '';
             page.querySelector('#CmRenderResult').textContent = '';
+            page.querySelector('#CmFilmJobs').innerHTML = '';
             page.querySelector('#CmFindings').innerHTML =
                 '<p class="fieldDescription">Loading findings&hellip;</p>';
 
@@ -402,6 +447,10 @@
             };
 
             loadFindings();
+            // Show live progress for any pass already running/queued on this
+            // film (e.g. a visual pass queued earlier from the grid), without
+            // needing to click Analyze.
+            pollFilmProgress(itemId, false);
         }
 
         function stopFilmPoll() {
@@ -412,30 +461,56 @@
             if (state.renderPoll) { clearTimeout(state.renderPoll); state.renderPoll = null; }
         }
 
-        // While an analysis of the open film runs, show its progress here and
-        // load the findings the moment it finishes — no trip back to the grid.
-        function pollFilmJob() {
-            if (!state.film) { return; }
-            var filmId = state.film.Id;
+        // Draw one line per in-flight pass on the open film — each with its own
+        // engine label and percent — into the film-view progress area.
+        function renderFilmJobs(jobs) {
+            var el = page.querySelector('#CmFilmJobs');
+            if (!el) { return; }
+            var active = activeJobs({ jobs: jobs });
+            el.innerHTML = active.map(function (j) {
+                if (j.status === 'queued') {
+                    return '<div class="cmJobLine cmQueued">'
+                        + escapeHtml(engineLabel(j.engine)) + ' — queued</div>';
+                }
+                var pct = Math.round((j.progress || 0) * 100);
+                return '<div class="cmJobLine">' + escapeHtml(engineLabel(j.engine))
+                    + ' ' + pct + '%' + (j.stage ? ' — ' + escapeHtml(j.stage) : '')
+                    + bar(pct) + '</div>';
+            }).join('');
+        }
+
+        // Poll the open film's analysis/render progress, showing each pass and
+        // loading the findings the moment the last one finishes — no trip back
+        // to the grid. `wasActive` means a pass was running last tick, so its
+        // disappearance is a completion worth reloading findings for.
+        function pollFilmProgress(filmId, wasActive) {
+            if (!state.film || state.film.Id !== filmId) { return; }
             api('POST', 'Status', {}, { itemIds: [filmId] }).then(function (res) {
                 if (!state.film || state.film.Id !== filmId) { return; }  // navigated away
                 var out = page.querySelector('#CmAnalyzeResult');
-                if (res.unreachable) { out.textContent = 'Worker unreachable — check the Worker URL.'; return; }
-                var s = (res.items || [])[0];
-                var job = s && s.job;
-                if (job && (job.status === 'queued' || job.status === 'running')) {
-                    out.textContent = job.status === 'queued'
-                        ? 'Queued for analysis…'
-                        : 'Analyzing ' + Math.round((job.progress || 0) * 100) + '%'
-                            + (job.stage ? ' — ' + job.stage : '');
-                    state.filmPoll = setTimeout(pollFilmJob, 3000);
-                } else if (job && job.status === 'failed') {
-                    out.textContent = 'Analysis failed.';
-                } else {
-                    out.textContent = (s && s.analyzed) ? ('Done — ' + s.total + ' finding(s).') : 'Done.';
-                    loadFindings();
+                if (res.unreachable) {
+                    out.textContent = 'Worker unreachable — check the Worker URL.';
+                    return;
                 }
-            }).catch(function () { state.filmPoll = setTimeout(pollFilmJob, 5000); });
+                var s = (res.items || [])[0] || {};
+                var jobs = s.jobs || (s.job ? [s.job] : []);
+                var active = activeJobs(s);
+                renderFilmJobs(jobs);
+                if (active.length) {
+                    out.textContent = '';  // the per-pass lines say it better
+                    state.filmPoll = setTimeout(function () {
+                        pollFilmProgress(filmId, true);
+                    }, 3000);
+                    return;
+                }
+                var failed = jobs.filter(function (j) { return j.status === 'failed'; })[0];
+                out.textContent = failed ? 'Analysis failed.' : '';
+                if (wasActive) { loadFindings(); }  // a pass just finished
+            }).catch(function () {
+                state.filmPoll = setTimeout(function () {
+                    pollFilmProgress(filmId, wasActive);
+                }, 5000);
+            });
         }
 
         function confirmThen(text, onOk) {
@@ -720,7 +795,7 @@
                         return;
                     }
                     stopFilmPoll();
-                    pollFilmJob();
+                    pollFilmProgress(film.Id, true);
                 }).catch(function (err) { out.textContent = 'Could not queue: ' + err; });
             };
             // The visual pass is GPU-heavy and takes hours; guard that one.

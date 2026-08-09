@@ -111,6 +111,8 @@ public class JobBrief
     [JsonPropertyName("stage")] public string Stage { get; set; } = string.Empty;
 
     [JsonPropertyName("error")] public string? Error { get; set; }
+
+    [JsonPropertyName("engine")] public string Engine { get; set; } = string.Empty;
 }
 
 /// <summary>Review state of one film.</summary>
@@ -131,6 +133,8 @@ public class MediaStatus
     [JsonPropertyName("pending")] public int Pending { get; set; }
 
     [JsonPropertyName("job")] public JobBrief? Job { get; set; }
+
+    [JsonPropertyName("jobs")] public List<JobBrief> Jobs { get; set; } = new();
 }
 
 /// <summary>How many jobs a cancel-all request stopped.</summary>

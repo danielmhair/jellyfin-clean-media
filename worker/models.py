@@ -121,6 +121,9 @@ class JobBrief(BaseModel):
     progress: float = 0.0
     stage: str = ""
     error: Optional[str] = None
+    #: Which engine this job runs, so the grid can label concurrent passes
+    #: on one film ("visual 44%, profanity queued") rather than showing one.
+    engine: str = ""
 
 
 class MediaStatus(BaseModel):
@@ -134,7 +137,12 @@ class MediaStatus(BaseModel):
     approved: int = 0
     rejected: int = 0
     pending: int = 0
+    #: The headline job for a one-line status: a running/rendering pass wins
+    #: over a queued one, which wins over the newest finished/failed job.
     job: Optional[JobBrief] = None
+    #: Every in-flight job for this film (running/rendering/queued), most
+    #: active first — so the grid can show each concurrent pass's own percent.
+    jobs: list[JobBrief] = Field(default_factory=list)
 
 
 class StatusRequest(BaseModel):

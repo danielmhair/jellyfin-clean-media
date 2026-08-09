@@ -128,5 +128,35 @@ def test_running_analysis_is_reported_alongside_counts(client, tmp_path, monkeyp
     store.delete_job("job1")
 
 
+def test_running_pass_is_not_hidden_behind_a_queued_one(client, tmp_path):
+    """Two engines on one film: a running visual pass must be the headline,
+    even when a profanity pass was queued a moment later (same file name).
+    The grid read the newest-created job, showing 'queued' while a multi-hour
+    pass was already running."""
+    from worker.main import store
+    from worker.models import Job, JobStatus
+
+    media = _film(tmp_path, "Two Engines.mkv")
+    # vlm created first, whisper queued just after — newest-first ordering
+    # would otherwise pick the queued whisper.
+    store.save_job(Job(id="vlm1", mediaPath=str(media), engine="vlm",
+                       status=JobStatus.running, progress=0.45, stage="2300/5404 samples"))
+    store.save_job(Job(id="whis1", mediaPath=str(media), engine="whisper",
+                       status=JobStatus.queued))
+
+    body = client.post("/api/status", json={"paths": ["Two Engines.mkv"]}).json()
+
+    assert body[0]["job"]["status"] == "running"
+    assert body[0]["job"]["engine"] == "vlm"
+    assert body[0]["job"]["progress"] == 0.45
+    # Both in-flight passes are reported, running first, each with its engine.
+    assert [(j["engine"], j["status"]) for j in body[0]["jobs"]] == [
+        ("vlm", "running"), ("whisper", "queued")
+    ]
+
+    store.delete_job("vlm1")
+    store.delete_job("whis1")
+
+
 def test_empty_request_is_answered_empty(client):
     assert client.post("/api/status", json={"paths": []}).json() == []
