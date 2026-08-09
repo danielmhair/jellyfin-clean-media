@@ -39,6 +39,8 @@
                     </select>
                     <button is="emby-button" type="button" id="CmQueueVisible"
                             class="raised emby-button"><span>Queue shown videos</span></button>
+                    <button is="emby-button" type="button" id="CmCancelAll"
+                            class="raised emby-button" style="display:none;"><span>Cancel all analysis</span></button>
                     <span id="CmQueueResult" class="fieldDescription"></span>
                 </div>
 
@@ -323,6 +325,9 @@
                 var job = state.statuses[id].job;
                 return job && (job.status === 'queued' || job.status === 'running');
             });
+            // Only offer "Cancel all" while something is actually queued/running.
+            var cancelBtn = page.querySelector('#CmCancelAll');
+            if (cancelBtn) { cancelBtn.style.display = busy ? '' : 'none'; }
             if (busy && views.items.style.display !== 'none') {
                 state.poll = setTimeout(loadStatus, 5000);
             }
@@ -615,6 +620,34 @@
                 });
             } else if (window.confirm(text)) {
                 doQueue(items, engine);
+            }
+        });
+
+        page.querySelector('#CmCancelAll').addEventListener('click', function () {
+            var out = page.querySelector('#CmQueueResult');
+            var run = function () {
+                out.textContent = 'Cancelling…';
+                api('POST', 'Jobs/CancelAll', {}).then(function (res) {
+                    if (res.unreachable) {
+                        out.textContent = 'Could not reach the worker.';
+                        return;
+                    }
+                    out.textContent = 'Cancelled ' + (res.cancelled || 0) + ' job(s).';
+                    loadStatus();
+                }).catch(function (err) { out.textContent = 'Could not cancel: ' + err; });
+            };
+            var text = 'Cancel all queued and running analysis jobs?';
+            if (window.require) {
+                window.require(['confirm'], function (confirm) {
+                    confirm({
+                        title: 'Cancel analysis',
+                        text: text,
+                        confirmText: 'Cancel all',
+                        cancelText: 'Keep running'
+                    }).then(run, function () { /* kept running */ });
+                });
+            } else if (window.confirm(text)) {
+                run();
             }
         });
 

@@ -50,11 +50,23 @@ the review-UI PRD):
 - **Progress bar + ETA.** Cards show a live text percentage but no graphical
   bar and no time-remaining; the worker's progress callback records only
   `fraction` + `stage`, never an ETA (elapsed ÷ progress would give one).
-- **Cancel button.** Cancellation exists as an endpoint but has no button in
-  the grid (review-UI PRD slice 3, story 40).
+- **Cancel button.** _Partly done (plugin 0.2.0.2)._ A bulk **"Cancel all
+  analysis"** button now appears in the grid whenever a job is queued/running,
+  backed by a new worker `POST /api/jobs/cancel-all` and cooperative
+  cancellation (a running pass aborts at its next progress tick; the record is
+  left `cancelled`, never resurrected). `DELETE /api/jobs/{id}` now cancels an
+  active job rather than deleting a row the running pass re-creates. Still
+  missing: a per-card cancel (story 40).
 - **No subtitle → whisper fallback.** The default profanity engine finds
   nothing on a film with no subtitle track; there's no automatic fallback to
   the audio (whisper) pass.
+- **Worker only sees `movies/`.** The real library lives on the NAS
+  (`/media/…`, `/volume1/…` as Jellyfin sees it); the worker resolves those to
+  local files by filename inside `CLEANMEDIA_MEDIA_ROOTS`. `resolve_media` now
+  caches a filename→path index (walk once per 5 min, not per lookup) so a large
+  root is usable, but the root still has to be pointed at media reachable from
+  the worker machine (re-run `install-service.ps1 -MediaRoots …`, `-UsePassword`
+  for a UNC/SMB share). Pending the actual share path.
 
 ## Bugs (fix next)
 

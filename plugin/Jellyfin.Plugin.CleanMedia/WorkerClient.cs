@@ -129,6 +129,12 @@ public class MediaStatus
     [JsonPropertyName("job")] public JobBrief? Job { get; set; }
 }
 
+/// <summary>How many jobs a cancel-all request stopped.</summary>
+public class CancelAllResult
+{
+    [JsonPropertyName("cancelled")] public int Cancelled { get; set; }
+}
+
 /// <summary>Talks to the Clean Media worker over HTTP.</summary>
 public class WorkerClient
 {
@@ -346,6 +352,31 @@ public class WorkerClient
             .DeleteAsync($"{Base}/api/jobs/{Uri.EscapeDataString(jobId)}", cancellationToken)
             .ConfigureAwait(false);
         return response.IsSuccessStatusCode;
+    }
+
+    /// <summary>
+    /// Cancel every queued or running job. Returns how many were cancelled, or
+    /// null if the worker could not be reached.
+    /// </summary>
+    public async Task<int?> CancelAllJobsAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var client = NewClient();
+            using var response = await client
+                .PostAsync($"{Base}/api/jobs/cancel-all", null, cancellationToken)
+                .ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+            var result = await response.Content
+                .ReadFromJsonAsync<CancelAllResult>(cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            return result?.Cancelled ?? 0;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            _logger.LogWarning(ex, "Clean Media worker unreachable at {Url}", Config.WorkerUrl);
+            return null;
+        }
     }
 
     /// <summary>Review state for a page of the library, or null if the worker is unreachable.</summary>

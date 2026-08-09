@@ -345,6 +345,19 @@ public class CleanMediaController : ControllerBase
         return Ok(new { ok });
     }
 
+    /// <summary>Cancel every queued or running job at once.</summary>
+    [HttpPost("Jobs/CancelAll")]
+    public async Task<ActionResult<object>> CancelAllJobs(CancellationToken cancellationToken)
+    {
+        var cancelled = await _worker.CancelAllJobsAsync(cancellationToken).ConfigureAwait(false);
+        if (cancelled is null)
+        {
+            return Ok(new { unreachable = true });
+        }
+
+        return Ok(new { cancelled });
+    }
+
     /// <summary>Ask the worker for its health, from the server.</summary>
     [HttpGet("TestConnection")]
     public async Task<ActionResult<object>> TestConnection(CancellationToken cancellationToken)
