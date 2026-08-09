@@ -227,6 +227,7 @@ From an **elevated** PowerShell in the repo root:
 ```powershell
 .\scripts\install-service.ps1
 .\scripts\install-service.ps1 -MediaRoots "D:\Movies;D:\TV" -Port 8765
+.\scripts\install-service.ps1 -Restart      # after pulling new worker code
 .\scripts\install-service.ps1 -Uninstall
 ```
 
@@ -256,12 +257,16 @@ password with the task.
 Get-Content "$env:LOCALAPPDATA\CleanMedia\worker.log" -Tail 40   # what went wrong
 Get-ScheduledTask CleanMediaWorker | Get-ScheduledTaskInfo       # last run result
 
-# restart it after pulling new worker code
-Stop-ScheduledTask CleanMediaWorker; Start-ScheduledTask CleanMediaWorker
+# restart it after pulling new worker code (elevated)
+.\scripts\install-service.ps1 -Restart
 ```
 
 A stale worker serving old code looks exactly like a bug in the new code —
-restart the task after every `git pull`.
+restart after every `git pull`. Use `-Restart`, **not** a bare
+`Stop-ScheduledTask; Start-ScheduledTask`: ending the task leaves the uvicorn
+process it spawned orphaned on the port, and that orphan runs in a service
+context only an elevated `taskkill` (which `-Restart` does for you) or a
+reboot can clear.
 
 ### One folder per movie
 

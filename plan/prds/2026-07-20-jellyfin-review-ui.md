@@ -304,9 +304,20 @@ Built. Covers stories 36–42.
 - ✅ Live progress and stage in the grid, polled only while work is running
 - ✅ Failed analyses surfaced on the card
 
-Partial: cancellation exists as an endpoint but has no button in the grid
-yet (story 40). Per-film queueing is only available via the filter — there
-is no per-card queue button (story 36 is satisfied by the batch path).
+**Unfinished (tracked in the [PROGRESS.md](../../PROGRESS.md) sliced roadmap):**
+
+- Story 36 — **per-card Analyze is not built.** Queueing is bulk-only: the
+  "Queue shown videos" button acts on every film matching the current filter.
+  The intended per-film action — hover a poster and analyze *that* film from
+  its own card — was never implemented; the batch path is a partial substitute,
+  not the story. (PROGRESS.md slice 3.)
+- Story 40 — cancellation exists as a worker endpoint and plugin proxy but has
+  no button in the grid. (PROGRESS.md slice 5.)
+
+Other stories carried into the roadmap rather than built here: story 11 (sort
+by pending), story 26 (nudge a boundary by small increments), story 28 (preview
+the segment as it will play — trimmed/muted), story 35 (overlapping findings
+shown clearly). (PROGRESS.md slice 9.)
 
 ## Out of Scope
 
