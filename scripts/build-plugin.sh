@@ -14,7 +14,14 @@ cd "$(dirname "$0")/.."
 proj=plugin/Jellyfin.Plugin.CleanMedia
 dist=plugin/dist/CleanMedia
 
-echo "==> building"
+# Single source of truth: the meta.json version tracks the csproj AssemblyVersion,
+# so a local dev build never claims a stale version (release-plugin.sh reads the
+# same field). Bump the version in the csproj, not here.
+version=$(sed -n 's#.*<AssemblyVersion>\([^<]*\)</AssemblyVersion>.*#\1#p' \
+  "$proj/Jellyfin.Plugin.CleanMedia.csproj")
+[ -n "$version" ] || { echo "could not read AssemblyVersion from the csproj" >&2; exit 1; }
+
+echo "==> building $version"
 dotnet build "$proj" -c Release --nologo | tail -3
 
 dll="$proj/bin/Release/net9.0/Jellyfin.Plugin.CleanMedia.dll"
@@ -24,7 +31,7 @@ rm -rf plugin/dist
 mkdir -p "$dist"
 cp "$dll" "$dist/"
 
-cat > "$dist/meta.json" <<'JSON'
+cat > "$dist/meta.json" <<JSON
 {
   "guid": "6f1d0a2e-6c2b-4a1f-9a6d-1c5b2f8e4d31",
   "name": "Clean Media",
@@ -32,7 +39,7 @@ cat > "$dist/meta.json" <<'JSON'
   "overview": "Fetches approved findings from your Clean Media worker and reports them to Jellyfin as skippable media segments.",
   "owner": "danielmhair",
   "category": "General",
-  "version": "0.1.0.0",
+  "version": "$version",
   "targetAbi": "10.11.0.0",
   "framework": "net9.0"
 }
