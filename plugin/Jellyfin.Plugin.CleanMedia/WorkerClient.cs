@@ -57,6 +57,21 @@ public class Timeline
     [JsonPropertyName("segments")] public List<TimelineSegment> Segments { get; set; } = new();
 }
 
+/// <summary>
+/// Outcome of asking the worker for a film's findings. Separates an
+/// unreachable worker from a film that simply has not been analyzed, so the
+/// review page can say which is true rather than showing "no findings" for a
+/// worker that is actually down.
+/// </summary>
+public class FindingsResult
+{
+    /// <summary>The worker could not be reached (down, wrong URL, or timed out).</summary>
+    public bool Unreachable { get; init; }
+
+    /// <summary>The film's findings, or null when the worker has not analyzed it.</summary>
+    public Timeline? Timeline { get; init; }
+}
+
 /// <summary>GPU details from the worker's health endpoint.</summary>
 public class GpuInfo
 {
@@ -178,8 +193,12 @@ public class WorkerClient
         return $"{Base}/api/segments{id}?path={Uri.EscapeDataString(mediaPath)}";
     }
 
-    /// <summary>Every finding for a film, reviewed or not — what the editor shows.</summary>
-    public async Task<Timeline?> GetFindingsAsync(string mediaPath, CancellationToken cancellationToken)
+    /// <summary>
+    /// Every finding for a film, reviewed or not — what the editor shows. The
+    /// result flags an unreachable worker separately from a not-yet-analyzed
+    /// film so the page never mistakes one for the other.
+    /// </summary>
+    public async Task<FindingsResult> GetFindingsAsync(string mediaPath, CancellationToken cancellationToken)
     {
         try
         {
@@ -191,18 +210,19 @@ public class WorkerClient
                 .ConfigureAwait(false);
             if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
             {
-                return null;  // not analyzed yet
+                return new FindingsResult();  // reachable, just not analyzed yet
             }
 
             response.EnsureSuccessStatusCode();
-            return await response.Content
+            var timeline = await response.Content
                 .ReadFromJsonAsync<Timeline>(cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
+            return new FindingsResult { Timeline = timeline };
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {
             _logger.LogWarning(ex, "Clean Media worker unreachable at {Url}", Config.WorkerUrl);
-            return null;
+            return new FindingsResult { Unreachable = true };
         }
     }
 

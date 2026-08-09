@@ -162,8 +162,13 @@ public class CleanMediaController : ControllerBase
             return NotFound();
         }
 
-        var timeline = await _worker.GetFindingsAsync(path, cancellationToken).ConfigureAwait(false);
-        return Ok(new { analyzed = timeline is not null, segments = timeline?.Segments });
+        var result = await _worker.GetFindingsAsync(path, cancellationToken).ConfigureAwait(false);
+        return Ok(new
+        {
+            unreachable = result.Unreachable,
+            analyzed = result.Timeline is not null,
+            segments = result.Timeline?.Segments,
+        });
     }
 
     /// <summary>Approve, reject or retime a finding.</summary>

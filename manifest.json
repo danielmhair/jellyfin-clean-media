@@ -9,6 +9,14 @@
     "imageUrl": "",
     "versions": [
       {
+        "version": "0.2.0.1",
+        "changelog": "See the repository for changes.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.0.1.zip",
+        "checksum": "5c104a4bdca1471733562a2c7dcc7bbd",
+        "timestamp": "2026-08-09T02:28:50"
+      },
+      {
         "version": "0.2.0.0",
         "changelog": "See the repository for changes.",
         "targetAbi": "10.11.0.0",

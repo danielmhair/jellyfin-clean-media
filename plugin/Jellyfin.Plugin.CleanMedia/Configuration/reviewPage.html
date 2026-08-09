@@ -297,6 +297,12 @@
                 if (res.unreachable) {
                     message.textContent = 'Could not reach the worker. Check the Worker URL '
                         + 'on the Clean Media settings page.';
+                    // Leaving the cards on "checking…" reads as "still working";
+                    // say plainly that the worker is down instead.
+                    state.items.forEach(function (i) {
+                        var el = page.querySelector('#cmState-' + i.Id);
+                        if (el) { el.className = 'cmState cmFail'; el.innerHTML = 'worker unreachable'; }
+                    });
                     return;
                 }
                 (res.items || []).forEach(function (s) {
@@ -354,6 +360,16 @@
 
         function loadFindings() {
             return api('GET', 'Findings', { itemId: state.film.Id }).then(function (res) {
+                if (res.unreachable) {
+                    // A down worker returns no segments; without this it would
+                    // look identical to a film with nothing flagged.
+                    state.segments = [];
+                    page.querySelector('#CmFindings').innerHTML =
+                        '<p class="fieldDescription">Could not reach the worker &mdash; check the '
+                        + 'Worker URL on the Clean Media settings page.</p>';
+                    updateProgress();
+                    return;
+                }
                 state.segments = res.segments || [];
                 renderFindings();
             }).catch(function (err) {
@@ -561,10 +577,7 @@
 
         // -- queueing --------------------------------------------------------
 
-        page.querySelector('#CmQueueVisible').addEventListener('click', function () {
-            var items = visibleItems();
-            if (!items.length) { return; }
-            var engine = page.querySelector('#CmEngine').value;
+        function doQueue(items, engine) {
             var out = page.querySelector('#CmQueueResult');
             out.textContent = 'Queueing ' + items.length + '…';
 
@@ -578,6 +591,31 @@
             }).catch(function (err) {
                 out.textContent = 'Could not queue: ' + err;
             });
+        }
+
+        page.querySelector('#CmQueueVisible').addEventListener('click', function () {
+            var items = visibleItems();
+            if (!items.length) { return; }
+            var engine = page.querySelector('#CmEngine').value;
+            var engineSel = page.querySelector('#CmEngine');
+            var engineLabel = engineSel.options[engineSel.selectedIndex].text;
+            // Guard the batch: one click here can queue a whole library for
+            // hours of analysis, so confirm the count and engine first.
+            var text = 'Queue ' + items.length + ' video' + (items.length === 1 ? '' : 's')
+                + ' for analysis (' + engineLabel + ')? Analysis runs on the worker and can '
+                + 'take a while and use significant CPU/GPU.';
+            if (window.require) {
+                window.require(['confirm'], function (confirm) {
+                    confirm({
+                        title: 'Queue analysis',
+                        text: text,
+                        confirmText: 'Queue ' + items.length,
+                        cancelText: 'Cancel'
+                    }).then(function () { doQueue(items, engine); }, function () { /* cancelled */ });
+                });
+            } else if (window.confirm(text)) {
+                doQueue(items, engine);
+            }
         });
 
         page.querySelector('#CmFilter').addEventListener('change', renderItems);
