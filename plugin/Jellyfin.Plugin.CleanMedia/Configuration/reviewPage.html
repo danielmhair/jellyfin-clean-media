@@ -67,12 +67,20 @@
                     <div id="CmPlayerNote" class="fieldDescription"></div>
                 </div>
 
-                <div style="margin:1em 0;display:flex;gap:.6em;flex-wrap:wrap;align-items:center;">
-                    <select is="emby-select" id="CmFilmEngine" style="max-width:240px;">
-                        <option value="subtitles">Profanity (subtitles) — fast</option>
-                        <option value="whisper">Profanity (whisper) — slower</option>
-                        <option value="vlm">Visual scenes (VLM) — hours</option>
-                    </select>
+                <div style="margin:1em 0;display:flex;gap:1.2em;flex-wrap:wrap;align-items:center;">
+                    <span class="fieldDescription" style="margin:0;">Analyze for:</span>
+                    <label class="emby-checkbox-label">
+                        <input type="checkbox" is="emby-checkbox" class="cmEngine" value="subtitles" checked />
+                        <span>Profanity (subtitles) — fast</span>
+                    </label>
+                    <label class="emby-checkbox-label">
+                        <input type="checkbox" is="emby-checkbox" class="cmEngine" value="whisper" />
+                        <span>Profanity (whisper) — slower</span>
+                    </label>
+                    <label class="emby-checkbox-label">
+                        <input type="checkbox" is="emby-checkbox" class="cmEngine" value="vlm" />
+                        <span>Visual scenes — hours</span>
+                    </label>
                     <button is="emby-button" type="button" id="CmAnalyzeFilm"
                             class="raised button-submit emby-button"><span>Analyze this film</span></button>
                     <span id="CmAnalyzeResult" class="fieldDescription"></span>
@@ -642,15 +650,23 @@
         page.querySelector('#CmAnalyzeFilm').addEventListener('click', function () {
             if (!state.film) { return; }
             var film = state.film;
-            var sel = page.querySelector('#CmFilmEngine');
-            var engine = sel.value;
-            var engineLabel = sel.options[sel.selectedIndex].text;
+            var engines = Array.prototype.slice
+                .call(page.querySelectorAll('.cmEngine'))
+                .filter(function (c) { return c.checked; })
+                .map(function (c) { return c.value; });
             var out = page.querySelector('#CmAnalyzeResult');
+            if (!engines.length) { out.textContent = 'Pick at least one analysis type.'; return; }
             var run = function () {
                 out.textContent = 'Queuing…';
-                api('POST', 'Analyze', {}, { itemIds: [film.Id], engine: engine }).then(function (res) {
-                    var queued = (res.queued || []).filter(function (q) { return q.jobId; });
-                    if (!queued.length) {
+                // One job per selected engine — the worker runs them in order.
+                Promise.all(engines.map(function (engine) {
+                    return api('POST', 'Analyze', {}, { itemIds: [film.Id], engine: engine });
+                })).then(function (results) {
+                    var queued = 0;
+                    results.forEach(function (res) {
+                        (res.queued || []).forEach(function (q) { if (q.jobId) { queued++; } });
+                    });
+                    if (!queued) {
                         out.textContent = 'Could not queue — the worker could not find this file '
                             + 'under its media roots.';
                         return;
@@ -660,9 +676,9 @@
                 }).catch(function (err) { out.textContent = 'Could not queue: ' + err; });
             };
             // The visual pass is GPU-heavy and takes hours; guard that one.
-            if (engine === 'vlm') {
+            if (engines.indexOf('vlm') !== -1) {
                 confirmThen('Visual analysis of "' + film.Name + '" can take hours and is '
-                    + 'GPU-heavy. Start it now?', run);
+                    + 'GPU-heavy. Start the selected analyses now?', run);
             } else {
                 run();
             }
