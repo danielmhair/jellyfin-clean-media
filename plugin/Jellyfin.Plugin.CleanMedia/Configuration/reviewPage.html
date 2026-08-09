@@ -68,6 +68,17 @@
                 </div>
 
                 <div style="margin:1em 0;display:flex;gap:.6em;flex-wrap:wrap;align-items:center;">
+                    <select is="emby-select" id="CmFilmEngine" style="max-width:240px;">
+                        <option value="subtitles">Profanity (subtitles) — fast</option>
+                        <option value="whisper">Profanity (whisper) — slower</option>
+                        <option value="vlm">Visual scenes (VLM) — hours</option>
+                    </select>
+                    <button is="emby-button" type="button" id="CmAnalyzeFilm"
+                            class="raised button-submit emby-button"><span>Analyze this film</span></button>
+                    <span id="CmAnalyzeResult" class="fieldDescription"></span>
+                </div>
+
+                <div style="margin:1em 0;display:flex;gap:.6em;flex-wrap:wrap;align-items:center;">
                     <button is="emby-button" type="button" id="CmNextUndecided"
                             class="raised emby-button"><span>Next undecided</span></button>
                     <button is="emby-button" type="button" id="CmAdd"
@@ -349,9 +360,11 @@
         function openFilm(itemId) {
             var item = state.items.filter(function (i) { return i.Id === itemId; })[0];
             if (!item) { return; }
+            stopFilmPoll();
             state.film = item;
             show('film');
             page.querySelector('#CmFilmName').textContent = item.Name;
+            page.querySelector('#CmAnalyzeResult').textContent = '';
             page.querySelector('#CmFindings').innerHTML =
                 '<p class="fieldDescription">Loading findings&hellip;</p>';
 
@@ -368,6 +381,45 @@
             };
 
             loadFindings();
+        }
+
+        function stopFilmPoll() {
+            if (state.filmPoll) { clearTimeout(state.filmPoll); state.filmPoll = null; }
+        }
+
+        // While an analysis of the open film runs, show its progress here and
+        // load the findings the moment it finishes — no trip back to the grid.
+        function pollFilmJob() {
+            if (!state.film) { return; }
+            var filmId = state.film.Id;
+            api('POST', 'Status', {}, { itemIds: [filmId] }).then(function (res) {
+                if (!state.film || state.film.Id !== filmId) { return; }  // navigated away
+                var out = page.querySelector('#CmAnalyzeResult');
+                if (res.unreachable) { out.textContent = 'Worker unreachable — check the Worker URL.'; return; }
+                var s = (res.items || [])[0];
+                var job = s && s.job;
+                if (job && (job.status === 'queued' || job.status === 'running')) {
+                    out.textContent = job.status === 'queued'
+                        ? 'Queued for analysis…'
+                        : 'Analyzing ' + Math.round((job.progress || 0) * 100) + '%'
+                            + (job.stage ? ' — ' + job.stage : '');
+                    state.filmPoll = setTimeout(pollFilmJob, 3000);
+                } else if (job && job.status === 'failed') {
+                    out.textContent = 'Analysis failed.';
+                } else {
+                    out.textContent = (s && s.analyzed) ? ('Done — ' + s.total + ' finding(s).') : 'Done.';
+                    loadFindings();
+                }
+            }).catch(function () { state.filmPoll = setTimeout(pollFilmJob, 5000); });
+        }
+
+        function confirmThen(text, onOk) {
+            if (window.require) {
+                window.require(['confirm'], function (confirm) {
+                    confirm({ title: 'Confirm', text: text, confirmText: 'Yes', cancelText: 'Cancel' })
+                        .then(onOk, function () { /* cancelled */ });
+                });
+            } else if (window.confirm(text)) { onOk(); }
         }
 
         function loadFindings() {
@@ -587,6 +639,35 @@
             }).catch(failed);
         });
 
+        page.querySelector('#CmAnalyzeFilm').addEventListener('click', function () {
+            if (!state.film) { return; }
+            var film = state.film;
+            var sel = page.querySelector('#CmFilmEngine');
+            var engine = sel.value;
+            var engineLabel = sel.options[sel.selectedIndex].text;
+            var out = page.querySelector('#CmAnalyzeResult');
+            var run = function () {
+                out.textContent = 'Queuing…';
+                api('POST', 'Analyze', {}, { itemIds: [film.Id], engine: engine }).then(function (res) {
+                    var queued = (res.queued || []).filter(function (q) { return q.jobId; });
+                    if (!queued.length) {
+                        out.textContent = 'Could not queue — the worker could not find this file '
+                            + 'under its media roots.';
+                        return;
+                    }
+                    stopFilmPoll();
+                    pollFilmJob();
+                }).catch(function (err) { out.textContent = 'Could not queue: ' + err; });
+            };
+            // The visual pass is GPU-heavy and takes hours; guard that one.
+            if (engine === 'vlm') {
+                confirmThen('Visual analysis of "' + film.Name + '" can take hours and is '
+                    + 'GPU-heavy. Start it now?', run);
+            } else {
+                run();
+            }
+        });
+
         // -- queueing --------------------------------------------------------
 
         function doQueue(items, engine) {
@@ -673,6 +754,7 @@
         });
         page.querySelectorAll('.cmBackToItems').forEach(function (b) {
             b.addEventListener('click', function () {
+                stopFilmPoll();
                 show('items');
                 // Counts changed while reviewing; refresh rather than lie.
                 loadStatus();

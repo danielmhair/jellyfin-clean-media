@@ -60,13 +60,16 @@ the review-UI PRD):
 - **No subtitle → whisper fallback.** The default profanity engine finds
   nothing on a film with no subtitle track; there's no automatic fallback to
   the audio (whisper) pass.
-- **Worker only sees `movies/`.** The real library lives on the NAS
-  (`/media/…`, `/volume1/…` as Jellyfin sees it); the worker resolves those to
-  local files by filename inside `CLEANMEDIA_MEDIA_ROOTS`. `resolve_media` now
-  caches a filename→path index (walk once per 5 min, not per lookup) so a large
-  root is usable, but the root still has to be pointed at media reachable from
-  the worker machine (re-run `install-service.ps1 -MediaRoots …`, `-UsePassword`
-  for a UNC/SMB share). Pending the actual share path.
+- **Worker media roots — now wired to the NAS (2026-08-08).** The real library
+  lives on the NAS (Jellyfin sees it as `/media/…`); the worker resolves those to
+  local files by filename inside `CLEANMEDIA_MEDIA_ROOTS`, now pointed at
+  `\\Nas\nas-8tb-hdd\Movies` and **verified reading it**. The task runs via
+  `install-service.ps1 -AtLogon` (user's session → NAS access, no stored
+  password). `resolve_media` caches an `os.walk` index (filename→path + which
+  sidecars exist), rebuilt every 30 min and pre-warmed at startup. Open question
+  for the generic plugin: how *anyone* points the worker at their media —
+  direct/mounted (default), co-located worker, or an optional copy-locally mode
+  for slow/flaky shares (see "Open decisions").
 
 ## Bugs (fix next)
 
@@ -101,6 +104,25 @@ next-to-fix first. Tick when fixed and verified against the running dashboard.
   the review page now carries a "⚙ Worker settings" button that navigates
   straight to the config page by name. _Verify:_ from the review page, the button
   opens the Worker URL / timeout settings.
+- [x] **Grid "worker unreachable" on a NAS library (status timeout).** With the
+  media root on a NAS, opening a folder (e.g. Marvel, 53 films) reported "worker
+  unreachable" even though the connection test passed. Cause: `/api/status`
+  read each film's sidecar with a **per-film stat over SMB, sequentially** —
+  ~0.8s each × 53 = ~44s, past the plugin's 30s timeout. Also the media index
+  used `Path.rglob + is_file()`, a stat per file, making the cold walk minutes.
+  **Fixed 2026-08-08:** the index walk uses `os.walk` (no per-file stat) and now
+  also records which sidecars exist, so `/api/status` answers "analyzed?" from
+  memory — an unanalyzed page does **zero per-film NAS I/O**. Marvel status went
+  44s → **1s** (measured on the real Jellyfin→worker path). A parallelization
+  attempt was reverted — concurrent SMB stats made a home NAS *slower*. Worker
+  also pre-warms the index at startup. _Verify:_ a NAS folder lists in ~1s.
+- [x] **`install-service.ps1` false "worker did not answer".** Every restart
+  reported the worker as down even though it was up. `/api/health` pings Ollama
+  and takes ~2.1s; both health-check loops used a 2s timeout, so every poll
+  raced and lost. **Fixed 2026-08-08:** both loops use a 15s timeout. Also added
+  `-AtLogon` (run the worker in the user's session for network/NAS access with
+  no stored password — a PIN can't be stored with a boot task) and a clearer
+  `-UsePassword` prompt (Windows password, not the NAS login).
 
 ## Sliced roadmap
 
@@ -131,28 +153,32 @@ access and a running Jellyfin; slice 3 onward is code an agent can write.
   to 17,165 and now carries the current markers (Type-filter row, bulk
   "Bad — act on all", "Play flagged part only") that the pre-restart build was
   missing. Confirmed against a real film's sidecar, not just the exit code.
-- [ ] **Slice 1 — Plugin into a running Jellyfin. ← NEXT** The `0.2.0.0` release
-  is now **published and verified live** on GitHub (pushed 2026-08-08): the raw
-  manifest's newest version is `0.2.0.0` and its zip returns HTTP 200 with a
-  matching checksum, so Jellyfin can install it straight from the repo. Add the
-  repository in Dashboard → Plugins → Repositories:
-  `https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/manifest.json`,
-  install Clean Media, restart Jellyfin. (The plugin C# is unchanged since
-  `0.2.0.0`, so no rebuild/bump is needed; `build-plugin.sh` now stamps its
-  `meta.json` from the csproj, so a local dev build no longer claims a stale
-  version.) _Done when:_ "Clean Media Review" appears in the dashboard main menu
-  and its settings connection test passes (test server-side; use the LAN
-  address, not a Tailscale IP, if Jellyfin runs in a Docker bridge).
-- [ ] **Slice 2 — Prove the loop on one film.** Grid → queue analysis → watch live
-  progress → review findings → approve one → play the film. _Done when:_
-  Jellyfin skips the approved span during playback on a real client.
-- [ ] **Slice 3 — Per-video Analyze button.** Finishes the unbuilt half of story 36
-  in the review-UI PRD (today's queueing is bulk-only, via the filter). Plugin:
-  hover a poster card → an Analyze button on that card → queues just that one
-  film; while it runs the card shows its own progress. No worker change — the
-  single-film submit path already exists (`POST /api/jobs`, one media path).
-  _Done when:_ hovering one unanalyzed film and clicking Analyze queues that
-  film and nothing else, and the card transitions to "analyzing".
+- [x] **Slice 1 — Plugin into a running Jellyfin.** _Done, verified 2026-08-08._
+  The release is published on GitHub (now `0.2.0.4`) and installs from the repo
+  manifest
+  (`https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/manifest.json`).
+  "Clean Media Review" appears in the dashboard main menu and the settings
+  **connection test passes** ("Connected. Worker 0.1.0 | engines: vlm,
+  subtitles, pureframe, whisper | GPU: RTX 3050"). Worker URL is the LAN
+  address `http://192.168.68.98:8765` (the Jellyfin server runs in Docker at
+  `192.168.68.58`; a Tailscale IP would not route). `build-plugin.sh` now stamps
+  `meta.json` from the csproj so a dev build never claims a stale version.
+- [ ] **Slice 2 — Prove the loop on one film. ← NEXT** Grid → analyze (now via the
+  per-film button, slice 3) → watch progress → review findings → approve one →
+  play the film. _Progress:_ the grid lists the real NAS library and opens a film;
+  analysis can be started per film. _Still to verify:_ run an analysis to
+  completion, approve a finding, and confirm Jellyfin **skips the approved span
+  during playback** on a real client. That last step is the actual _done when_.
+- [x] **Slice 3 — Per-video Analyze button.** _Done 2026-08-08 (plugin 0.2.0.4)._
+  Built on the **film detail page** (rather than card-hover): an engine picker
+  (Profanity fast / whisper / Visual) + an "Analyze this film" button that queues
+  just that film via `POST /CleanMedia/Analyze` with one itemId. While it runs the
+  page shows live status ("Analyzing NN% — stage") by polling `/CleanMedia/Status`
+  for that film, and auto-loads the findings the moment it completes; the
+  hours-long visual pass asks for confirmation first. _Done when (met):_ opening
+  one film and clicking Analyze queues that film and nothing else and the page
+  transitions to "analyzing". (A card-hover Analyze on the grid is still a
+  possible addition.)
 - [ ] **Slice 4 — "Analyze for everything" (both engines).** Worker: let a submit
   queue both the profanity and visual passes for a film (chain, or accept a
   list of engines). Plugin: a Quick / Deep / Both choice on the per-card
@@ -223,7 +249,28 @@ access and a running Jellyfin; slice 3 onward is code an agent can write.
   mid-pass; the engine now retries per request and resumes from checkpoint,
   so an interruption costs minutes, not the whole run.
 
-## Recent changes (this session)
+## Recent changes
+
+### Deploy & first-run-in-Jellyfin session (2026-08-08)
+
+- **Deployed and proven reachable end to end** — worker restarted onto current
+  code (Slice 0), plugin published and installed from the repo manifest (Slice
+  1), grid lists the real NAS library. Plugin releases `0.2.0.1`–`0.2.0.4`.
+- **Media roots on the NAS** — worker now reads `\\Nas\nas-8tb-hdd\Movies` via
+  `-AtLogon`; `os.walk` index (filename→path + sidecar set), pre-warmed, 30-min
+  TTL. Fixed a 500 when a root is unreachable (`is_dir()` raising over SMB).
+- **Grid status made NAS-fast** — `/api/status` no longer stats each film's
+  sidecar over SMB; Marvel (53 films) went 44s → 1s, clearing the "worker
+  unreachable" timeout.
+- **Per-film Analyze button** (Slice 3) — engine picker + live progress on the
+  film page, auto-loads findings when done.
+- **Cancel** — "Cancel all analysis" button + `POST /api/jobs/cancel-all`, with
+  real cooperative cancellation; `DELETE /api/jobs/{id}` cancels active jobs.
+- **Honest unreachable + Settings reachable + Queue confirm** — see Bugs above.
+- **`install-service.ps1`** — `-AtLogon`, 15s health-check timeout (was falsely
+  reporting "did not answer"), clearer `-UsePassword` prompt.
+
+### Word-timing / VLM session
 
 - **Word-timing precision** — cut mute padding (200→70 ms) and the minimum
   window (400→240 ms); single-word cues now use tight ASR word timing rather
