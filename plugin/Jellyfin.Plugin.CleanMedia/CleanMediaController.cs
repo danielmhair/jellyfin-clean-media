@@ -141,6 +141,7 @@ public class CleanMediaController : ControllerBase
                 pending = s.Pending,
                 job = s.Job,
                 jobs = s.Jobs,
+                enginesDone = s.EnginesDone,
             }),
         });
     }
@@ -417,6 +418,20 @@ public class CleanMediaController : ControllerBase
         }
 
         return Ok(new { cancelled });
+    }
+
+    /// <summary>Bits of plugin config the review page needs in the browser.</summary>
+    /// <remarks>
+    /// The worker URL lets the page open the worker's own standalone review
+    /// page for a film. It is only exposed to an elevated admin (this whole
+    /// controller requires elevation), and it is the same URL the admin typed
+    /// into settings.
+    /// </remarks>
+    [HttpGet("Config")]
+    public ActionResult<object> Config()
+    {
+        var workerUrl = (Plugin.Instance?.Configuration.WorkerUrl ?? string.Empty).TrimEnd('/');
+        return Ok(new { workerUrl });
     }
 
     /// <summary>Ask the worker for its health, from the server.</summary>

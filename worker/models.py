@@ -143,6 +143,9 @@ class MediaStatus(BaseModel):
     #: Every in-flight job for this film (running/rendering/queued), most
     #: active first — so the grid can show each concurrent pass's own percent.
     jobs: list[JobBrief] = Field(default_factory=list)
+    #: Analysis engines that have already completed for this film, so the UI
+    #: can stop offering to re-run one that is already done.
+    enginesDone: list[str] = Field(default_factory=list)
 
 
 class StatusRequest(BaseModel):

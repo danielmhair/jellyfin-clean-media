@@ -383,6 +383,14 @@ def status_for_media(req: StatusRequest) -> list[MediaStatus]:
         headline = active[0] if active else (film_jobs[0] if film_jobs else None)
         status.job = brief(headline) if headline else None
 
+        # Analysis engines already finished for this film, so the UI can stop
+        # offering to re-run one that is done. "render" is not an analysis
+        # engine, so restrict to the registered detectors.
+        status.enginesDone = sorted({
+            j.engine for j in film_jobs
+            if j.status in (JobStatus.completed, JobStatus.rendered) and j.engine in ENGINES
+        })
+
         # Reading the sidecar is a NAS round trip; skip it unless the cached
         # index says one exists, or a finished job means it was just written.
         # An unanalyzed library page then does zero per-film NAS I/O and stays

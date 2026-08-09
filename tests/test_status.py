@@ -158,5 +158,27 @@ def test_running_pass_is_not_hidden_behind_a_queued_one(client, tmp_path):
     store.delete_job("whis1")
 
 
+def test_finished_engines_are_reported(client, tmp_path):
+    """The UI stops offering an engine that already ran; a render job is not an
+    analysis engine and must not appear among them."""
+    from worker.main import store
+    from worker.models import Job, JobStatus
+
+    media = _film(tmp_path, "Done Engines.mkv")
+    store.save_job(Job(id="d1", mediaPath=str(media), engine="subtitles",
+                       status=JobStatus.completed))
+    store.save_job(Job(id="d2", mediaPath=str(media), engine="vlm",
+                       status=JobStatus.running, progress=0.1))
+    store.save_job(Job(id="d3", mediaPath=str(media), engine="render",
+                       status=JobStatus.rendered))
+
+    body = client.post("/api/status", json={"paths": ["Done Engines.mkv"]}).json()
+
+    assert body[0]["enginesDone"] == ["subtitles"]  # not vlm (running), not render
+
+    for jid in ("d1", "d2", "d3"):
+        store.delete_job(jid)
+
+
 def test_empty_request_is_answered_empty(client):
     assert client.post("/api/status", json={"paths": []}).json() == []

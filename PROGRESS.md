@@ -257,6 +257,22 @@ its box (`[ ]` → `[x]`), and move the **← NEXT** marker on.
 
 ## Recent changes
 
+### Film-view polish (2026-08-09, plugin 0.2.1.2)
+
+- **ETA** next to each pass's percent, estimated client-side from the rate of
+  progress across polls (so it works without a worker restart; the worker still
+  reports only `fraction`).
+- **No re-queuing done/in-flight engines** — the film view disables an engine
+  that is already running, queued, or completed. Worker `/api/status` now
+  reports `enginesDone` per film; the plugin also infers "done" from findings
+  already present, so it degrades gracefully on an un-restarted worker.
+- **Fewer dead controls** — "Next undecided" is hidden until there are findings;
+  "Add finding at playhead" only shows when the film actually plays (it needs a
+  real playhead, which an un-transcodable MKV/DVD in the browser doesn't give).
+- **Worker review-page link** — a button opens the worker's standalone
+  `/api/review?path=` page for the film (via a new `GET /CleanMedia/Config` that
+  hands the browser the worker URL), shown once the film has findings.
+
 ### Live analysis progress + running-not-hidden fix (2026-08-09, plugin 0.2.1.1)
 
 - **Root cause of "queued but nothing happening"** — `/api/status` matched one

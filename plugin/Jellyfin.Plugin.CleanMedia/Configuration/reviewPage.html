@@ -92,9 +92,11 @@
 
                 <div style="margin:1em 0;display:flex;gap:.6em;flex-wrap:wrap;align-items:center;">
                     <button is="emby-button" type="button" id="CmNextUndecided"
-                            class="raised emby-button"><span>Next undecided</span></button>
+                            class="raised emby-button" style="display:none;"><span>Next undecided</span></button>
                     <button is="emby-button" type="button" id="CmAdd"
-                            class="raised emby-button"><span>+ Add finding at playhead</span></button>
+                            class="raised emby-button" style="display:none;"><span>+ Add finding at playhead</span></button>
+                    <button is="emby-button" type="button" id="CmOpenReview"
+                            class="raised emby-button" style="display:none;"><span>&#8599; Worker review page</span></button>
                 </div>
 
                 <!-- Mutes and blurs can't be applied during playback, so acting
@@ -164,7 +166,10 @@
         var message = page.querySelector('#CmMessage');
         var player = page.querySelector('#CmPlayer');
 
-        var state = { items: [], statuses: {}, film: null, segments: [], poll: null };
+        var state = {
+            items: [], statuses: {}, film: null, segments: [], poll: null,
+            filmStatus: null, workerUrl: '', canPlay: false, playingClip: false
+        };
 
         // -- helpers ---------------------------------------------------------
 
@@ -236,6 +241,37 @@
                 return j.status === 'running' || j.status === 'rendering'
                     || j.status === 'queued';
             });
+        }
+
+        // ETA from the rate of progress across polls, smoothed. The worker only
+        // reports a fraction, so we estimate the remaining time client-side —
+        // which also means it works without waiting for a worker restart. Needs
+        // a couple of ticks of movement before it can say anything.
+        var etaState = {};  // jobId -> { t, p, rate }
+        function etaFor(job) {
+            if (!job || (job.status !== 'running' && job.status !== 'rendering')) { return ''; }
+            var now = Date.now();
+            var p = job.progress || 0;
+            var st = etaState[job.id];
+            if (st && p > st.p && now > st.t) {
+                var inst = (p - st.p) / ((now - st.t) / 1000);  // fraction per second
+                st.rate = st.rate ? st.rate * 0.7 + inst * 0.3 : inst;
+            }
+            if (!st) { st = etaState[job.id] = { rate: 0 }; }
+            st.t = now; st.p = p;
+            if (!st.rate || p >= 1) { return ''; }
+            var secs = (1 - p) / st.rate;
+            return isFinite(secs) && secs > 0 ? fmtEta(secs) : '';
+        }
+
+        function fmtEta(secs) {
+            secs = Math.round(secs);
+            if (secs < 60) { return '~' + secs + 's left'; }
+            var m = Math.round(secs / 60);
+            if (m < 60) { return '~' + m + 'm left'; }
+            var h = Math.floor(m / 60);
+            m = m % 60;
+            return '~' + h + 'h ' + (m ? m + 'm ' : '') + 'left';
         }
 
         function api(method, path, query, body) {
@@ -348,8 +384,10 @@
                             + escapeHtml(engineLabel(j.engine)) + ' — queued</div>';
                     }
                     var pct = Math.round((j.progress || 0) * 100);
+                    var eta = etaFor(j);
                     return '<div class="cmJobLine">' + escapeHtml(engineLabel(j.engine))
                         + ' ' + pct + '%'
+                        + (eta ? ' · ' + eta : '')
                         + (j.stage ? ' — ' + escapeHtml(j.stage) : '')
                         + bar(pct) + '</div>';
                 });
@@ -426,6 +464,10 @@
             stopFilmPoll();
             stopRenderPoll();
             state.film = item;
+            state.filmStatus = null;
+            state.canPlay = false;
+            state.playingClip = false;
+            refreshAddButton();
             show('film');
             page.querySelector('#CmFilmName').textContent = item.Name;
             page.querySelector('#CmAnalyzeResult').textContent = '';
@@ -444,6 +486,10 @@
                 page.querySelector('#CmPlayerNote').textContent =
                     'This browser cannot play this file directly (MKV and DVD sources '
                     + 'often need transcoding). Use "Play clip" on a finding instead.';
+                if (!state.playingClip) { state.canPlay = false; refreshAddButton(); }
+            };
+            player.oncanplay = function () {
+                if (!state.playingClip) { state.canPlay = true; refreshAddButton(); }
             };
 
             loadFindings();
@@ -461,6 +507,15 @@
             if (state.renderPoll) { clearTimeout(state.renderPoll); state.renderPoll = null; }
         }
 
+        // "Add finding at playhead" only makes sense when the film itself is
+        // playing (so the playhead is a real film time). It stays hidden when
+        // the browser can't play the file, and while a padded clip is playing —
+        // a clip's playhead is relative to the clip, not the film.
+        function refreshAddButton() {
+            var add = page.querySelector('#CmAdd');
+            if (add) { add.style.display = (state.canPlay && !state.playingClip) ? '' : 'none'; }
+        }
+
         // Draw one line per in-flight pass on the open film — each with its own
         // engine label and percent — into the film-view progress area.
         function renderFilmJobs(jobs) {
@@ -473,10 +528,52 @@
                         + escapeHtml(engineLabel(j.engine)) + ' — queued</div>';
                 }
                 var pct = Math.round((j.progress || 0) * 100);
+                var eta = etaFor(j);
                 return '<div class="cmJobLine">' + escapeHtml(engineLabel(j.engine))
-                    + ' ' + pct + '%' + (j.stage ? ' — ' + escapeHtml(j.stage) : '')
+                    + ' ' + pct + '%' + (eta ? ' · ' + eta : '')
+                    + (j.stage ? ' — ' + escapeHtml(j.stage) : '')
                     + bar(pct) + '</div>';
             }).join('');
+        }
+
+        // Disable analysis choices that are pointless: an engine already
+        // running/queued for this film, or one that has already finished. Keeps
+        // the reviewer from re-queuing a pass they've already done.
+        function updateEngineControls() {
+            var s = state.filmStatus || {};
+            var inflight = {};
+            activeJobs(s).forEach(function (j) { if (j.engine) { inflight[j.engine] = j.status; } });
+            var done = {};
+            (s.enginesDone || []).forEach(function (e) { done[e] = true; });
+            // Also treat an engine that already produced findings as done, so
+            // this works even before the worker reports enginesDone.
+            (state.segments || []).forEach(function (seg) {
+                if (seg.engine && seg.engine !== 'manual') { done[seg.engine] = true; }
+            });
+
+            var anyRunnable = false;
+            page.querySelectorAll('.cmEngine').forEach(function (cb) {
+                var span = cb.parentNode.querySelector('span');
+                if (span && !span.getAttribute('data-base')) {
+                    span.setAttribute('data-base', span.textContent);
+                }
+                var base = span ? span.getAttribute('data-base') : '';
+                var suffix = '', blocked = false;
+                if (inflight[cb.value]) {
+                    suffix = inflight[cb.value] === 'queued' ? ' — queued' : ' — running';
+                    blocked = true;
+                } else if (done[cb.value]) {
+                    suffix = ' — done';
+                    blocked = true;
+                }
+                cb.disabled = blocked;
+                if (blocked) { cb.checked = false; } else { anyRunnable = true; }
+                if (span) { span.textContent = base + suffix; }
+                if (cb.parentNode) { cb.parentNode.style.opacity = blocked ? '.55' : ''; }
+            });
+
+            var analyzeBtn = page.querySelector('#CmAnalyzeFilm');
+            if (analyzeBtn) { analyzeBtn.disabled = !anyRunnable; }
         }
 
         // Poll the open film's analysis/render progress, showing each pass and
@@ -493,9 +590,11 @@
                     return;
                 }
                 var s = (res.items || [])[0] || {};
+                state.filmStatus = s;
                 var jobs = s.jobs || (s.job ? [s.job] : []);
                 var active = activeJobs(s);
                 renderFilmJobs(jobs);
+                updateEngineControls();
                 if (active.length) {
                     out.textContent = '';  // the per-pass lines say it better
                     state.filmPoll = setTimeout(function () {
@@ -619,6 +718,8 @@
                 seekTo(seg.startMs);
             });
             row.querySelector('.cmClip').addEventListener('click', function () {
+                state.playingClip = true;
+                refreshAddButton();
                 player.src = ApiClient.getUrl('CleanMedia/Clip', {
                     itemId: state.film.Id, startMs: seg.startMs, endMs: seg.endMs
                 });
@@ -706,7 +807,16 @@
             page.querySelector('#CmFilmProgress').textContent = state.segments.length
                 ? decided + ' of ' + state.segments.length + ' decided'
                 : '';
+            // "Next undecided" only makes sense once there are findings to step
+            // through; the worker review page only exists once one is analyzed.
+            var hasFindings = state.segments.length > 0;
+            page.querySelector('#CmNextUndecided').style.display = hasFindings ? '' : 'none';
+            var review = page.querySelector('#CmOpenReview');
+            if (review) {
+                review.style.display = (hasFindings && state.workerUrl && state.film) ? '' : 'none';
+            }
             updateRenderNote();
+            updateEngineControls();
         }
 
         // What a "Render clean copy" would act on, kept in step with the
@@ -768,6 +878,15 @@
                 loadFindings();
                 message.textContent = 'Added a 3s finding at the playhead — adjust its timings below.';
             }).catch(failed);
+        });
+
+        page.querySelector('#CmOpenReview').addEventListener('click', function () {
+            if (!state.workerUrl || !state.film) { return; }
+            // The worker resolves a film by file name, so its own mount path
+            // works. Opens the worker's standalone review page in a new tab
+            // (a full navigation, so not subject to the browser's CORS rules).
+            var path = state.film.Path || state.film.Name;
+            window.open(state.workerUrl + '/api/review?path=' + encodeURIComponent(path), '_blank');
         });
 
         page.querySelector('#CmAnalyzeFilm').addEventListener('click', function () {
@@ -961,6 +1080,11 @@
 
         function refresh() {
             show('library');
+            // The worker URL powers the "Worker review page" link; if it can't
+            // be read the button simply stays hidden.
+            api('GET', 'Config').then(function (res) {
+                state.workerUrl = (res && res.workerUrl) || '';
+            }).catch(function () { state.workerUrl = ''; });
             loadLibraries().then(function () { Dashboard.hideLoadingMsg(); });
         }
 
