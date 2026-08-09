@@ -126,25 +126,21 @@ next-to-fix first. Tick when fixed and verified against the running dashboard.
 
 ## Sliced roadmap
 
-Ordered so each slice is independently grabbable and ends in something
-observable — "done when" is the invariant to check, not the exit code. Deploy
-first (slices 0–2); nothing else matters until the current build is proven in a
-real Jellyfin. Features and deferred PRD stories after (slices 3–10), each a
-thin vertical (worker + plugin + verify).
+Ordered by what we want to prove, in order (set 2026-08-08): go **deep on one
+film first** — review → skip → mute → to-the-word timing — then bad scenes, then
+voice-only mute, and only **then** bulk queue/cancel. Analyzing a whole library
+is explicitly *not* the first test; one film, reviewed properly, is. Each slice
+is a thin vertical (worker + plugin + verify) that ends in something observable
+on a real film — "done when" is the invariant to check, not the exit code.
 
 **Starting fresh?** This section is the whole to-do list. Read
 [CLAUDE.md](CLAUDE.md) for run commands, layout and gotchas;
 [clean-media-prd.md](plan/prds/clean-media-prd.md) and
 [the review-UI PRD](plan/prds/2026-07-20-jellyfin-review-ui.md) for the *why*.
-Slices 9–10 are review-UI PRD stories that were deferred, not built. Story
-numbers below refer to that PRD.
 
 **How to work this doc:** the next step is always the first unchecked slice,
-marked **← NEXT**. Implement it, verify its _done when_ against a real film,
-tick its box (`[ ]` → `[x]`), and move the **← NEXT** marker to the following
-slice. That is what "implement the next step in PROGRESS.md and update it after"
-means. Slices 0–2 are deploy-and-verify and need an operator with elevated
-access and a running Jellyfin; slice 3 onward is code an agent can write.
+marked **← NEXT**. Implement it, verify its _done when_ against a real film, tick
+its box (`[ ]` → `[x]`), and move the **← NEXT** marker on.
 
 - [x] **Slice 0 — Worker on current code.** Restarted the boot service with
   `install-service.ps1 -Restart` (elevated). _Done, verified 2026-08-08:_
@@ -163,65 +159,58 @@ access and a running Jellyfin; slice 3 onward is code an agent can write.
   address `http://192.168.68.98:8765` (the Jellyfin server runs in Docker at
   `192.168.68.58`; a Tailscale IP would not route). `build-plugin.sh` now stamps
   `meta.json` from the csproj so a dev build never claims a stale version.
-- [ ] **Slice 2 — Prove the loop on one film. ← NEXT** Grid → analyze (now via the
-  per-film button, slice 3) → watch progress → review findings → approve one →
-  play the film. _Progress:_ the grid lists the real NAS library and opens a film;
-  analysis can be started per film. _Still to verify:_ run an analysis to
-  completion, approve a finding, and confirm Jellyfin **skips the approved span
-  during playback** on a real client. That last step is the actual _done when_.
-- [x] **Slice 3 — Per-video Analyze button.** _Done 2026-08-08 (plugin 0.2.0.4)._
-  Built on the **film detail page** (rather than card-hover): an engine picker
-  (Profanity fast / whisper / Visual) + an "Analyze this film" button that queues
-  just that film via `POST /CleanMedia/Analyze` with one itemId. While it runs the
-  page shows live status ("Analyzing NN% — stage") by polling `/CleanMedia/Status`
-  for that film, and auto-loads the findings the moment it completes; the
-  hours-long visual pass asks for confirmation first. _Done when (met):_ opening
-  one film and clicking Analyze queues that film and nothing else and the page
-  transitions to "analyzing". (A card-hover Analyze on the grid is still a
-  possible addition.)
-- [ ] **Slice 4 — "Analyze for everything" (both engines).** Worker: let a submit
-  queue both the profanity and visual passes for a film (chain, or accept a
-  list of engines). Plugin: a Quick / Deep / Both choice on the per-card
-  Analyze action from slice 3. _Done when:_ choosing "Both" on one film
-  produces profanity and visual findings without a second action.
-- [ ] **Slice 5 — Progress bar + ETA + cancel.** Worker: add an ETA to
-  `JobBrief`/`MediaStatus` (elapsed ÷ progress). Plugin: swap the text percent
-  for a `<progress>` bar with time-left, and wire the existing cancel endpoint
-  to a grid button (story 40). _Done when:_ a running visual pass shows a moving
-  bar with a plausible time-left, and Cancel stops it.
-- [ ] **Slice 6 — Subtitle → whisper fallback.** Worker: when a film has no
-  subtitle track, fall back to the whisper audio pass (or surface a distinct
-  "no subtitles" state) instead of reporting zero findings. _Done when:_ a
-  subtitle-less film still gets profanity findings from audio.
-- [ ] **Slice 7 — Word-lock timing editor.** Worker: a peaks endpoint (ffmpeg →
-  PCM → downsampled JSON) for a padded window. Plugin: zoom the finding to
-  ±~1.5 s, draw the waveform, drag start/end handles, loop-play the selected
-  span *with the mute applied*; save via the existing `startMs`/`endMs` patch.
-  _Done when:_ a reviewer can move a mute onto the exact word by ear and the
-  new bounds persist to the sidecar.
-- [ ] **Slice 8 — Voice-only mute.** Worker: Demucs 2-stem separation on a padded
-  window around a finding, zero the vocals across the mute span, remix; add it
-  as a mode in `mute_render` and a "Play voice-removed" preview. Plugin: expose
-  "voice-only" as an action. _Done when:_ a rendered clean copy drops a swear
-  word over music while the music plays through the gap. Render-only.
-- [ ] **Slice 9 — Deferred review-UI PRD stories (editor & grid polish).** Small,
-  independent items left from the review-UI PRD, all plugin-side:
-  - Story 11 — sort the grid by pending count, so the quickest films clear
-    first.
-  - Story 26 — nudge a finding's start/end by small increments (± buttons),
-    to fine-tune without typing a timestamp.
-  - Story 28 — preview the segment as it will actually play: for a skip, jump
-    over it; for a mute, `/api/clip?mute=true` (the worker already supports it).
-  - Story 35 — show overlapping findings clearly, so a reviewer merges or trims
-    rather than stacking redundant skips.
-  _Done when:_ each story's UI works against a real film in the dashboard.
-- [ ] **Slice 10 — Render a clean copy from the review UI** (out of scope in the
-  review-UI PRD, but required before any mute/blur takes effect). Worker render
-  already exists (`POST /api/jobs/{id}/render`, `scripts/render.sh`); this wires
-  a "Render clean copy" action into the film view and surfaces render progress.
-  _Done when:_ approving mutes/blurs on a film and clicking Render produces a
-  clean copy with those actions applied, original untouched. Render-only actions
-  are inert until this exists.
+- [x] **Slice 2 — Per-film Analyze button.** _Done 2026-08-08 (plugin 0.2.0.4)._
+  On the film detail page: an engine picker (Profanity fast / whisper / Visual) +
+  an "Analyze this film" button that queues just that film via
+  `POST /CleanMedia/Analyze`, shows live status ("Analyzing NN% — stage") by
+  polling `/CleanMedia/Status`, and auto-loads the findings the moment it
+  completes; the hours-long visual pass confirms first.
+- [ ] **Slice 3 — One film, end to end: review → skip + mute. ← NEXT** Analyze
+  ONE film for profanity, review the findings, and prove **both** actions:
+  approve a **skip** → Jellyfin skips that span during playback (works live);
+  approve a **mute** → render a clean copy in which the word is silenced. Mute
+  can't happen live, so this wires the worker's existing render
+  (`POST /api/jobs/{id}/render`, `scripts/render.sh`) into the film view as a
+  "Render clean copy" action with progress. _Done when:_ on one film, an approved
+  skip is skipped during playback AND a rendered clean copy has the muted word
+  silenced, original untouched.
+- [ ] **Slice 4 — Word-lock timing editor (by ear, to the millisecond).** The
+  human answer to timings no ASR can place. Zoom a finding to ±~1.5 s, draw the
+  waveform (new worker peaks endpoint: ffmpeg → PCM → downsampled JSON), drag the
+  start/end handles by milliseconds, and loop-play the selected span *with the
+  mute applied* so you tune by ear until the word is gone and the words either
+  side survive. Saves via the existing `startMs`/`endMs` patch (no new
+  persistence); `/api/clip?mute=true` already supplies the looped audio. _Done
+  when:_ a reviewer moves a mute onto the exact word by ear and the new bounds
+  persist to the sidecar.
+- [ ] **Slice 5 — Bad scenes (visual): analyze → review → skip/blur + scene
+  timing.** The same loop as Slices 3–4, for the visual pass. Analyze one film
+  with the VLM, review the scene findings, approve **skip** (live) or **blur**
+  (render), and adjust scene start/end with a frame-preview version of the timing
+  editor (thumbnails/scrub rather than a waveform). _Done when:_ a visual finding
+  on one film can be reviewed, retimed, and skipped or blurred (blur via the
+  render from Slice 3).
+- [ ] **Slice 6 — Voice-only mute (remove the voice, keep the background).**
+  Today a mute silences *all* audio for the span, so a swear over music leaves an
+  audible hole. Instead: Demucs 2-stem separation on a padded ~2–3 s window
+  around the finding, zero **only** the vocals across the mute span, and remix so
+  music / Foley / ambient play through. New mode in `mute_render` ("voice-only"
+  vs "hard mute") + a "Play voice-removed" preview. Render-only. _Done when:_ a
+  rendered clean copy drops a swear over music while the music plays through the
+  gap.
+- [ ] **Slice 7 — Queue many + cancel (bulk).** _Largely built already:_ bulk
+  "Queue shown videos" (with a confirm), "Cancel all analysis" + cooperative
+  cancellation (`POST /api/jobs/cancel-all`), and the per-film Analyze from Slice
+  2. _Remaining:_ per-card Analyze/Cancel on the grid (story 40), a graphical
+  progress bar + ETA (worker adds elapsed ÷ progress to `JobBrief`), and a
+  one-action "analyze for everything" (both engines in one submit). _Done when:_
+  a batch runs with visible per-film progress/ETA and can be cancelled per film.
+- [ ] **Slice 8 — Anything else (polish & deferred PRD stories).** Grid sort by
+  pending count (story 11), ± nudge buttons on a finding (story 26),
+  preview-as-it-plays (story 28: a skip jumps over, a mute via
+  `/api/clip?mute=true`), clear display of overlapping findings (story 35), and a
+  subtitle → whisper fallback when a film has no subtitle track. _Done when:_
+  each works against a real film.
 
 ## Built and validated
 
