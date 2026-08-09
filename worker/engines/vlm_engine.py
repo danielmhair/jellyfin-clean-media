@@ -21,6 +21,7 @@ import base64
 import hashlib
 import json
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -82,23 +83,23 @@ DEFAULT_CATEGORIES = {
 # Observations are also cheap to re-interpret: policy is a pure function
 # over them, so changing what counts re-derives instantly instead of
 # costing another multi-hour pass over the film.
-OBSERVE_PROMPT = """You are looking at one frame from a film. Answer only what you can actually SEE in this frame.
+OBSERVE_PROMPT = """You are looking at one frame from a film. Report only what is plainly visible in THIS frame. When genuinely uncertain, answer false — a human reviews every true.
 
-The frame may be dark — look carefully at low-light detail. Judge only real human bodies: statues, paintings, cartoons, toys and costumed or non-human creatures do not count as people. A figure too small, distant or blurred to make out does not count either.
+Ignore statues, sculptures, mannequins, paintings, cartoons, toys, food, and costumed or non-human creatures, however anatomical or flesh-coloured they look. Judge only real human bodies. A distant or dimly lit real person still counts — look carefully at low-light and small figures before deciding. Clothing in an unusual colour (a jumpsuit, bodysuit, or tight outfit) is still clothing, not bare skin, even where it hugs the body.
 
-Answer every field with true or false:
+Answer each field true only if the stated evidence is actually visible:
 
-- "female_topless": a woman's bare chest or breasts are visible, OR a woman is clearly undressed though turned away
-- "buttocks_or_genitals": anyone's bare buttocks or genitals are visible
-- "underwear_only": someone is in underwear or lingerie
-- "male_shirtless": a man is bare-chested (he may be wearing trousers, shorts or swimwear)
-- "sex_act": people are having sex or simulating it
-- "kissing": two people are kissing
-- "kissing_sexual": that kissing is the sustained, open-mouthed kind meant to be private
-- "sexualised_framing": the camera is presenting a body as an object of desire — lingering on it, posing, stripping — rather than incidentally (swimming, sport, fighting, washing, medical)
+- "female_topless": a woman's BARE breast or nipple is visible, OR she is clearly nude seen from behind with bare back and buttocks. A clothed back, straps, or a bare shoulder alone is false.
+- "buttocks_or_genitals": actual BARE skin of buttocks or genitals is visible on a real person. Anyone clothed — trousers, shorts, a jumpsuit, tight outfit, underwear — is false.
+- "underwear_only": a person is in bra/underwear/lingerie with nothing over it.
+- "male_shirtless": a man's bare chest is visible.
+- "sex_act": people are actively having sex or simulating it, or lying together in evident intimate physical contact in bed.
+- "kissing": two people's LIPS ARE TOUCHING. Faces merely close, foreheads together, an embrace, or about-to-kiss is false.
+- "kissing_sexual": lips are touching AND it is sustained open-mouthed kissing with roaming hands or partial undress.
+- "sexualised_framing": the camera lingers on a real body as an object of desire — posing, stripping — not incidental (sport, fighting, washing, medical).
 
 Respond with JSON only:
-{"female_topless": false, "buttocks_or_genitals": false, "underwear_only": false, "male_shirtless": false, "sex_act": false, "kissing": false, "kissing_sexual": false, "sexualised_framing": false, "description": "<what you see, under 15 words>"}"""
+{"female_topless": false, "buttocks_or_genitals": false, "underwear_only": false, "male_shirtless": false, "sex_act": false, "kissing": false, "kissing_sexual": false, "sexualised_framing": false, "description": "<what you see, under 12 words>"}"""
 
 PROMPT = """You are reviewing a single frame from a film to help a parent decide what to skip.
 
@@ -208,7 +209,14 @@ class VLMEngine(EngineAdapter):
         ok, buf = cv2.imencode(".jpg", boosted, [cv2.IMWRITE_JPEG_QUALITY, 85])
         return buf.tobytes() if ok else jpeg
 
-    def _ask(self, host: str, model: str, jpeg: bytes, prompt: str) -> dict:
+    def _ask(
+        self, host: str, model: str, jpeg: bytes, prompt: str, num_ctx: int = 2048
+    ) -> dict:
+        # num_ctx matters for fit, not just correctness: one 512px frame plus
+        # this prompt and a 300-token reply is well under 2048, and the
+        # smaller the context the less KV cache Ollama reserves — which on a
+        # 4 GB card is the difference between the model sitting on the GPU and
+        # spilling half of itself onto the CPU. Ollama defaults to 4096.
         payload = json.dumps(
             {
                 "model": model,
@@ -222,14 +230,36 @@ class VLMEngine(EngineAdapter):
                 "stream": False,
                 "format": "json",
                 "keep_alive": "30m",
-                "options": {"temperature": 0.0, "num_predict": 300},
+                "options": {
+                    "temperature": 0.0,
+                    "num_predict": 300,
+                    "num_ctx": num_ctx,
+                },
             }
         ).encode()
-        req = urllib.request.Request(
-            f"{host}/api/chat", data=payload, headers={"Content-Type": "application/json"}
-        )
-        with urllib.request.urlopen(req, timeout=300) as r:
-            body = json.loads(r.read())
+        # Retry rather than let one stalled request abort a multi-hour film.
+        # On a VRAM-tight card an occasional inference balloons past the
+        # timeout; a short pause and retry almost always clears it, and the
+        # per-request timeout is kept well under the old 300s so a stall is
+        # caught in a minute, not five.
+        last_exc: Exception | None = None
+        for attempt in range(4):
+            try:
+                req = urllib.request.Request(
+                    f"{host}/api/chat",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=120) as r:
+                    body = json.loads(r.read())
+                break
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                last_exc = exc
+                time.sleep(2 * (attempt + 1))  # 2s, 4s, 6s backoff
+        else:
+            raise TimeoutError(
+                f"Ollama did not answer after 4 attempts: {last_exc}"
+            )
         message = body.get("message") or {}
         content = (message.get("content") or "").strip()
         if not content and message.get("thinking"):
@@ -255,6 +285,7 @@ class VLMEngine(EngineAdapter):
         model = options.get("model", DEFAULT_MODEL)
         max_gap = float(options.get("maxGapS", 2.5))
         action = options.get("action", "skip")
+        num_ctx = int(options.get("numCtx", 2048))
 
         cache = Path(options["shots"]) if options.get("shots") else media_path.with_name(
             media_path.stem + ".shots.json"
@@ -314,6 +345,7 @@ class VLMEngine(EngineAdapter):
             )
 
         by_shot: dict[int, Shot] = {s.index: s for s in shots}
+        consecutive_failures = 0
         for n, (shot, when) in enumerate(plan, 1):
             key = f"{shot.index}:{when:.2f}"
             if key in done:
@@ -322,9 +354,25 @@ class VLMEngine(EngineAdapter):
             if not jpeg:
                 continue
             try:
-                verdict = self._ask(host, model, jpeg, prompt)
-            except (urllib.error.URLError, TimeoutError) as exc:
-                raise RuntimeError(f"Ollama request failed: {exc}") from exc
+                verdict = self._ask(host, model, jpeg, prompt, num_ctx)
+                consecutive_failures = 0
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                # One stalled request must not throw away a multi-hour film.
+                # Leave this sample un-done so a resume retries it, and only
+                # give up if Ollama is persistently unreachable — the
+                # checkpoint is already saved, so a resume picks up here.
+                consecutive_failures += 1
+                save_checkpoint()
+                progress(
+                    0.05 + 0.93 * n / len(plan),
+                    f"sample {n} failed ({consecutive_failures} in a row): {exc}",
+                )
+                if consecutive_failures >= 5:
+                    raise RuntimeError(
+                        f"Ollama unresponsive after {consecutive_failures} "
+                        f"samples; progress saved — rerun to resume"
+                    ) from exc
+                continue
 
             done.add(key)
             # Store the observations, not a verdict. Policy is applied below

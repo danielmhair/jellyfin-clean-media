@@ -6,6 +6,7 @@ Run: uv run uvicorn worker.main:app --host 0.0.0.0 --port 8765
 from __future__ import annotations
 
 import platform
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Response
@@ -14,9 +15,11 @@ from fastapi.responses import FileResponse, HTMLResponse
 from . import __version__
 from .engines import ENGINES
 from .models import (
+    BulkApproval,
     Job,
     JobBrief,
     JobCreate,
+    JobStatus,
     MediaStatus,
     RenderRequest,
     Segment,
@@ -35,7 +38,10 @@ from .review import (
     load_timeline,
     render_page,
     resolve_media,
+    set_approvals,
+    sidecar_exists,
     update_segment,
+    warm_media_index,
 )
 from .store import Store, media_fingerprint
 
@@ -43,6 +49,11 @@ app = FastAPI(title="Clean Media Worker", version=__version__)
 
 store = Store()
 jobs = JobQueue(store)
+
+# Build the media-path index in the background at startup (overlapping model
+# load) so the first review-grid /api/status doesn't wait on a cold walk of a
+# large NAS share and time out the plugin.
+threading.Thread(target=warm_media_index, name="media-index-warm", daemon=True).start()
 
 
 def _gpu_info() -> dict:
@@ -84,6 +95,12 @@ def capabilities() -> dict:
 
 @app.post("/api/jobs", response_model=Job, status_code=201)
 def create_job(req: JobCreate) -> Job:
+    # Jellyfin submits its own mount path (e.g. /media/Marvel/Film.mkv); map it
+    # to the local file the worker can actually open, exactly as /api/status and
+    # /api/segments do. Without this, analysis 404s for every non-local path.
+    resolved = resolve_media(req.mediaPath)
+    if resolved is not None:
+        req.mediaPath = str(resolved)
     try:
         return jobs.submit(req)
     except FileNotFoundError as exc:
@@ -97,6 +114,12 @@ def list_jobs() -> list[Job]:
     return store.list_jobs()
 
 
+@app.post("/api/jobs/cancel-all")
+def cancel_all_jobs() -> dict:
+    """Stop the whole batch: cancel every queued or running job at once."""
+    return {"cancelled": jobs.cancel_all()}
+
+
 @app.get("/api/jobs/{job_id}", response_model=Job)
 def get_job(job_id: str) -> Job:
     job = store.get_job(job_id)
@@ -107,6 +130,10 @@ def get_job(job_id: str) -> Job:
 
 @app.delete("/api/jobs/{job_id}", status_code=204)
 def delete_job(job_id: str) -> None:
+    # Cancel first so a running pass actually stops — deleting the row alone is
+    # undone when the job next saves progress. If it was not active, forget it.
+    if jobs.cancel(job_id):
+        return
     if not store.delete_job(job_id):
         raise HTTPException(404, f"job {job_id} not found")
 
@@ -156,15 +183,40 @@ def thumbnail(path: str, ms: int) -> Response:
 
 
 @app.get("/api/clip")
-def clip(path: str, startMs: int, endMs: int, pad: float = CLIP_PAD_S) -> FileResponse:
-    """A short, browser-playable clip around a finding, for review."""
+def clip(
+    path: str, startMs: int, endMs: int, pad: float = CLIP_PAD_S, mute: bool = False
+) -> FileResponse:
+    """A short, browser-playable clip around a finding, for review.
+
+    With mute=true the flagged span is silenced, so a reviewer can hear the
+    scene as it will play once the finding is acted on — the way to confirm a
+    profanity mute lands on the word.
+    """
     media = resolve_media(path)
     if media is None:
         raise HTTPException(404, f"media not found: {path}")
-    built = build_clip(media, startMs, endMs, pad)
+    built = build_clip(media, startMs, endMs, pad, mute)
     if built is None:
         raise HTTPException(500, "could not build clip")
     return FileResponse(built, media_type="video/mp4")
+
+
+@app.patch("/api/segments", response_model=Timeline)
+def approve_segments(path: str, req: BulkApproval) -> Timeline:
+    """Apply one decision to many findings at once, by media path.
+
+    The review UI calls this when a reviewer bulk-approves or -rejects the
+    findings currently on screen — e.g. every instance of one profane word.
+    One request, one sidecar write; see `set_approvals` for why that matters.
+    """
+    media = resolve_media(path)
+    if media is None:
+        raise HTTPException(404, f"media not found: {path}")
+    set_approvals(media, req.ids, req.approved)
+    timeline = load_timeline(media)
+    if timeline is None:
+        raise HTTPException(404, f"no analysis found for {media}")
+    return timeline
 
 
 @app.patch("/api/segments/{segment_id}", response_model=Timeline)
@@ -297,7 +349,7 @@ def status_for_media(req: StatusRequest) -> list[MediaStatus]:
         jobs_by_name.setdefault(Path(job.mediaPath).name.lower(), job)
 
     out: list[MediaStatus] = []
-    for path in req.paths:
+    for path in req.paths or []:
         status = MediaStatus(path=path)
         media = resolve_media(path)
         if media is None:
@@ -315,13 +367,19 @@ def status_for_media(req: StatusRequest) -> list[MediaStatus]:
                 error=job.error,
             )
 
-        timeline = timeline_for(media)
-        if timeline is not None:
-            status.analyzed = True
-            status.total = len(timeline.segments)
-            status.approved = sum(1 for s in timeline.segments if s.approved is True)
-            status.rejected = sum(1 for s in timeline.segments if s.approved is False)
-            status.pending = status.total - status.approved - status.rejected
+        # Reading the sidecar is a NAS round trip; skip it unless the cached
+        # index says one exists, or a finished job means it was just written.
+        # An unanalyzed library page then does zero per-film NAS I/O and stays
+        # fast (the sequential per-film stat is what timed out the grid).
+        just_analyzed = job is not None and job.status in (JobStatus.completed, JobStatus.rendered)
+        if sidecar_exists(media) or just_analyzed:
+            timeline = timeline_for(media)
+            if timeline is not None:
+                status.analyzed = True
+                status.total = len(timeline.segments)
+                status.approved = sum(1 for s in timeline.segments if s.approved is True)
+                status.rejected = sum(1 for s in timeline.segments if s.approved is False)
+                status.pending = status.total - status.approved - status.rejected
         out.append(status)
     return out
 

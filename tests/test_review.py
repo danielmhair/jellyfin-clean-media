@@ -1,7 +1,14 @@
 import json
 
 from worker.models import Segment, Timeline
-from worker.review import load_timeline, render_page, set_approval, sidecar_for
+from worker.review import (
+    clip_path,
+    load_timeline,
+    render_page,
+    set_approval,
+    set_approvals,
+    sidecar_for,
+)
 
 
 def _film(tmp_path):
@@ -45,6 +52,36 @@ def test_unknown_segment_is_rejected(tmp_path):
     assert not set_approval(media, 99, True)
 
 
+def test_bulk_approval_sets_many_in_one_write(tmp_path):
+    media, _ = _film(tmp_path)
+
+    changed = set_approvals(media, [1, 2], True)
+
+    assert changed == 2
+    assert all(s.approved is True for s in load_timeline(media).segments)
+
+
+def test_bulk_approval_ignores_unknown_ids(tmp_path):
+    """A finding deleted in another tab must not fail the whole action."""
+    media, _ = _film(tmp_path)
+
+    changed = set_approvals(media, [1, 99], False)
+
+    assert changed == 1
+    reloaded = load_timeline(media)
+    assert reloaded.segments[0].approved is False
+    assert reloaded.segments[1].approved is None
+
+
+def test_bulk_approval_can_clear_decisions(tmp_path):
+    media, _ = _film(tmp_path)
+    set_approvals(media, [1, 2], True)
+
+    set_approvals(media, [1, 2], None)
+
+    assert all(s.approved is None for s in load_timeline(media).segments)
+
+
 def test_missing_analysis_returns_none(tmp_path):
     media = tmp_path / "Nothing.mkv"
     media.touch()
@@ -58,3 +95,35 @@ def test_page_embeds_segments_and_escapes_path(tmp_path):
     # Windows paths are backslash-heavy; they must survive into JS intact
     assert json.dumps(str(media))[1:-1].split("\\\\")[-1] in html.replace("\\\\", "\\\\")
     assert "2 finding(s)" in html
+
+
+def test_page_has_review_controls(tmp_path):
+    """The muted-clip preview, filter toggle and timing badge are present."""
+    media, timeline = _film(tmp_path)
+    html = render_page(media, timeline)
+    assert "Play muted" in html  # verify a profanity mute lands on the word
+    assert "Play flagged part only" in html
+    assert "Undecided" in html  # focus filter
+    assert "exact timing" in html or "timing" in html
+
+
+def test_page_has_type_filter_and_bulk_controls(tmp_path):
+    """Reviewers can group by type and settle a whole group at once."""
+    media, timeline = _film(tmp_path)
+    html = render_page(media, timeline)
+    assert "typeFilters" in html  # per-type filter row
+    assert "All types" in html
+    assert "buildTypeFilters" in html
+    # bulk "apply to all shown" actions, wired to the batch endpoint
+    assert 'id=bulk' in html
+    assert "shown:" in html
+    assert "function bulkSet" in html
+    assert "method: 'PATCH'" in html
+
+
+def test_muted_clip_has_its_own_cache_path(tmp_path):
+    """Muted and plain clips of the same span must not collide in the cache."""
+    media = tmp_path / "Film.mkv"
+    plain = clip_path(media, 1000, 2000, 15.0, mute=False)
+    muted = clip_path(media, 1000, 2000, 15.0, mute=True)
+    assert plain != muted

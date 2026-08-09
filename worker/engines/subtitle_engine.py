@@ -5,16 +5,21 @@ flags profanity for muting. Subtitles are human-transcribed, so this catches
 lines ASR loses under music and explosions.
 
 Subtitle cues have no per-word timings, so the mute window is narrowed to
-the individual word in three escalating ways:
+the individual word in four escalating ways, from most to least exact:
 
+0. if the cue is a single word, the human already timed the whole cue to
+   that word — its bounds ARE the word timing, exact and free;
 1. a cached Whisper transcript word inside the cue window, if one matches;
 2. otherwise a targeted re-transcription of just that cue's audio with the
    voice-activity filter off — this recovers words ASR skipped in the
    full-movie pass, which is exactly where profanity tends to hide;
 3. otherwise the word's position estimated from its character offset.
 
-The window is always clamped inside the cue, so a bad estimate can never
-mute neighbouring dialogue.
+Matching is fuzzy: whisper writes possessives and inflections the subtitle
+does not ("god's" for "God", "asses" for "ass"), and an exact string test
+threw those away to the estimate tier. A found word's span is clamped rather
+than rejected for being padded-long, and the window is always clamped inside
+the cue, so a bad estimate can never mute neighbouring dialogue.
 """
 
 from __future__ import annotations
@@ -39,8 +44,11 @@ from .subtitles import (
 )
 from .vobsub import find_image_subtitle_stream, ocr_subtitle_stream
 
-PAD_MS = 200
-MIN_WINDOW_MS = 400
+# A small cushion so the word's edges are not clipped, without reaching into
+# the words beside it. 200ms each side plus a 400ms floor put a 0.3s word
+# inside an 0.8s mute, which in fast dialogue swallowed its neighbours.
+PAD_MS = 70
+MIN_WINDOW_MS = 240
 # No single spoken word runs longer than this; a wider ASR span means the
 # model merged neighbouring speech and the timing cannot be trusted.
 MAX_WORD_MS = 1500
@@ -116,21 +124,59 @@ class SubtitleEngine(EngineAdapter):
         progress(0.4, f"OCR produced {len(cues)} cues -> {out.name}")
         return cues, out
 
+    @staticmethod
+    def _word_matches(heard: str, target: str) -> bool:
+        """Does an ASR-heard word correspond to the target profanity?
+
+        Whisper writes possessives and inflections the subtitle does not —
+        "god's" for "God", "asses" for "ass", "damnit" for "damn". An exact
+        string test threw all of those to the estimate tier even though the
+        timing was right there. Both are already normalised (lowercase, outer
+        punctuation stripped, apostrophes kept)."""
+        if heard == target:
+            return True
+        # drop a trailing possessive/plural 's from either side
+        h = heard[:-2] if heard.endswith("'s") else heard
+        t = target[:-2] if target.endswith("'s") else target
+        if h == t:
+            return True
+        # one is a prefix of the other, with enough shared length to be safe
+        short, long = sorted((h, t), key=len)
+        return len(short) >= 3 and long.startswith(short)
+
+    def _clamp_span(
+        self, cue: Cue, start_ms: int, end_ms: int, source: str
+    ) -> Optional[tuple[int, int, str]]:
+        """Accept a found word by its start, clamping a padded duration.
+
+        A word whisper timed at 2.4s is not implausible — it padded trailing
+        silence. Trust the start (whisper places it more accurately than the
+        cue does) and cap the length, rather than discarding real timing."""
+        if not (cue.startMs - CLIP_MARGIN_MS <= start_ms <= cue.endMs + CLIP_MARGIN_MS):
+            return None
+        end_ms = min(end_ms, start_ms + MAX_WORD_MS)
+        if end_ms <= start_ms:
+            end_ms = start_ms + MIN_WINDOW_MS
+        return start_ms, end_ms, source
+
     def _from_cache(
         self, cue: Cue, key: str, cached: dict[str, list[dict]]
     ) -> Optional[tuple[int, int, str]]:
-        """A cached ASR word of the same text landing inside the cue."""
+        """A cached ASR word matching the target and landing inside the cue."""
         lo = cue.startMs - CLIP_MARGIN_MS
         hi = cue.endMs + CLIP_MARGIN_MS
+        mid = (cue.startMs + cue.endMs) // 2
         best = None
-        for w in cached.get(key, []):
-            start_ms = int(w["start"] * 1000)
-            if lo <= start_ms <= hi:
-                # prefer the one nearest the middle of the cue
-                dist = abs(start_ms - (cue.startMs + cue.endMs) // 2)
-                if best is None or dist < best[0]:
-                    best = (dist, int(w["start"] * 1000), int(w["end"] * 1000))
-        return (best[1], best[2], "cached-asr") if best else None
+        for norm, words in cached.items():
+            if not self._word_matches(norm, key):
+                continue
+            for w in words:
+                start_ms = int(w["start"] * 1000)
+                if lo <= start_ms <= hi:
+                    dist = abs(start_ms - mid)  # nearest the cue centre
+                    if best is None or dist < best[0]:
+                        best = (dist, start_ms, int(w["end"] * 1000))
+        return self._clamp_span(cue, best[1], best[2], "cached-asr") if best else None
 
     def _retranscribe(
         self, media_path: Path, cue: Cue, key: str, model
@@ -153,26 +199,18 @@ class SubtitleEngine(EngineAdapter):
             segments, _ = model.transcribe(
                 str(wav), word_timestamps=True, vad_filter=False, beam_size=5
             )
+            mid = (cue.startMs + cue.endMs) // 2
+            best = None
             for seg in segments:
                 for w in seg.words or []:
-                    if normalize(w.word) == key:
-                        return (
-                            int((start_s + w.start) * 1000),
-                            int((start_s + w.end) * 1000),
-                            "retranscribed",
-                        )
-        return None
-
-    def _plausible(self, cue: Cue, window: Optional[tuple[int, int, str]]) -> bool:
-        """Reject ASR timings that are too long or drift outside their cue."""
-        if window is None:
-            return False
-        start, end, _ = window
-        if end - start > MAX_WORD_MS:
-            return False
+                    if self._word_matches(normalize(w.word), key):
+                        start_ms = int((start_s + w.start) * 1000)
+                        end_ms = int((start_s + w.end) * 1000)
+                        dist = abs(start_ms - mid)  # nearest the cue centre
+                        if best is None or dist < best[0]:
+                            best = (dist, start_ms, end_ms)
         return (
-            start >= cue.startMs - DRIFT_TOLERANCE_MS
-            and end <= cue.endMs + DRIFT_TOLERANCE_MS
+            self._clamp_span(cue, best[1], best[2], "retranscribed") if best else None
         )
 
     def _estimate(self, cue: Cue, char_offset: int, word_len: int) -> tuple[int, int, str]:
@@ -221,6 +259,9 @@ class SubtitleEngine(EngineAdapter):
 
         model = None
         if precise and matches:
+            # Load whisper for anything the cache cannot already time — including
+            # single-word cues, whose display duration is wider than the word is
+            # spoken, so ASR gives a tighter mute than the cue bounds do.
             unresolved = [
                 m for m in matches if self._from_cache(m[0], m[1], by_word) is None
             ]
@@ -249,19 +290,24 @@ class SubtitleEngine(EngineAdapter):
             if whole_cue:
                 start, end, source = cue.startMs, cue.endMs, "whole-cue"
             else:
+                # Prefer the tight, to-the-word ASR span for every cue.
                 resolved = self._from_cache(cue, key, by_word)
-                if not self._plausible(cue, resolved):
-                    resolved = None
                 if resolved is None and model is not None:
                     progress(
                         0.5 + 0.45 * n / len(matches),
                         f"timing '{key}' at {cue.startMs // 1000}s",
                     )
-                    candidate = self._retranscribe(media_path, cue, key, model)
-                    resolved = candidate if self._plausible(cue, candidate) else None
+                    resolved = self._retranscribe(media_path, cue, key, model)
                 if resolved is None:
-                    resolved = self._estimate(cue, char_offset, word_len)
-                start, end, source = resolved
+                    if len(cue.text.split()) == 1:
+                        # ASR could not place it, but the cue is nothing but
+                        # this word, so its bounds are a safe exact fallback —
+                        # wider than the word, yet never another word.
+                        start, end, source = cue.startMs, cue.endMs, "single-word-cue"
+                    else:
+                        start, end, source = self._estimate(cue, char_offset, word_len)
+                else:
+                    start, end, source = resolved
                 start = max(cue.startMs - DRIFT_TOLERANCE_MS, start)
                 end = min(
                     max(end, start + MIN_WINDOW_MS), cue.endMs + DRIFT_TOLERANCE_MS

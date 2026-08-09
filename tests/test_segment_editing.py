@@ -278,6 +278,22 @@ def test_create_and_delete_routes(client, tmp_path):
     assert new_id not in [s["id"] for s in remaining]
 
 
+def test_bulk_patch_route_settles_many_at_once(client, tmp_path):
+    _film(tmp_path)
+
+    body = client.patch(
+        "/api/segments", params={"path": "Film.mkv"}, json={"ids": [1, 2], "approved": True}
+    ).json()
+
+    assert {s["approved"] for s in body["segments"]} == {True}
+
+    # and clears them all back
+    cleared = client.patch(
+        "/api/segments", params={"path": "Film.mkv"}, json={"ids": [1, 2], "approved": None}
+    ).json()
+    assert {s["approved"] for s in cleared["segments"]} == {None}
+
+
 def test_routes_accept_a_foreign_mount_path(client, tmp_path):
     _film(tmp_path)
 

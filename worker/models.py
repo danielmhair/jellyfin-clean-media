@@ -84,6 +84,18 @@ class SegmentPatch(BaseModel):
     endMs: Optional[int] = None
 
 
+class BulkApproval(BaseModel):
+    """Apply one decision to many findings at once, from the review UI.
+
+    `approved: null` clears the decision on all of them, the same as the
+    single-segment patch — so a reviewer who filtered to one profane word
+    can approve, reject or reset the whole group in one action.
+    """
+
+    ids: list[int] = Field(default_factory=list)
+    approved: Optional[bool] = None
+
+
 class SegmentCreate(BaseModel):
     """A finding added by hand, for what the models missed."""
 

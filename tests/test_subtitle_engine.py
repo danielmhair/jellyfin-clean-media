@@ -1,4 +1,4 @@
-from worker.engines.subtitle_engine import SubtitleEngine
+from worker.engines.subtitle_engine import PAD_MS, SubtitleEngine
 from worker.engines.subtitles import parse_srt
 
 SRT = """1
@@ -115,5 +115,40 @@ def test_whole_cue_option(tmp_path):
         media, "fp", {"wholeCue": True}, lambda f, s: None
     )
     seg = timeline.segments[0]
-    assert seg.startMs == 10_000 - 200
-    assert seg.endMs == 12_000 + 200
+    assert seg.startMs == 10_000 - PAD_MS
+    assert seg.endMs == 12_000 + PAD_MS
+
+
+def test_single_word_cue_is_exact_not_estimated(tmp_path):
+    """A one-word cue is timed by its own bounds — the human already did it.
+
+    No ASR, no estimate: the cue IS the word, so its timing is exact even
+    with precise timing turned off and no audio to transcribe.
+    """
+    media = tmp_path / "movie.mkv"
+    media.touch()
+    p = tmp_path / "movie.en.srt"
+    p.write_text("1\n00:00:10,000 --> 00:00:11,000\nBitch!\n", encoding="utf-8")
+
+    # preciseTiming off: no ASR, so the single-word cue falls straight to its
+    # own bounds — exact, and never the estimate tier.
+    timeline, _ = SubtitleEngine().analyze(
+        media, "fp", {"preciseTiming": False}, lambda f, s: None
+    )
+    seg = timeline.segments[0]
+    assert "single-word-cue" in seg.reasoning
+    assert "estimated" not in seg.reasoning
+    assert seg.confidence == 1.0
+    assert seg.startMs == 10_000 - PAD_MS
+    assert seg.endMs == 11_000 + PAD_MS
+
+
+def test_word_matches_handles_possessive_and_inflection():
+    """Whisper writes 'god's'/'asses'; exact-match threw those away."""
+    m = SubtitleEngine._word_matches
+    assert m("god", "god")
+    assert m("god's", "god")  # possessive
+    assert m("asses", "ass")  # prefix/inflection
+    assert m("damn", "damnit")  # subtitle joined what whisper split
+    assert not m("horse", "whore")  # a mishear must not count
+    assert not m("go", "god")  # too short to be a safe prefix
