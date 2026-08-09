@@ -9,6 +9,14 @@
     "imageUrl": "",
     "versions": [
       {
+        "version": "0.2.1.0",
+        "changelog": "Render a clean copy from the film view. New 'Render clean copy' action applies approved mutes/blurs (and any approved skips) into a separate file via POST /api/render, reading the reviewed sidecar so only approved findings are acted on; the original is never modified. Live skips are unchanged.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.1.0.zip",
+        "checksum": "ef349e1bb9eef143572ff42e230004c9",
+        "timestamp": "2026-08-09T13:43:50"
+      },
+      {
         "version": "0.2.0.5",
         "changelog": "See the repository for changes.",
         "targetAbi": "10.11.0.0",
