@@ -9,6 +9,14 @@
     "imageUrl": "",
     "versions": [
       {
+        "version": "0.2.1.2",
+        "changelog": "Film-view polish: an ETA next to each pass's percent; disable analysis engines already running/queued/done so you can't re-queue them; hide 'Next undecided' until there are findings and 'Add finding at playhead' unless the film can play; and a link to the worker's standalone review page. Builds on 0.2.1.1's live per-pass progress.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.1.2.zip",
+        "checksum": "3c1287a5668434f4cbf3550d4adcc72c",
+        "timestamp": "2026-08-09T14:15:46"
+      },
+      {
         "version": "0.2.1.1",
         "changelog": "Live analysis progress. The grid and film view now show each running pass with its own engine label and percent (a visual pass and a queued profanity pass no longer hide behind each other), with a progress bar; the film view shows progress on open without clicking Analyze. Builds on 0.2.1.0's 'Render clean copy' action.",
         "targetAbi": "10.11.0.0",
