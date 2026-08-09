@@ -51,7 +51,9 @@ param(
     [string]$MediaRoots,
     [string]$TaskName = 'CleanMediaWorker',
     [switch]$UsePassword,
-    [switch]$Uninstall
+    [switch]$AtLogon,
+    [switch]$Uninstall,
+    [switch]$Restart
 )
 
 $ErrorActionPreference = 'Stop'
@@ -66,7 +68,72 @@ function Assert-Elevated {
     }
 }
 
+# Ending the task kills its launcher, but the uvicorn grandchild it spawned is
+# orphaned and keeps the port — and once orphaned it runs in the S4U service
+# context, which only an *elevated* taskkill (or SYSTEM) can terminate. So a
+# clean stop is: end the task, then hunt down whatever still holds the port.
+# This is why picking up new worker code needs -Restart from an elevated shell,
+# not a bare Stop/Start.
+function Stop-WorkerProcesses {
+    param([int]$OnPort)
+    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+
+    $victims = @()
+    $held = Get-NetTCPConnection -LocalPort $OnPort -State Listen -ErrorAction SilentlyContinue
+    if ($held) { $victims += $held.OwningProcess }
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match 'uvicorn\s+worker\.main' } |
+        ForEach-Object { $victims += $_.ProcessId }
+
+    foreach ($procId in ($victims | Select-Object -Unique | Where-Object { $_ })) {
+        # taskkill /F reaches the S4U-context orphan that Stop-Process cannot.
+        # Run it through cmd with output swallowed: a pid that has already
+        # exited makes taskkill write to stderr, and under
+        # $ErrorActionPreference='Stop' PowerShell 5.1 turns a native command's
+        # stderr into a terminating error — which would abort the restart
+        # half-done, with the worker killed but not yet relaunched.
+        cmd /c "taskkill /F /T /PID $procId >nul 2>nul"
+    }
+    Start-Sleep -Seconds 2
+    $still = Get-NetTCPConnection -LocalPort $OnPort -State Listen -ErrorAction SilentlyContinue
+    return ($null -eq $still)
+}
+
+function Wait-Healthy {
+    param([int]$OnPort, [int]$Tries = 90)
+    foreach ($i in 1..$Tries) {
+        try {
+            # /api/health pings Ollama for its model list and routinely takes
+            # ~2s, so a 2s timeout races it and reports a healthy worker as
+            # down. Give it real headroom.
+            $r = Invoke-RestMethod -Uri "http://127.0.0.1:$OnPort/api/health" -TimeoutSec 15
+            return $r
+        } catch { Start-Sleep -Seconds 2 }
+    }
+    return $null
+}
+
 Assert-Elevated
+
+if ($Restart) {
+    $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($null -eq $existing) {
+        throw "No task named '$TaskName'. Install it first: .\scripts\install-service.ps1"
+    }
+    Write-Host "Stopping the worker (and any orphaned process on port $Port)..."
+    if (-not (Stop-WorkerProcesses -OnPort $Port)) {
+        throw "Port $Port is still held. Reboot to clear the orphaned worker."
+    }
+    Start-ScheduledTask -TaskName $TaskName
+    Write-Host "Restarted. Waiting for the worker to answer (loads models, ~1-2 min)..."
+    $r = Wait-Healthy -OnPort $Port
+    if ($null -eq $r) {
+        throw "Worker did not come up. Check $env:LOCALAPPDATA\CleanMedia\worker.log"
+    }
+    Write-Host "Worker $($r.version) is up on new code."
+    return
+}
 
 if ($Uninstall) {
     $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -74,7 +141,7 @@ if ($Uninstall) {
         Write-Host "No task named '$TaskName'. Nothing to do."
         return
     }
-    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    Stop-WorkerProcesses -OnPort $Port | Out-Null
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
     Write-Host "Removed scheduled task '$TaskName'. The worker will not start at boot."
     Write-Host "Logs and the launcher are left in place under $env:LOCALAPPDATA\CleanMedia."
@@ -106,13 +173,15 @@ if ([string]::IsNullOrWhiteSpace($MediaRoots)) {
     $MediaRoots = Join-Path $repo 'movies'
 }
 
-# A worker already started by hand holds the port, and the task would die on
-# startup with a bind error that only shows up in the log.
+# Something already holds the port — a hand-started worker, or a previous
+# task's orphaned uvicorn. Reclaim it rather than dying on a bind error that
+# only surfaces in the log. On reinstall this is the normal case.
 $inUse = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
 if ($null -ne $inUse) {
-    $owner = Get-Process -Id $inUse[0].OwningProcess -ErrorAction SilentlyContinue
-    $name = if ($null -eq $owner) { 'unknown' } else { "$($owner.ProcessName) (pid $($owner.Id))" }
-    throw "Port $Port is already in use by $name. Stop it first -- probably a worker you started by hand."
+    Write-Host "Port $Port is in use; reclaiming it before (re)installing..."
+    if (-not (Stop-WorkerProcesses -OnPort $Port)) {
+        throw "Port $Port is still held after trying to stop it. Reboot to clear it, then re-run."
+    }
 }
 
 # --- write the launcher ----------------------------------------------------
@@ -142,7 +211,16 @@ Set-Content -Path $launcher -Value $cmd -Encoding ASCII
 
 # --- register the task -----------------------------------------------------
 $action = New-ScheduledTaskAction -Execute $launcher -WorkingDirectory $repo
-$trigger = New-ScheduledTaskTrigger -AtStartup
+# -AtLogon runs the worker inside your interactive session when you sign in,
+# which gives it your full network access and saved NAS credential with no
+# stored password (a PIN cannot be used for a boot task). The tradeoff is it
+# starts at login rather than before it. Default is -AtStartup (before login),
+# which needs -UsePassword to reach a network share.
+$trigger = if ($AtLogon) {
+    New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+} else {
+    New-ScheduledTaskTrigger -AtStartup
+}
 
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
@@ -164,10 +242,25 @@ $register = @{
     Force       = $true
 }
 
-if ($UsePassword) {
+if ($AtLogon) {
+    # Interactive: the worker runs inside your logged-in session, so it inherits
+    # your network access and Credential Manager (the saved NAS login) with no
+    # stored password. This is the way to reach a network share without knowing
+    # the account password (a PIN cannot be stored with a task).
+    $register.Principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+} elseif ($UsePassword) {
     # Stored credentials, so the task has network access to UNC media roots.
-    $cred = Get-Credential -UserName $user -Message "Windows password for $user (stored with the task)"
-    $register.User = $cred.UserName
+    # This is the WINDOWS sign-in for this PC, not the NAS login: the task runs
+    # as this Windows user and reuses whatever NAS credential is already saved
+    # in Credential Manager for that user, so the NAS password is never entered
+    # here. Only the password matters — entering the NAS *username* is the usual
+    # mistake (it fails with "no mapping between account names and security
+    # IDs"), so force the account to this PC's user and take just the password.
+    $msg = "Enter the WINDOWS sign-in password for $user`n" +
+           "(this PC's login password, NOT your NAS password).`n" +
+           "The username is fixed; only the password is used."
+    $cred = Get-Credential -UserName $user -Message $msg
+    $register.User = $user
     $register.Password = $cred.GetNetworkCredential().Password
     $register.RunLevel = 'Limited'
 } else {
@@ -195,7 +288,9 @@ Write-Host "speech and vision models, which takes a minute or two..."
 $healthy = $false
 foreach ($i in 1..90) {
     try {
-        $r = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 2
+        # 15s, not 2s: /api/health pings Ollama and routinely takes ~2s, so a
+        # 2s timeout races it and falsely reports the worker as never answering.
+        $r = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 15
         Write-Host "Worker $($r.version) is up after $($i * 2)s."
         Write-Host "  engines: $(($r.engines.PSObject.Properties.Name) -join ', ')"
         $healthy = $true
