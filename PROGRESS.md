@@ -92,6 +92,15 @@ next-to-fix first. Tick when fixed and verified against the running dashboard.
   mistake. **Fixed 2026-08-08:** the button now opens a confirm dialog naming the
   count and engine before queueing. Shipped in **0.2.0.1**. _Verify:_ clicking
   Queue shows a confirm dialog; Cancel queues nothing.
+- [x] **Plugin "Settings" opened the review grid, not the settings page.**
+  Jellyfin 10.11's `findBestConfigurationPage` prefers the `EnableInMainMenu`
+  page when a plugin has several, so the plugin's Settings button always landed
+  on the review page — and 10.11's `PluginPageInfo` has no `IsMainConfigPage`
+  flag to override it (only Name/DisplayName/EmbeddedResourcePath/
+  EnableInMainMenu/MenuIcon/MenuSection). **Worked around 2026-08-08 (0.2.0.3):**
+  the review page now carries a "⚙ Worker settings" button that navigates
+  straight to the config page by name. _Verify:_ from the review page, the button
+  opens the Worker URL / timeout settings.
 
 ## Sliced roadmap
 

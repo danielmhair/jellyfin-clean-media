@@ -15,6 +15,13 @@
                 <p class="fieldDescription" style="margin-top:0;">
                     Nothing is skipped during playback until it is approved here.
                 </p>
+                <!-- Jellyfin's plugin "Settings" button always opens the
+                     main-menu page (this one), never the config page, so give
+                     the settings a reachable link from here. -->
+                <button is="emby-button" type="button" id="CmOpenSettings"
+                        class="raised emby-button" style="margin-bottom:1em;">
+                    <span>&#9881; Worker settings</span>
+                </button>
                 <div id="CmLibraryPicker"></div>
             </div>
 
@@ -652,6 +659,14 @@
         });
 
         page.querySelector('#CmFilter').addEventListener('change', renderItems);
+
+        page.querySelector('#CmOpenSettings').addEventListener('click', function () {
+            // The config page is registered under the plugin name. Navigate to
+            // it directly: in Jellyfin 10.11 the plugin's own "Settings" button
+            // always opens this main-menu page instead (findBestConfigurationPage
+            // prefers the EnableInMainMenu page), so this is the way to reach it.
+            Dashboard.navigate('configurationpage?name=Clean Media');
+        });
 
         page.querySelectorAll('.cmBack').forEach(function (b) {
             b.addEventListener('click', function () { show('library'); });
