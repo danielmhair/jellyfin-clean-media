@@ -9,6 +9,14 @@
     "imageUrl": "",
     "versions": [
       {
+        "version": "0.2.1.1",
+        "changelog": "Live analysis progress. The grid and film view now show each running pass with its own engine label and percent (a visual pass and a queued profanity pass no longer hide behind each other), with a progress bar; the film view shows progress on open without clicking Analyze. Builds on 0.2.1.0's 'Render clean copy' action.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.1.1.zip",
+        "checksum": "f2f62ccbe92df652456ff4833d32028d",
+        "timestamp": "2026-08-09T13:54:41"
+      },
+      {
         "version": "0.2.1.0",
         "changelog": "Render a clean copy from the film view. New 'Render clean copy' action applies approved mutes/blurs (and any approved skips) into a separate file via POST /api/render, reading the reviewed sidecar so only approved findings are acted on; the original is never modified. Live skips are unchanged.",
         "targetAbi": "10.11.0.0",
