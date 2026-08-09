@@ -165,16 +165,27 @@ its box (`[ ]` → `[x]`), and move the **← NEXT** marker on.
   `POST /CleanMedia/Analyze`, shows live status ("Analyzing NN% — stage") by
   polling `/CleanMedia/Status`, and auto-loads the findings the moment it
   completes; the hours-long visual pass confirms first.
-- [ ] **Slice 3 — One film, end to end: review → skip + mute. ← NEXT** Analyze
-  ONE film for profanity, review the findings, and prove **both** actions:
-  approve a **skip** → Jellyfin skips that span during playback (works live);
-  approve a **mute** → render a clean copy in which the word is silenced. Mute
-  can't happen live, so this wires the worker's existing render
-  (`POST /api/jobs/{id}/render`, `scripts/render.sh`) into the film view as a
-  "Render clean copy" action with progress. _Done when:_ on one film, an approved
-  skip is skipped during playback AND a rendered clean copy has the muted word
-  silenced, original untouched.
-- [ ] **Slice 4 — Word-lock timing editor (by ear, to the millisecond).** The
+- [x] **Slice 3 — One film, end to end: review → skip + mute.** _Implemented
+  2026-08-08 (plugin 0.2.1.0)._ The film view has a **"Render clean copy"**
+  action: it POSTs `/CleanMedia/Render` → a new worker `POST /api/render?path=`,
+  which renders from the film's **sidecar** (the source of truth for review
+  decisions) via the combined renderer, acting on **approved findings only** —
+  mutes/blurs plus any approved skips, folded into one clean copy under a
+  `cleaned/` folder; the original is never touched. The button summarises what it
+  will apply (N mutes/blurs/skips), polls live progress via
+  `/CleanMedia/RenderStatus`, and reports where the copy was written. A by-path
+  endpoint was needed because the plugin knows films by path, not job id — and
+  the pre-existing `POST /api/jobs/{id}/render` renders the *store* timeline
+  (analysis-time, approvals not reflected → it would mute every detection), so
+  the by-path render reads the sidecar instead. Approved **skips** still reach
+  playback live as `Commercial` segments (unchanged). _Verified locally:_ a real
+  render through the worker path silences the approved mute span (−91 dB) while a
+  **rejected** span and the rest of the audio stay intact (−21 dB) and the
+  original file is byte-for-byte unchanged — the render honours review decisions,
+  not just "not rejected". _Remaining (deploy step):_ install 0.2.1.0 into the
+  running Jellyfin and walk one real film — approve a mute, click Render, confirm
+  the clean copy; approve a skip, confirm playback skips it.
+- [ ] **Slice 4 — Word-lock timing editor (by ear, to the millisecond). ← NEXT** The
   human answer to timings no ASR can place. Zoom a finding to ±~1.5 s, draw the
   waveform (new worker peaks endpoint: ffmpeg → PCM → downsampled JSON), drag the
   start/end handles by milliseconds, and loop-play the selected span *with the
@@ -239,6 +250,30 @@ its box (`[ ]` → `[x]`), and move the **← NEXT** marker on.
   so an interruption costs minutes, not the whole run.
 
 ## Recent changes
+
+### Slice 3 — render a clean copy from the film view (2026-08-08)
+
+- **By-path render endpoint** — new worker `POST /api/render?path=` renders a
+  clean copy from the film's `.cleanmedia.json` sidecar, acting on **approved
+  findings only** (mutes/blurs + any approved skips) via the combined
+  `render.py`. Runs as a background job through the existing queue
+  (`submit_media_render`/`_render_media`); progress polled via `/api/jobs/{id}`.
+- **Fixed a review-invariant hole** — the older `POST /api/jobs/{id}/render`
+  rendered the *store* (analysis-time) timeline, whose approvals are always
+  null, so `render_muted`'s `approved is not False` would have muted **every**
+  detection. The by-path render reads the sidecar and filters to
+  `approved is True` (shared `approved_for_render`, now used by
+  `scripts/render.sh` too). New tests assert an unreviewed film renders nothing.
+- **Plugin (0.2.1.0)** — "Render clean copy" button in the film view: confirms,
+  POSTs `/CleanMedia/Render`, polls `/CleanMedia/RenderStatus`, shows live
+  percent/stage and the written path; the button is disabled with a hint until a
+  mute or blur is approved (skips already work live).
+- **Cheap duration** — `shots.media_duration` (one ffprobe, no decode) supplies
+  the length skips need without `true_fps`'s full decode-and-count; mute/blur
+  renders skip the probe entirely.
+- **Verified locally** — a real render silences the approved mute span (−91 dB),
+  leaves a rejected span and the rest of the audio intact (−21 dB), and does not
+  touch the original file.
 
 ### Deploy & first-run-in-Jellyfin session (2026-08-08)
 

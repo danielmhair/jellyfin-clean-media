@@ -93,6 +93,16 @@
                             class="raised emby-button"><span>+ Add finding at playhead</span></button>
                 </div>
 
+                <!-- Mutes and blurs can't be applied during playback, so acting
+                     on them means rendering a separate clean copy from the
+                     approved findings. Skips work live and don't need this. -->
+                <div style="margin:1em 0;display:flex;gap:.6em;flex-wrap:wrap;align-items:center;">
+                    <button is="emby-button" type="button" id="CmRender"
+                            class="raised button-submit emby-button"><span>Render clean copy</span></button>
+                    <span id="CmRenderNote" class="fieldDescription" style="margin:0;"></span>
+                    <span id="CmRenderResult" class="fieldDescription" style="margin:0;"></span>
+                </div>
+
                 <div id="CmFindings"></div>
             </div>
 
@@ -151,6 +161,7 @@
                 views[k].style.display = k === name ? '' : 'none';
             });
             if (name !== 'film') { player.pause(); player.removeAttribute('src'); player.load(); }
+            if (name !== 'film') { stopRenderPoll(); }
             if (name !== 'items') { stopPolling(); }
             message.textContent = '';
         }
@@ -369,10 +380,12 @@
             var item = state.items.filter(function (i) { return i.Id === itemId; })[0];
             if (!item) { return; }
             stopFilmPoll();
+            stopRenderPoll();
             state.film = item;
             show('film');
             page.querySelector('#CmFilmName').textContent = item.Name;
             page.querySelector('#CmAnalyzeResult').textContent = '';
+            page.querySelector('#CmRenderResult').textContent = '';
             page.querySelector('#CmFindings').innerHTML =
                 '<p class="fieldDescription">Loading findings&hellip;</p>';
 
@@ -393,6 +406,10 @@
 
         function stopFilmPoll() {
             if (state.filmPoll) { clearTimeout(state.filmPoll); state.filmPoll = null; }
+        }
+
+        function stopRenderPoll() {
+            if (state.renderPoll) { clearTimeout(state.renderPoll); state.renderPoll = null; }
         }
 
         // While an analysis of the open film runs, show its progress here and
@@ -614,6 +631,37 @@
             page.querySelector('#CmFilmProgress').textContent = state.segments.length
                 ? decided + ' of ' + state.segments.length + ' decided'
                 : '';
+            updateRenderNote();
+        }
+
+        // What a "Render clean copy" would act on, kept in step with the
+        // approvals. Only mutes and blurs need a render; skips already work
+        // live, so with nothing muted/blurred approved the button is disabled.
+        function updateRenderNote() {
+            var counts = { mute: 0, blur: 0, skip: 0 };
+            state.segments.forEach(function (s) {
+                if (s.approved === true && counts[s.recommendedAction] !== undefined) {
+                    counts[s.recommendedAction]++;
+                }
+            });
+            var note = page.querySelector('#CmRenderNote');
+            var btn = page.querySelector('#CmRender');
+            if (!note || !btn) { return; }
+            if (!(counts.mute || counts.blur)) {
+                btn.disabled = true;
+                note.textContent = counts.skip
+                    ? 'Approved skips already take effect live — a clean copy is only '
+                        + 'needed to mute or blur. Approve a mute or blur to enable it.'
+                    : 'Approve a mute or blur finding to render a clean copy.';
+                return;
+            }
+            btn.disabled = false;
+            var parts = [];
+            if (counts.mute) { parts.push(counts.mute + ' mute' + (counts.mute === 1 ? '' : 's')); }
+            if (counts.blur) { parts.push(counts.blur + ' blur' + (counts.blur === 1 ? '' : 's')); }
+            if (counts.skip) { parts.push(counts.skip + ' skip' + (counts.skip === 1 ? '' : 's')); }
+            note.textContent = 'Writes a new file applying ' + parts.join(', ')
+                + '. The original is untouched.';
         }
 
         page.querySelector('#CmNextUndecided').addEventListener('click', function () {
@@ -683,6 +731,65 @@
                 run();
             }
         });
+
+        // -- render a clean copy ---------------------------------------------
+
+        page.querySelector('#CmRender').addEventListener('click', function () {
+            if (!state.film) { return; }
+            var film = state.film;
+            var out = page.querySelector('#CmRenderResult');
+            confirmThen(
+                'Render a clean copy of "' + film.Name + '"? It writes a new file in a '
+                + '"cleaned" folder beside the original, applying every approved mute, blur '
+                + 'and skip. A mute-only copy is quick; an approved blur or skip re-encodes '
+                + 'the video and takes longer. The original file is never modified.',
+                function () {
+                    stopRenderPoll();
+                    out.textContent = 'Starting render…';
+                    api('POST', 'Render', {}, { itemId: film.Id }).then(function (res) {
+                        if (!state.film || state.film.Id !== film.Id) { return; }  // navigated away
+                        if (res.unreachable) {
+                            out.textContent = 'Worker unreachable — check the Worker URL.';
+                            return;
+                        }
+                        if (res.error) { out.textContent = res.error; return; }
+                        if (!res.jobId) { out.textContent = 'Could not start the render.'; return; }
+                        pollRender(res.jobId, film.Id);
+                    }).catch(function (err) {
+                        out.textContent = 'Could not start the render: ' + err;
+                    });
+                });
+        });
+
+        // Poll one render job to completion, showing progress and, when done,
+        // where the clean copy was written. Bails if the reviewer navigates away.
+        function pollRender(jobId, filmId) {
+            var out = page.querySelector('#CmRenderResult');
+            api('GET', 'RenderStatus', { jobId: jobId }).then(function (res) {
+                if (!state.film || state.film.Id !== filmId) { return; }
+                if (res.unreachable) {
+                    out.textContent = 'Worker unreachable during render — check the Worker URL.';
+                    return;
+                }
+                if (res.status === 'rendered') {
+                    out.textContent = 'Clean copy written'
+                        + (res.renderedPath ? ' → ' + res.renderedPath : '') + '.';
+                    return;
+                }
+                if (res.status === 'failed') {
+                    var why = res.error ? String(res.error).split('\n')[0] : '';
+                    out.textContent = 'Render failed' + (why ? ': ' + why : '') + '.';
+                    return;
+                }
+                if (res.status === 'cancelled') { out.textContent = 'Render cancelled.'; return; }
+                var pct = Math.round((res.progress || 0) * 100);
+                out.textContent = 'Rendering ' + pct + '%'
+                    + (res.stage ? ' — ' + res.stage : '');
+                state.renderPoll = setTimeout(function () { pollRender(jobId, filmId); }, 2000);
+            }).catch(function () {
+                state.renderPoll = setTimeout(function () { pollRender(jobId, filmId); }, 4000);
+            });
+        }
 
         // -- queueing --------------------------------------------------------
 

@@ -1,4 +1,5 @@
 using System.Net.Http.Json;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Jellyfin.Plugin.CleanMedia.Configuration;
 using Microsoft.Extensions.Logging;
@@ -45,6 +46,9 @@ public class WorkerJob
     [JsonPropertyName("stage")] public string Stage { get; set; } = string.Empty;
 
     [JsonPropertyName("error")] public string? Error { get; set; }
+
+    /// <summary>Where a completed render wrote the clean copy, if any.</summary>
+    [JsonPropertyName("renderedPath")] public string? RenderedPath { get; set; }
 }
 
 /// <summary>The worker's standard timeline response.</summary>
@@ -133,6 +137,21 @@ public class MediaStatus
 public class CancelAllResult
 {
     [JsonPropertyName("cancelled")] public int Cancelled { get; set; }
+}
+
+/// <summary>
+/// Outcome of asking the worker to render a clean copy. Separates a queued
+/// render (<see cref="Job"/>) from a refusal with a reason (<see cref="Error"/>)
+/// and an unreachable worker (<see cref="Unreachable"/>).
+/// </summary>
+public class RenderResult
+{
+    public WorkerJob? Job { get; init; }
+
+    public bool Unreachable { get; init; }
+
+    /// <summary>The worker's reason for refusing, e.g. nothing approved yet.</summary>
+    public string? Error { get; init; }
 }
 
 /// <summary>Talks to the Clean Media worker over HTTP.</summary>
@@ -291,6 +310,94 @@ public class WorkerClient
         return await response.Content
             .ReadFromJsonAsync<WorkerJob>(cancellationToken: cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Render a clean copy from a film's approved findings, addressed by media
+    /// path. The worker reads the reviewed sidecar and acts only on approved
+    /// mutes/blurs/skips; the returned job is polled for progress.
+    ///
+    /// A refusal (nothing approved yet, or the film is not analyzed) comes back
+    /// as <see cref="RenderResult.Error"/> carrying the worker's own reason, so
+    /// the page can say why rather than "failed"; an unreachable worker sets
+    /// <see cref="RenderResult.Unreachable"/>.
+    /// </summary>
+    public async Task<RenderResult> RenderAsync(string mediaPath, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var client = NewClient();
+            var url = $"{Base}/api/render?path={Uri.EscapeDataString(mediaPath)}";
+            using var response = await client.PostAsync(url, null, cancellationToken).ConfigureAwait(false);
+            if (response.IsSuccessStatusCode)
+            {
+                var job = await response.Content
+                    .ReadFromJsonAsync<WorkerJob>(cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+                return new RenderResult { Job = job };
+            }
+
+            var detail = await ReadDetailAsync(response, cancellationToken).ConfigureAwait(false);
+            return new RenderResult
+            {
+                Error = detail ?? $"the worker refused the render (HTTP {(int)response.StatusCode}).",
+            };
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            _logger.LogWarning(ex, "Clean Media render request failed at {Url}", Config.WorkerUrl);
+            return new RenderResult { Unreachable = true };
+        }
+    }
+
+    /// <summary>Pull FastAPI's { "detail": "…" } message off an error response.</summary>
+    private static async Task<string?> ReadDetailAsync(
+        HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var body = await response.Content
+                .ReadFromJsonAsync<Dictionary<string, JsonElement>>(cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            if (body is not null
+                && body.TryGetValue("detail", out var detail)
+                && detail.ValueKind == JsonValueKind.String)
+            {
+                return detail.GetString();
+            }
+        }
+        catch (Exception ex) when (ex is JsonException or NotSupportedException or HttpRequestException)
+        {
+            // A non-JSON error body just means no reason to show.
+        }
+
+        return null;
+    }
+
+    /// <summary>One job's current state, for polling render/analysis progress.</summary>
+    public async Task<WorkerJob?> GetJobAsync(string jobId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var client = NewClient();
+            using var response = await client
+                .GetAsync($"{Base}/api/jobs/{Uri.EscapeDataString(jobId)}", cancellationToken)
+                .ConfigureAwait(false);
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                return null;
+            }
+
+            response.EnsureSuccessStatusCode();
+            return await response.Content
+                .ReadFromJsonAsync<WorkerJob>(cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            _logger.LogWarning(ex, "Clean Media worker unreachable at {Url}", Config.WorkerUrl);
+            return null;
+        }
     }
 
     /// <summary>Every job the worker knows about, or null if it is unreachable.</summary>

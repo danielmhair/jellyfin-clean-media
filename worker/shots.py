@@ -29,9 +29,15 @@ class Shot:
         return self.end_s - self.start_s
 
 
-def true_fps(media_path: Path) -> tuple[float, float, int]:
-    """Return (fps, duration_s, frame_count) as the decoder actually emits them."""
-    duration = float(
+def media_duration(media_path: Path) -> float:
+    """Wall-clock duration in seconds, straight from the container.
+
+    Cheap (a single ffprobe, no decode) and reliable even on telecined
+    sources: only the *frame rate* lies there, not the duration. Use this
+    when a render needs the film's length to compute skip keeps but does not
+    need the full decode-and-count that true_fps does.
+    """
+    return float(
         subprocess.run(
             [
                 "ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -40,6 +46,11 @@ def true_fps(media_path: Path) -> tuple[float, float, int]:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
     )
+
+
+def true_fps(media_path: Path) -> tuple[float, float, int]:
+    """Return (fps, duration_s, frame_count) as the decoder actually emits them."""
+    duration = media_duration(media_path)
     # Decode-and-discard is the only reliable count: nb_frames is often absent
     # or wrong, and container fps cannot be trusted on telecined sources.
     proc = subprocess.run(

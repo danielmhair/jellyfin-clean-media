@@ -18,10 +18,23 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from .models import Timeline
+from .models import Segment, Timeline
 from .engines.base import ProgressCb
 
 BLUR_SIGMA = 30
+
+
+def approved_for_render(timeline: Timeline) -> list[Segment]:
+    """The findings a clean-copy render should act on: only the approved ones.
+
+    Rejected (``approved is False``) and, crucially, undecided
+    (``approved is None``) findings are excluded. Rendering is the "act" half
+    of review → approve → act, so an unreviewed film renders nothing at all —
+    never every detection at once. Callers pre-filter with this and hand the
+    result to :func:`render`, whose own looser ``is not False`` guard then
+    only ever sees already-approved segments.
+    """
+    return [s for s in timeline.segments if s.approved is True]
 
 
 def _enable_expr(segments) -> str:

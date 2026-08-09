@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Optional
 
 from .engines import ENGINES
-from .models import Job, JobCreate, JobStatus
+from .models import Job, JobCreate, JobStatus, Timeline
+from .render import approved_for_render, render as render_clean
 from .store import Store, media_fingerprint
 
 
@@ -67,6 +68,46 @@ class JobQueue:
         self._queue.put(("render", job.id))
         return job
 
+    def submit_media_render(
+        self, media_path: str, output_path: Optional[str] = None
+    ) -> Job:
+        """Render a clean copy from a film's APPROVED sidecar findings, by path.
+
+        Unlike ``submit_render`` — which renders one analysis job's own stored
+        timeline through that engine's renderer — this reads the film's
+        ``.cleanmedia.json`` sidecar, the source of truth for review decisions,
+        and folds every approved skip/mute/blur into one clean copy via the
+        combined renderer. It is what the Jellyfin film view calls: it knows a
+        film by path, not by job id, and only approved findings are acted on.
+        """
+        from .review import load_timeline
+
+        media = Path(media_path)
+        if not media.is_file():
+            raise FileNotFoundError(f"media not found: {media}")
+        timeline = load_timeline(media)
+        if timeline is None:
+            raise ValueError(f"no analysis found for {media.name}; analyze it first")
+        if not approved_for_render(timeline):
+            raise ValueError(
+                f"{media.name}: none of {len(timeline.segments)} finding(s) are "
+                "approved — review and approve findings before rendering"
+            )
+
+        job = Job(
+            id=uuid.uuid4().hex[:12],
+            mediaPath=str(media),
+            engine="render",  # a render-only job, not an analysis engine
+            mediaFingerprint=timeline.mediaFingerprint,
+            status=JobStatus.rendering,
+            stage="queued for rendering",
+        )
+        if output_path:
+            job.options["renderOutputPath"] = output_path
+        self.store.save_job(job)
+        self._queue.put(("render_media", job.id))
+        return job
+
     def queue_size(self) -> int:
         return self._queue.qsize()
 
@@ -115,6 +156,8 @@ class JobQueue:
             try:
                 if kind == "analyze":
                     self._analyze(job)
+                elif kind == "render_media":
+                    self._render_media(job)
                 else:
                     self._render(job)
             except JobCancelled:
@@ -176,6 +219,48 @@ class JobQueue:
 
         rendered = engine.render(
             media, Path(job.enginePlanPath), timeline, output, self._progress_cb(job)
+        )
+
+        job = self.store.get_job(job.id) or job
+        job.renderedPath = str(rendered)
+        job.status = JobStatus.rendered
+        job.progress = 1.0
+        job.stage = "rendered clean copy"
+        self.store.save_job(job)
+
+    def _render_media(self, job: Job) -> None:
+        """Render a clean copy straight from the sidecar's approved findings.
+
+        The counterpart to ``submit_media_render``: no engine plan, no stored
+        job timeline — just the reviewed sidecar and the combined renderer, so
+        exactly what an administrator approved is what gets acted on.
+        """
+        from .review import load_timeline
+        from .shots import media_duration
+
+        media = Path(job.mediaPath)
+        timeline = load_timeline(media)
+        approved = approved_for_render(timeline) if timeline else []
+        if not approved:
+            # The sidecar changed (findings un-approved or deleted) between
+            # submit and now — better to fail than render an empty diff.
+            raise RuntimeError("no approved findings to render")
+
+        default_out = media.parent / "cleaned" / f"{media.stem} (Clean){media.suffix}"
+        output = Path(job.options.get("renderOutputPath") or default_out)
+
+        # Skips shorten the film, so the renderer needs its true length to work
+        # out the spans to keep. Mute/blur-only renders don't, so skip the probe.
+        needs_duration = any(s.recommendedAction == "skip" for s in approved)
+        duration = media_duration(media) if needs_duration else None
+
+        assert timeline is not None  # approved is non-empty, so it loaded
+        rendered = render_clean(
+            media,
+            Timeline(mediaFingerprint=timeline.mediaFingerprint, segments=approved),
+            output,
+            self._progress_cb(job),
+            duration_s=duration,
         )
 
         job = self.store.get_job(job.id) or job

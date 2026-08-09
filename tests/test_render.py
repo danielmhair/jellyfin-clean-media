@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from worker.models import Segment, Timeline
-from worker.render import build_command, keep_intervals
+from worker.render import approved_for_render, build_command, keep_intervals
 
 
 def _tl(*segs):
@@ -139,3 +139,21 @@ def test_blur_and_skip_chain_before_cut():
 def test_empty_timeline_raises():
     with pytest.raises(RuntimeError):
         build_command(Path("in.mkv"), _tl(), Path("out.mkv"))
+
+
+def test_approved_for_render_selects_only_approved():
+    tl = _tl(
+        _seg(1, 0, 1000, "mute", approved=True),
+        _seg(2, 2000, 3000, "mute", approved=False),
+        _seg(3, 4000, 5000, "skip", approved=None),
+        _seg(4, 6000, 7000, "blur", approved=True),
+    )
+    assert [s.id for s in approved_for_render(tl)] == [1, 4]
+
+
+def test_unreviewed_timeline_renders_nothing():
+    # An analysis-time timeline leaves every finding approved=None. The
+    # by-path render must act on none of them — review → approve → act means an
+    # unreviewed film renders nothing, never every detection at once.
+    tl = _tl(_seg(1, 0, 1000, "mute"), _seg(2, 2000, 3000, "mute"))
+    assert approved_for_render(tl) == []

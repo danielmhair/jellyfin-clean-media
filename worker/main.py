@@ -392,3 +392,25 @@ def render(job_id: str, req: RenderRequest | None = None) -> Job:
         raise HTTPException(404, f"job {job_id} not found")
     except ValueError as exc:
         raise HTTPException(409, str(exc))
+
+
+@app.post("/api/render", response_model=Job, status_code=202)
+def render_media(path: str, req: RenderRequest | None = None) -> Job:
+    """Render a clean copy from a film's APPROVED findings, by media path.
+
+    This is what the Jellyfin film view calls. Jellyfin knows a film by its
+    own mount path, not our job ids, so — like /api/segments and /api/status —
+    it addresses the film by path. Only approved findings are acted on: mutes
+    and blurs, which Jellyfin cannot apply during playback, folded together
+    with any approved skips into one clean copy. The original is never touched;
+    the job it returns is polled via /api/jobs/{id} for progress.
+    """
+    media = resolve_media(path)
+    if media is None:
+        raise HTTPException(404, f"media not found: {path}")
+    try:
+        return jobs.submit_media_render(str(media), req.outputPath if req else None)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))

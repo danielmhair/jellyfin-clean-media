@@ -16,7 +16,7 @@ fi
 import sys
 from pathlib import Path
 from worker.models import Timeline
-from worker.render import render
+from worker.render import approved_for_render, render
 from worker.review import load_timeline
 from worker.shots import true_fps
 
@@ -25,7 +25,7 @@ timeline = load_timeline(media)
 if timeline is None:
     sys.exit(f"no analysis found for {media.name} - run scripts/analyze.sh first")
 
-approved = [s for s in timeline.segments if s.approved is True]
+approved = approved_for_render(timeline)
 if not approved:
     sys.exit(
         f"{media.name}: none of {len(timeline.segments)} finding(s) are approved.\n"

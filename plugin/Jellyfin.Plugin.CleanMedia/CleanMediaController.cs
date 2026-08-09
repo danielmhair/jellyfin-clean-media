@@ -60,6 +60,12 @@ public class AnalyzeRequest
     public string Engine { get; set; } = "subtitles";
 }
 
+/// <summary>A film to render a clean copy for.</summary>
+public class RenderRequest
+{
+    public string? ItemId { get; set; }
+}
+
 [ApiController]
 [Authorize(Policy = "RequiresElevation")]
 [Route("CleanMedia")]
@@ -320,6 +326,60 @@ public class CleanMediaController : ControllerBase
         }
 
         return Ok(new { queued });
+    }
+
+    /// <summary>Render a clean copy of one film from its approved findings.</summary>
+    /// <remarks>
+    /// Mutes and blurs cannot be applied during playback, so acting on those
+    /// findings means writing a separate clean copy. The worker reads the
+    /// reviewed sidecar and acts only on approved findings; the original file
+    /// is never modified. Returns a job id the page polls via RenderStatus.
+    /// </remarks>
+    [HttpPost("Render")]
+    public async Task<ActionResult<object>> Render(
+        [FromBody] RenderRequest request,
+        CancellationToken cancellationToken)
+    {
+        var path = PathFor(request.ItemId);
+        if (path is null)
+        {
+            return NotFound();
+        }
+
+        var result = await _worker.RenderAsync(path, cancellationToken).ConfigureAwait(false);
+        if (result.Unreachable)
+        {
+            return Ok(new { unreachable = true });
+        }
+
+        if (result.Error is not null)
+        {
+            return Ok(new { error = result.Error });
+        }
+
+        return Ok(new { jobId = result.Job?.Id, status = result.Job?.Status });
+    }
+
+    /// <summary>Progress of a render job, for polling from the film view.</summary>
+    [HttpGet("RenderStatus")]
+    public async Task<ActionResult<object>> RenderStatus(
+        [FromQuery] string jobId,
+        CancellationToken cancellationToken)
+    {
+        var job = await _worker.GetJobAsync(jobId, cancellationToken).ConfigureAwait(false);
+        if (job is null)
+        {
+            return Ok(new { unreachable = true });
+        }
+
+        return Ok(new
+        {
+            status = job.Status,
+            progress = job.Progress,
+            stage = job.Stage,
+            error = job.Error,
+            renderedPath = job.RenderedPath,
+        });
     }
 
     /// <summary>Jobs the worker knows about, for progress and cancellation.</summary>
