@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 import traceback
 import uuid
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
+from . import schedule as schedule_mod
 from .engines import ENGINES
 from .models import Job, JobCreate, JobStatus, Timeline
 from .render import approved_for_render, render as render_clean
@@ -19,16 +22,42 @@ class JobCancelled(Exception):
     """Raised inside a running job to abort it when a cancel is requested."""
 
 
+class JobPaused(Exception):
+    """Raised inside a resumable job when the schedule window closes mid-run.
+
+    The job is re-queued rather than failed; it resumes from its engine's
+    checkpoint when the allowed window reopens.
+    """
+
+
 class JobQueue:
-    def __init__(self, store: Store):
+    def __init__(
+        self,
+        store: Store,
+        *,
+        allowed_fn: Optional[Callable[[datetime], bool]] = None,
+        now_fn: Optional[Callable[[], datetime]] = None,
+        sleep_fn: Optional[Callable[[float], None]] = None,
+        poll_s: float = 30.0,
+    ):
         self.store = store
         self._queue: "queue.Queue[tuple[str, str]]" = queue.Queue()  # (kind, job_id)
         # Ids asked to stop. A queued job is skipped when its turn comes; a
         # running job aborts at its next progress tick (see _progress_cb).
         self._cancelled: set[str] = set()
         self._cancel_lock = threading.Lock()
+        # Schedule gating (injectable for tests). ``allowed_fn`` answers "may
+        # analysis run at this moment?"; the queue holds analysis jobs outside
+        # the window and pauses a resumable pass when the window closes.
+        self._allowed_fn = allowed_fn or schedule_mod.is_allowed
+        self._now_fn = now_fn or datetime.now
+        self._sleep_fn = sleep_fn or time.sleep
+        self._poll_s = poll_s
         self._worker = threading.Thread(target=self._loop, daemon=True, name="job-worker")
         self._worker.start()
+
+    def _analysis_allowed(self) -> bool:
+        return bool(self._allowed_fn(self._now_fn()))
 
     def submit(self, req: JobCreate) -> Job:
         media = Path(req.mediaPath)
@@ -160,6 +189,15 @@ class JobQueue:
                     self._render_media(job)
                 else:
                     self._render(job)
+            except JobPaused:
+                # The schedule window closed mid-run: re-queue to resume from the
+                # engine's checkpoint when it reopens, rather than fail or lose
+                # the work done so far.
+                job = self.store.get_job(job_id) or job
+                job.status = JobStatus.queued
+                job.stage = "paused — outside scheduled hours"
+                self.store.save_job(job)
+                self._queue.put((kind, job_id))
             except JobCancelled:
                 # Requested stop, not a failure: record it as cancelled.
                 job = self.store.get_job(job_id) or job
@@ -175,12 +213,16 @@ class JobQueue:
                 with self._cancel_lock:
                     self._cancelled.discard(job_id)
 
-    def _progress_cb(self, job: Job):
+    def _progress_cb(self, job: Job, resumable: bool = False):
         def cb(fraction, stage):
             # Check first: cancel() has already written status=cancelled, and
             # saving progress here would clobber it back to running.
             if self._is_cancelled(job.id):
                 raise JobCancelled()
+            # A resumable pass yields here if the schedule window has closed, so
+            # it re-queues and resumes later instead of running out of hours.
+            if resumable and not self._analysis_allowed():
+                raise JobPaused()
             if fraction is not None:
                 job.progress = round(float(fraction), 4)
             if stage:
@@ -189,14 +231,39 @@ class JobQueue:
 
         return cb
 
+    def _await_schedule(self, job: Job) -> None:
+        """Block until analysis is allowed by the schedule.
+
+        Applies to every analysis job before it starts, so nothing kicks off
+        outside the window. Raises :class:`JobCancelled` if the job is cancelled
+        while waiting. A no-op when the schedule is unrestricted.
+        """
+        announced = False
+        while not self._analysis_allowed():
+            if self._is_cancelled(job.id):
+                raise JobCancelled()
+            if not announced:
+                job.status = JobStatus.queued
+                job.stage = "waiting for scheduled hours"
+                self.store.save_job(job)
+                announced = True
+            self._sleep_fn(self._poll_s)
+
     def _analyze(self, job: Job) -> None:
         engine = ENGINES[job.engine]
+        # Hold before starting so a pass never begins outside the window; a
+        # resumable pass can also pause mid-run (see _progress_cb).
+        self._await_schedule(job)
+
         job.status = JobStatus.running
         job.stage = "analyzing"
         self.store.save_job(job)
 
         timeline, plan_path = engine.analyze(
-            Path(job.mediaPath), job.mediaFingerprint or "", job.options, self._progress_cb(job)
+            Path(job.mediaPath),
+            job.mediaFingerprint or "",
+            job.options,
+            self._progress_cb(job, resumable=getattr(engine, "resumable", False)),
         )
         self.store.save_timeline(job.id, timeline)
 

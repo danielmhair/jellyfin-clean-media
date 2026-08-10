@@ -124,6 +124,9 @@ or
 
 class VLMEngine(EngineAdapter):
     name = "vlm"
+    # The multi-hour visual pass writes a .vlm-progress.json checkpoint every 25
+    # samples and resumes from it, so it is safe to pause and re-queue.
+    resumable = True
 
     def version(self) -> str:
         return "1.0"

@@ -19,6 +19,12 @@ ProgressCb = Callable[[Optional[float], str], None]
 class EngineAdapter(ABC):
     name: str
 
+    # Whether analyze() checkpoints its progress and resumes from where it left
+    # off on a re-run. The job queue only pauses a running pass for a schedule
+    # window if it can be resumed without losing work; non-resumable passes are
+    # left to finish. Default False; a resumable engine opts in.
+    resumable: bool = False
+
     @abstractmethod
     def version(self) -> str: ...
 

@@ -52,7 +52,8 @@ spoken word while keeping music/ambient, windowed per finding, render-only.
 ## Layout
 
 - `worker/` — FastAPI worker (the engine). `main.py` API, `models.py`,
-  `policy.py`, `review.py`, `render.py`, `shots.py`, `store.py`, `batch.py`.
+  `policy.py`, `review.py`, `render.py`, `shots.py`, `store.py`, `batch.py`,
+  `queue.py` (job queue), `schedule.py` (analysis-hours gating).
 - `worker/engines/` — one adapter per detector behind a common interface
   (`base.py`): `subtitle_engine` (profanity from subs), `whisper_engine`,
   `vlm_engine` (Ollama Qwen3-VL vision), `pureframe_engine`, `vobsub` (OCR),

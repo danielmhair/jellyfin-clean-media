@@ -28,7 +28,9 @@ from .models import (
     StatusRequest,
     Timeline,
 )
+from . import schedule
 from .queue import JobQueue
+from .schedule import Schedule, ScheduleView
 from .review import (
     CLIP_PAD_S,
     build_clip,
@@ -79,6 +81,19 @@ def health() -> dict:
         "engines": {name: eng.health() for name, eng in ENGINES.items()},
         "queueSize": jobs.queue_size(),
     }
+
+
+@app.get("/api/schedule", response_model=ScheduleView)
+def get_schedule() -> ScheduleView:
+    """The analysis schedule, plus whether analysis is allowed right now."""
+    return schedule.view()
+
+
+@app.put("/api/schedule", response_model=ScheduleView)
+def put_schedule(new: Schedule) -> ScheduleView:
+    """Replace the analysis schedule (edited from the Jellyfin settings page)."""
+    schedule.set_schedule(new)
+    return schedule.view()
 
 
 @app.get("/api/capabilities")
