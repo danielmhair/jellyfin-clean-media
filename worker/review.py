@@ -464,6 +464,8 @@ PAGE = """<!doctype html>
  button{{flex:1;padding:9px;border:0;border-radius:6px;font-size:13px;
          font-weight:600;cursor:pointer;background:#30363d;color:#eee}}
  button.yes.on{{background:#238636}} button.no.on{{background:#da3633}}
+ .btns select{{flex:0 0 auto;padding:9px;border:0;border-radius:6px;background:#30363d;
+               color:#eee;font-size:13px;font-weight:600;cursor:pointer}}
  .bar{{position:sticky;top:0;background:#111;padding:10px 0;margin-bottom:10px;z-index:9}}
  .filters{{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px}}
  .filters button{{flex:0 0 auto;padding:6px 12px;background:#22262c;color:#9aa;font-size:12px}}
@@ -551,6 +553,10 @@ function card(s) {{
     + (s.approved === true ? ' approved' : s.approved === false ? ' rejected' : '');
   const tm = timing(s), w = word(s);
   const canMute = s.recommendedAction === 'mute';
+  // Each finding is set to how it should be acted on. skip works live in
+  // Jellyfin; mute/blur only take effect in a rendered clean copy.
+  const acts = ['mute','blur','skip'].map(a =>
+    `<option value=${{a}} ${{s.recommendedAction===a?'selected':''}}>${{a}}</option>`).join('');
   el.innerHTML = `
     <div class=shot>
       <img loading=lazy src="/api/thumbnail?path=${{encodeURIComponent(MEDIA)}}&ms=${{Math.floor((s.startMs+s.endMs)/2)}}">
@@ -565,13 +571,13 @@ function card(s) {{
       (${{((s.endMs-s.startMs)/1000).toFixed(1)}}s)${{
         tm ? `<span class="tag ${{tm.exact?'exact':'est'}}">${{tm.label}}</span>` : ''}}<br>
       <span class=cat>${{s.category}}</span>${{w ? ` <span class=word>“${{w}}”</span>` : ''}}${{
-        tentative ? '<span class=tag>needs your call</span>' : ''}} ${{s.confidence}} ·
-      <span class=act>${{s.recommendedAction}}</span> · ${{s.engine}}<br>
+        tentative ? '<span class=tag>needs your call</span>' : ''}} ${{s.confidence}} · ${{s.engine}}<br>
       <span class=why>${{(s.reasoning||'').replace(/</g,'&lt;')}}</span>
     </div>
     <div class=btns>
       <button class="yes ${{s.approved===true?'on':''}}">Bad — act on it</button>
       <button class="no ${{s.approved===false?'on':''}}">Fine — ignore</button>
+      <select class=actsel title="What to do with this finding when acted on">${{acts}}</select>
     </div>`;
   const shot = el.querySelector('.shot');
   shot.onclick = () => playClip(shot, s, false);
@@ -586,6 +592,14 @@ function card(s) {{
     }}).then(() => {{ s.approved = v; el.replaceWith(card(s)); apply(); tally(); }});
   yes.onclick = () => send(s.approved === true ? null : true);
   no.onclick  = () => send(s.approved === false ? null : false);
+
+  // Change what the finding does (mute/blur/skip). Re-render so "Play muted"
+  // and the action badge update to match.
+  const sel = el.querySelector('.actsel');
+  sel.onchange = () => fetch(`/api/segments/${{s.id}}?path=${{encodeURIComponent(MEDIA)}}`, {{
+      method: 'PATCH', headers: {{'Content-Type':'application/json'}},
+      body: JSON.stringify({{recommendedAction: sel.value}})
+    }}).then(() => {{ s.recommendedAction = sel.value; el.replaceWith(card(s)); apply(); tally(); }});
   return el;
 }}
 

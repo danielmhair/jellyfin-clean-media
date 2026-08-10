@@ -257,6 +257,20 @@ its box (`[ ]` → `[x]`), and move the **← NEXT** marker on.
 
 ## Recent changes
 
+### Film view → launcher; per-finding review moves to the worker page (2026-08-09, plugin 0.2.1.3)
+
+- **Simplified the in-Jellyfin film view** to a launcher: film name + decided
+  count, the 3 engine checkboxes + Analyze, live pass progress, a "Review
+  findings (mute/blur/skip)" link, and Render clean copy. Removed the inline
+  video player, the per-finding list/editor, "Next undecided" and "Add finding
+  at playhead" — that per-item work now lives on the worker review page.
+- **Worker review page gained a mute/blur/skip selector** per finding
+  (PATCHes `recommendedAction`, re-renders so "Play muted" tracks it).
+- **Analyze disabled unless an engine is ticked**; clearer render note that
+  mutes/blurs need a rendered copy while skips work live.
+- _Note:_ the review-page change is worker-side, so it needs a worker restart
+  to serve; the film-view change ships in the plugin.
+
 ### Film-view polish (2026-08-09, plugin 0.2.1.2)
 
 - **ETA** next to each pass's percent, estimated client-side from the rate of
