@@ -9,8 +9,16 @@
     "imageUrl": "",
     "versions": [
       {
+        "version": "0.2.3.0",
+        "changelog": "Analysis schedule: restrict library analysis to chosen hours so it doesn't use the GPU while you're watching. A new Analysis schedule editor on the settings page sets a per-weekday allowed window (with a live allowed/paused status). The worker enforces it — queued passes wait for the window, and the long visual pass pauses at a checkpoint and resumes when it reopens; short profanity passes finish, and rendering is never delayed. Requires a worker restart to take effect. Builds on 0.2.2.0.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.3.0.zip",
+        "checksum": "68fc03ebc2f8032e73ac5a6e57585d92",
+        "timestamp": "2026-08-10T13:37:06"
+      },
+      {
         "version": "0.2.2.0",
-        "changelog": "Per-card Analyze and Cancel on the review grid: each film card now has its own button — Cancel while a pass is in flight (stops just that film's queued/running jobs), or Analyze otherwise. New one-click 'Analyze everything' (on the card and the film view) queues every engine a film still needs (profanity + visual) in one action, skipping anything already done or in flight. Builds on 0.2.1.3.",
+        "changelog": "Per-card Analyze and Cancel on the review grid: each film card now has its own button \u2014 Cancel while a pass is in flight (stops just that film's queued/running jobs), or Analyze otherwise. New one-click 'Analyze everything' (on the card and the film view) queues every engine a film still needs (profanity + visual) in one action, skipping anything already done or in flight. Builds on 0.2.1.3.",
         "targetAbi": "10.11.0.0",
         "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.2.0.zip",
         "checksum": "73816fa15778287b88846d0c60156030",
