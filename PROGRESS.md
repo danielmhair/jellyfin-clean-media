@@ -12,7 +12,7 @@ _Last updated: 2026-08-10._
 ## Where it's running now
 
 The current build is **deployed and in active use**, not just built. The boot
-worker serves current code; the plugin (**0.2.2.0**) installs from the repo
+worker serves current code; the plugin (**0.2.3.0**) installs from the repo
 manifest and its film view + settings work; one film has been analyzed
 (profanity: 26 findings; visual: 1) and **reviewed inside Jellyfin**; and the
 media library has been reorganized to one folder per movie. Per-pass progress,
@@ -287,6 +287,33 @@ its box (`[ ]` → `[x]`), and move the **← NEXT** marker on.
   so an interruption costs minutes, not the whole run.
 
 ## Recent changes
+
+### Analysis schedule — run only during allowed hours (2026-08-10, worker + plugin 0.2.3.0)
+
+- **Why:** a whole-library scan shouldn't hammer the GPU while someone's
+  watching TV. The queue always existed; now it only *runs* during chosen hours.
+- **Worker** — new [worker/schedule.py](worker/schedule.py): a per-weekday
+  allowed-window `Schedule` (each day enabled + start/end minutes; end<start
+  wraps past midnight; start==end = all day), persisted to `data/schedule.json`
+  and cached in memory. `is_allowed(now)` is the gate. The queue
+  ([worker/queue.py](worker/queue.py)) consults it two ways: it **holds** an
+  analysis job before it starts until the window opens ("waiting for scheduled
+  hours"), and for a **resumable** engine it **pauses mid-run** when the window
+  closes — `_progress_cb` raises `JobPaused`, the job re-queues and resumes from
+  the engine's checkpoint when the window reopens. Non-resumable passes (short
+  profanity) are left to finish; renders are never gated. `EngineAdapter.resumable`
+  (default False) is set True on the VLM engine (it already checkpoints every 25
+  samples). New `GET/PUT /api/schedule` (returns a `ScheduleView` with an
+  `allowedNow` snapshot). 8 new tests (is_allowed windows incl. wrap; queue hold,
+  pause+resume, and non-resumable-not-paused) — 133 green.
+- **Plugin (0.2.3.0)** — the settings page gains an **Analysis schedule** editor:
+  a master "restrict to scheduled hours" toggle, a live allowed/paused status
+  line (worker-local time), and seven day rows (enable + start/end time). It
+  reads/writes the worker via a new `GET`/`POST CleanMedia/Schedule` proxy
+  (`WorkerClient.Get/SetScheduleAsync`); the schedule lives only on the worker
+  (single source of truth), the plugin is just the editor.
+- **Needs a worker restart** to serve the new endpoints and enforcement; the
+  plugin change ships in 0.2.3.0.
 
 ### Slice 7 — per-card Analyze / Cancel + one-action "analyze everything" (2026-08-10, plugin 0.2.2.0)
 

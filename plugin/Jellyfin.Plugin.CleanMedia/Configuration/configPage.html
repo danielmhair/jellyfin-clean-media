@@ -66,8 +66,46 @@
                 blurring require a rendered clean copy from the worker — no Jellyfin client
                 supports them live.
             </div>
+
+            <br />
+            <h2 style="margin-bottom:.2em;">Analysis schedule</h2>
+            <div class="fieldDescription" style="margin-top:0;">
+                Hold library analysis to certain hours (e.g. overnight) so it doesn't use the
+                GPU while you're watching. The worker enforces this: queued passes wait for an
+                allowed window, and the long visual pass — which checkpoints — pauses and
+                resumes across the boundary. Rendering a clean copy is never delayed.
+            </div>
+
+            <div class="checkboxContainer checkboxContainer-withDescription" style="margin-top:1em;">
+                <label class="emby-checkbox-label">
+                    <input id="SchedEnabled" type="checkbox" is="emby-checkbox" />
+                    <span>Restrict analysis to the scheduled hours below</span>
+                </label>
+                <div class="fieldDescription checkboxFieldDescription">
+                    Off: analysis runs whenever it's queued (the original behaviour).
+                    Times are the worker's local time. A day whose end is earlier than its start
+                    runs overnight into the next morning; set start and end equal for all day.
+                </div>
+            </div>
+
+            <div id="SchedStatus" class="fieldDescription" style="margin:.4em 0;"></div>
+            <div id="SchedDays" style="max-width:520px;"></div>
+
+            <div style="margin-top:1em;">
+                <button is="emby-button" type="button" id="SchedSave"
+                        class="raised button-submit emby-button"><span>Save schedule</span></button>
+                <span id="SchedResult" class="fieldDescription" style="margin-left:1em;"></span>
+            </div>
         </div>
     </div>
+
+<style>
+    .cmSchedRow{display:flex;align-items:center;gap:.8em;margin:.35em 0;}
+    .cmSchedRow .cmDayName{width:5.5em;}
+    .cmSchedRow input[type=time]{padding:.25em .4em;}
+    .cmSchedRow.cmOff{opacity:.5;}
+    .cmSchedSep{opacity:.6;}
+</style>
 
 <script type="text/javascript">
     (function () {
@@ -142,6 +180,128 @@
                     out.textContent = 'Test failed: ' + err;
                 });
             });
+
+        // -- analysis schedule ------------------------------------------------
+        // The schedule lives on the worker; this section reads and writes it via
+        // the plugin's CleanMedia/Schedule proxy. Times are edited as HH:MM and
+        // stored as minutes since midnight (index 0 = Monday, matching the
+        // worker's datetime.weekday()).
+        var DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday',
+            'Friday', 'Saturday', 'Sunday'];
+
+        function cmApi(method, path, body) {
+            var options = {
+                type: method,
+                url: ApiClient.getUrl('CleanMedia/' + path),
+                dataType: 'json'
+            };
+            if (body !== undefined) {
+                options.data = JSON.stringify(body);
+                options.contentType = 'application/json';
+            }
+            return ApiClient.ajax(options);
+        }
+
+        function pad2(n) { return (n < 10 ? '0' : '') + n; }
+        function minsToHM(mins) {
+            mins = ((Math.round(mins) % 1440) + 1440) % 1440;
+            return pad2(Math.floor(mins / 60)) + ':' + pad2(mins % 60);
+        }
+        function hmToMins(hm) {
+            if (!hm) { return 0; }
+            var p = hm.split(':');
+            return ((parseInt(p[0], 10) || 0) * 60 + (parseInt(p[1], 10) || 0)) % 1440;
+        }
+
+        function buildScheduleRows() {
+            var wrap = page.querySelector('#SchedDays');
+            wrap.innerHTML = DAY_NAMES.map(function (name, i) {
+                return '<div class="cmSchedRow" id="cmSchedRow-' + i + '">'
+                    + '<label class="emby-checkbox-label" style="width:9em;">'
+                    + '<input type="checkbox" is="emby-checkbox" class="cmSchedDay" data-i="' + i + '" />'
+                    + '<span class="cmDayName">' + name + '</span></label>'
+                    + '<input type="time" class="cmSchedStart" data-i="' + i + '" />'
+                    + '<span class="cmSchedSep">to</span>'
+                    + '<input type="time" class="cmSchedEnd" data-i="' + i + '" />'
+                    + '</div>';
+            }).join('');
+            // Dim a row whose day is disabled, so it's clear it won't run.
+            wrap.querySelectorAll('.cmSchedDay').forEach(function (cb) {
+                cb.addEventListener('change', function () {
+                    var row = page.querySelector('#cmSchedRow-' + cb.getAttribute('data-i'));
+                    if (row) { row.className = 'cmSchedRow' + (cb.checked ? '' : ' cmOff'); }
+                });
+            });
+        }
+
+        function fillSchedule(view) {
+            var sched = (view && view.schedule) || { enabled: false, days: [] };
+            page.querySelector('#SchedEnabled').checked = !!sched.enabled;
+            var days = sched.days || [];
+            for (var i = 0; i < 7; i++) {
+                var d = days[i] || { enabled: false, start: 0, end: 0 };
+                var cb = page.querySelector('.cmSchedDay[data-i="' + i + '"]');
+                var start = page.querySelector('.cmSchedStart[data-i="' + i + '"]');
+                var end = page.querySelector('.cmSchedEnd[data-i="' + i + '"]');
+                cb.checked = !!d.enabled;
+                start.value = minsToHM(d.start || 0);
+                end.value = minsToHM(d.end || 0);
+                var row = page.querySelector('#cmSchedRow-' + i);
+                if (row) { row.className = 'cmSchedRow' + (d.enabled ? '' : ' cmOff'); }
+            }
+            var status = page.querySelector('#SchedStatus');
+            if (!sched.enabled) {
+                status.textContent = 'Schedule off — analysis runs whenever it is queued.';
+            } else if (view && view.allowedNow) {
+                status.textContent = 'Analysis is allowed right now (worker time '
+                    + (view.now || '') + ').';
+            } else {
+                status.textContent = 'Analysis is paused by the schedule right now (worker time '
+                    + (view.now || '') + ') — queued passes are waiting.';
+            }
+        }
+
+        function readSchedule() {
+            var days = [];
+            for (var i = 0; i < 7; i++) {
+                days.push({
+                    enabled: page.querySelector('.cmSchedDay[data-i="' + i + '"]').checked,
+                    start: hmToMins(page.querySelector('.cmSchedStart[data-i="' + i + '"]').value),
+                    end: hmToMins(page.querySelector('.cmSchedEnd[data-i="' + i + '"]').value)
+                });
+            }
+            return { enabled: page.querySelector('#SchedEnabled').checked, days: days };
+        }
+
+        function loadSchedule() {
+            var status = page.querySelector('#SchedStatus');
+            cmApi('GET', 'Schedule').then(function (view) {
+                if (view && view.unreachable) {
+                    status.textContent = 'Could not reach the worker to load the schedule — '
+                        + 'check the Worker URL above.';
+                    return;
+                }
+                fillSchedule(view);
+            }).catch(function (err) {
+                status.textContent = 'Could not load the schedule: ' + err;
+            });
+        }
+
+        buildScheduleRows();
+        loadSchedule();
+
+        page.querySelector('#SchedSave').addEventListener('click', function () {
+            var out = page.querySelector('#SchedResult');
+            out.textContent = 'Saving…';
+            cmApi('POST', 'Schedule', readSchedule()).then(function (view) {
+                if (view && view.unreachable) {
+                    out.textContent = 'Could not reach the worker to save the schedule.';
+                    return;
+                }
+                fillSchedule(view);
+                out.textContent = 'Saved.';
+            }).catch(function (err) { out.textContent = 'Could not save: ' + err; });
+        });
     })();
 </script>
 </div>

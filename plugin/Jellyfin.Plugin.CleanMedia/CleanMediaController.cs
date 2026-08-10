@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -418,6 +419,40 @@ public class CleanMediaController : ControllerBase
         }
 
         return Ok(new { cancelled });
+    }
+
+    /// <summary>The worker's analysis schedule, for the settings page to edit.</summary>
+    /// <remarks>
+    /// The schedule lives on the worker (the machine that enforces it), so the
+    /// settings page reads and writes it through here rather than storing it in
+    /// the Jellyfin plugin config — one source of truth, no drift. The shape is
+    /// the worker's, passed through opaquely.
+    /// </remarks>
+    [HttpGet("Schedule")]
+    public async Task<ActionResult<object>> GetSchedule(CancellationToken cancellationToken)
+    {
+        var view = await _worker.GetScheduleAsync(cancellationToken).ConfigureAwait(false);
+        if (view is null)
+        {
+            return Ok(new { unreachable = true });
+        }
+
+        return Ok(view);
+    }
+
+    /// <summary>Replace the worker's analysis schedule.</summary>
+    [HttpPost("Schedule")]
+    public async Task<ActionResult<object>> SetSchedule(
+        [FromBody] JsonElement schedule,
+        CancellationToken cancellationToken)
+    {
+        var view = await _worker.SetScheduleAsync(schedule, cancellationToken).ConfigureAwait(false);
+        if (view is null)
+        {
+            return Ok(new { unreachable = true });
+        }
+
+        return Ok(view);
     }
 
     /// <summary>Bits of plugin config the review page needs in the browser.</summary>

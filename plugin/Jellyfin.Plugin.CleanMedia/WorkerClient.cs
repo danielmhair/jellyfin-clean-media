@@ -492,6 +492,63 @@ public class WorkerClient
         }
     }
 
+    /// <summary>
+    /// The worker's analysis schedule plus a right-now allowed snapshot, as raw
+    /// JSON. The schedule shape is owned by the worker; the plugin only proxies
+    /// it between its settings page and the worker, so it is passed through
+    /// opaquely rather than modelled here. Null if the worker is unreachable.
+    /// </summary>
+    public async Task<JsonElement?> GetScheduleAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var client = NewClient();
+            using var response = await client
+                .GetAsync($"{Base}/api/schedule", cancellationToken)
+                .ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            return await response.Content
+                .ReadFromJsonAsync<JsonElement>(cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            _logger.LogWarning(ex, "Clean Media worker unreachable at {Url}", Config.WorkerUrl);
+            return null;
+        }
+    }
+
+    /// <summary>Replace the worker's analysis schedule. Returns the stored view, or null if unreachable.</summary>
+    public async Task<JsonElement?> SetScheduleAsync(JsonElement schedule, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var client = NewClient();
+            using var request = new HttpRequestMessage(HttpMethod.Put, $"{Base}/api/schedule")
+            {
+                Content = JsonContent.Create(schedule),
+            };
+            using var response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            return await response.Content
+                .ReadFromJsonAsync<JsonElement>(cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            _logger.LogWarning(ex, "Clean Media worker unreachable at {Url}", Config.WorkerUrl);
+            return null;
+        }
+    }
+
     /// <summary>Review state for a page of the library, or null if the worker is unreachable.</summary>
     public async Task<List<MediaStatus>?> GetStatusAsync(
         IEnumerable<string> mediaPaths,
