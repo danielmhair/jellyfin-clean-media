@@ -9,6 +9,14 @@
     "imageUrl": "",
     "versions": [
       {
+        "version": "0.2.2.0",
+        "changelog": "Per-card Analyze and Cancel on the review grid: each film card now has its own button — Cancel while a pass is in flight (stops just that film's queued/running jobs), or Analyze otherwise. New one-click 'Analyze everything' (on the card and the film view) queues every engine a film still needs (profanity + visual) in one action, skipping anything already done or in flight. Builds on 0.2.1.3.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.2.0.zip",
+        "checksum": "73816fa15778287b88846d0c60156030",
+        "timestamp": "2026-08-10T13:10:56"
+      },
+      {
         "version": "0.2.1.3",
         "changelog": "Simpler film view: it's now a launcher \u2014 analyze, render a clean copy, or open the review page \u2014 with no per-finding list or player. All per-finding review (set mute/blur/skip, approve) happens on the worker review page, which gains a mute/blur/skip selector. Analyze is disabled unless an engine is ticked; clearer note that mutes/blurs need a render while skips work live.",
         "targetAbi": "10.11.0.0",
