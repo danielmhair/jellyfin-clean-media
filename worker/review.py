@@ -467,6 +467,39 @@ def build_peaks(
     }
 
 
+def build_filmstrip(
+    media: Path,
+    start_ms: int,
+    end_ms: int,
+    pad_s: float = CLIP_PAD_S,
+    fps: int = 1,
+    thumb_w: int = 160,
+) -> Optional[bytes]:
+    """A single tiled filmstrip JPEG of the ±``pad_s`` window around a finding,
+    for the visual timing editor — the frame-preview counterpart to the
+    waveform. One ffmpeg call samples ``fps`` frames/s across the window and
+    tiles them into one horizontal strip, so the browser makes a single request
+    (not one per thumbnail). ``thumb_w`` × ``fps`` = 160 px/s, matching the
+    editor's zoom, so a frame lines up with its real time.
+    """
+    win_start = max(0.0, start_ms / 1000 - pad_s)
+    win_end = end_ms / 1000 + pad_s
+    win_dur = max(0.5, win_end - win_start)
+    cols = max(1, int(round(win_dur * fps)))
+    proc = subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-ss", f"{win_start:.3f}", "-i", str(media),
+            "-t", f"{win_dur:.3f}",
+            "-vf", f"fps={fps},scale={thumb_w}:-2,tile={cols}x1",
+            "-frames:v", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "-",
+        ],
+        capture_output=True,
+    )
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    return proc.stdout
+
+
 def grab_thumbnail(media: Path, at_ms: int) -> Optional[bytes]:
     proc = subprocess.run(
         [
@@ -518,7 +551,8 @@ PAGE = """<!doctype html>
                color:#eee;font-size:13px;font-weight:600;cursor:pointer}}
  .editor{{padding:0 12px 12px;display:none}} .editor.open{{display:block}}
  .wavewrap{{overflow-x:auto;background:#0c0c0d;border:1px solid #2a2f36;border-radius:6px}}
- .wavebox{{position:relative}} .wavebox canvas{{display:block}}
+ .wavebox{{position:relative}} .wavebox canvas,.wavebox .strip{{display:block}}
+ .strip{{object-fit:fill;image-rendering:auto}}
  .region{{position:absolute;top:0;bottom:0;background:rgba(255,212,121,.15);pointer-events:none}}
  .handle{{position:absolute;top:0;bottom:0;width:2px;background:#ffd479;pointer-events:none}}
  .handle.end{{background:#7ee787}}
@@ -678,29 +712,47 @@ const fmtMs = ms => {{ const s = Math.floor(ms / 1000);
 // Waveform timing editor. Zoomed to ~160px/s so 25ms is a few pixels; the
 // scrollable window spans the finding ±PAD s, so a mute can be dragged onto
 // the exact word by eye (and ear, via Preview muted) and saved to the sidecar.
+// Visual findings (scene detections) get a filmstrip to place by eye; audio
+// findings (spoken words) get a waveform to place by eye and ear.
+function isVisual(s) {{ return s.engine === 'vlm' || s.engine === 'pureframe'; }}
+
 function toggleTiming(cell, s, box) {{
   if (box.dataset.open === '1') {{
     box.dataset.open = ''; box.classList.remove('open'); box.innerHTML = ''; return;
   }}
   box.dataset.open = '1'; box.classList.add('open');
-  box.innerHTML = '<div class=tload>loading waveform&hellip;</div>';
-  fetch(`/api/peaks?path=${{encodeURIComponent(MEDIA)}}&startMs=${{s.startMs}}&endMs=${{s.endMs}}&pad=${{PAD}}`)
-    .then(r => r.json())
-    .then(d => buildTiming(cell, s, box, d))
-    .catch(() => box.innerHTML = '<div class=tload>could not load waveform</div>');
+  if (isVisual(s)) {{
+    box.innerHTML = '<div class=tload>loading frames&hellip;</div>';
+    buildTiming(cell, s, box, {{visual: true}});
+  }} else {{
+    box.innerHTML = '<div class=tload>loading waveform&hellip;</div>';
+    fetch(`/api/peaks?path=${{encodeURIComponent(MEDIA)}}&startMs=${{s.startMs}}&endMs=${{s.endMs}}&pad=${{PAD}}`)
+      .then(r => r.json())
+      .then(d => buildTiming(cell, s, box, {{peaks: d.peaks}}))
+      .catch(() => box.innerHTML = '<div class=tload>could not load waveform</div>');
+  }}
 }}
 
-function buildTiming(cell, s, box, d) {{
-  const winStart = d.winStartMs, winEnd = d.winEndMs, span = Math.max(1, winEnd - winStart);
+function buildTiming(cell, s, box, mode) {{
+  // Window bounds match the server (build_peaks/build_filmstrip): finding ±PAD,
+  // clamped at the file start.
+  const winStart = Math.max(0, s.startMs - PAD * 1000), winEnd = s.endMs + PAD * 1000;
+  const span = Math.max(1, winEnd - winStart);
   const PXPS = 160, SNAP = 25, H = 90;
   const W = Math.max(320, Math.round(span / 1000 * PXPS));
   const clamp = t => Math.max(winStart, Math.min(winEnd, t));
   let st = clamp(s.startMs), en = clamp(s.endMs);
+  const canMute = s.recommendedAction === 'mute';
+  const bg = mode.visual
+    ? `<img class=strip style="width:${{W}}px;height:${{H}}px" `
+      + `src="/api/filmstrip?path=${{encodeURIComponent(MEDIA)}}`
+      + `&startMs=${{s.startMs}}&endMs=${{s.endMs}}&pad=${{PAD}}">`
+    : `<canvas width=${{W}} height=${{H}}></canvas>`;
 
   box.innerHTML = `
     <div class=wavewrap>
       <div class=wavebox style="width:${{W}}px;height:${{H}}px">
-        <canvas width=${{W}} height=${{H}}></canvas>
+        ${{bg}}
         <div class=region></div>
         <div class="handle start"><div class=grip></div></div>
         <div class="handle end"><div class=grip></div></div>
@@ -718,7 +770,7 @@ function buildTiming(cell, s, box, d) {{
       <span style="margin-left:14px" class=tread id=tdur-${{s.id}}></span>
     </div>
     <div class=tctrls>
-      <button class=tprev>&#9654; Preview muted</button>
+      <button class=tprev>&#9654; ${{canMute ? 'Preview muted' : 'Preview scene'}}</button>
       <button class=tsave>Save timing</button>
       <button class=tcancel>Cancel</button>
       <span class=thint>drag the handles or nudge; snaps to 25ms</span>
@@ -726,7 +778,7 @@ function buildTiming(cell, s, box, d) {{
 
   const wrap = box.querySelector('.wavewrap');
   const wbox = box.querySelector('.wavebox');
-  const ctx = box.querySelector('canvas').getContext('2d');
+  const canvas = box.querySelector('canvas');
   const hStart = box.querySelector('.handle.start');
   const hEnd = box.querySelector('.handle.end');
   const region = box.querySelector('.region');
@@ -737,13 +789,16 @@ function buildTiming(cell, s, box, d) {{
   const xOf = t => (t - winStart) / span * W;
   const tOf = x => Math.round((winStart + x / W * span) / SNAP) * SNAP;
 
-  // Waveform: one bar per peak.
-  ctx.clearRect(0, 0, W, H);
-  ctx.fillStyle = '#3a4650';
-  const n = d.peaks.length, bw = W / n;
-  for (let i = 0; i < n; i++) {{
-    const h = d.peaks[i] * (H - 8);
-    ctx.fillRect(i * bw, (H - h) / 2, Math.max(1, bw - 0.5), h);
+  // Waveform: one bar per peak (audio findings only; visual show the filmstrip).
+  if (canvas && mode.peaks) {{
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#3a4650';
+    const n = mode.peaks.length, bw = W / n;
+    for (let i = 0; i < n; i++) {{
+      const h = mode.peaks[i] * (H - 8);
+      ctx.fillRect(i * bw, (H - h) / 2, Math.max(1, bw - 0.5), h);
+    }}
   }}
 
   function upd() {{
@@ -784,7 +839,7 @@ function buildTiming(cell, s, box, d) {{
   }});
 
   box.querySelector('.tprev').onclick = () =>
-    playClip(cell.querySelector('.shot'), {{startMs: st, endMs: en}}, true);
+    playClip(cell.querySelector('.shot'), {{startMs: st, endMs: en}}, canMute);
 
   box.querySelector('.tcancel').onclick = () => toggleTiming(cell, s, box);
 

@@ -7,35 +7,30 @@ review loop has its own spec in
 This file tracks the current state and open threads. Keep entries generic — no
 real film names (see [CLAUDE.md](CLAUDE.md)).
 
-_Last updated: 2026-08-08._
+_Last updated: 2026-08-09._
 
-## The real blocker: nothing is running the current build
+## Where it's running now
 
-Everything below is **built and tested but not actually deployed and exercised
-end-to-end in a running Jellyfin.** This is the one thing standing between the
-project and genuine daily use — see the phase roadmap in
-[clean-media-prd.md](plan/prds/clean-media-prd.md) (Phase 4 "review UI inside
-Jellyfin" is code-complete) and the status header of
-[the review-UI PRD](plan/prds/2026-07-20-jellyfin-review-ui.md) ("all three
-slices built … not yet loaded into a running Jellyfin").
+The current build is **deployed and in active use**, not just built. The boot
+worker serves current code; the plugin (**0.2.1.3**) installs from the repo
+manifest and its film view + settings work; one film has been analyzed
+(profanity: 26 findings; visual: 1) and **reviewed inside Jellyfin**; and the
+media library has been reorganized to one folder per movie. Per-pass progress,
+the review UI, the by-path render, and the waveform/filmstrip timing editors
+have all been exercised against the real dashboard.
 
-To get it running properly, in order:
+What's left to fully close Phase 4's "one film, end to end" on a live dashboard
+(check the invariants, not exit codes):
 
-1. ~~**Restart the worker onto current code.**~~ **Done 2026-08-08** via
-   `install-service.ps1 -Restart` (elevated). The boot service had been serving
-   older UI code; it now serves the current build — verified by the served
-   `/api/review` page carrying the current markers the stale build lacked, not
-   just by `/api/health` answering. (A bare Stop/Start leaves a stale uvicorn on
-   the port — see [CLAUDE.md](CLAUDE.md).)
-2. **Build and install the plugin into the running Jellyfin.**
-   `scripts/build-plugin.sh` then install from the repo manifest; confirm the
-   "Clean Media Review" entry appears in the dashboard main menu.
-3. **Walk one film end-to-end in the real UI** — library grid → queue analysis
-   → watch live progress → review findings → approve → confirm Jellyfin skips
-   the approved span during playback. Verify the invariant, not the exit code.
-
-Until steps 1–3 are done and observed, treat every "built" item below as
-"built, unverified in production."
+1. ~~Restart the worker onto current code.~~ **Done** (`install-service.ps1
+   -Restart`, elevated) — re-done after each worker change and the reorg.
+2. ~~Build and install the plugin.~~ **Done** — 0.2.1.x installs from the repo
+   manifest; "Clean Media Review" is in the dashboard menu.
+3. **Confirm the two live invariants on a real film:** an approved **skip** is
+   skipped during playback (needs a film with an approved skip — the one visual
+   finding on the analyzed film was rejected), and a **rendered clean copy** has
+   the muted word silenced with the original untouched (verified locally on a
+   synthetic film; confirm on a real one via the film-view "Render clean copy").
 
 ### Jellyfin-side workflow gaps (discussed 2026-08-08)
 
@@ -203,14 +198,22 @@ its box (`[ ]` → `[x]`), and move the **← NEXT** marker on.
   `build_peaks` localizes a burst at the finding and the page renders the editor
   (tests); needs a worker restart to serve. _Done when (to confirm live):_ a
   reviewer drags a mute onto the exact word and the new bounds persist.
-- [ ] **Slice 5 — Bad scenes (visual): analyze → review → skip/blur + scene
-  timing. ← NEXT** The same loop as Slices 3–4, for the visual pass. Analyze one film
-  with the VLM, review the scene findings, approve **skip** (live) or **blur**
-  (render), and adjust scene start/end with a frame-preview version of the timing
-  editor (thumbnails/scrub rather than a waveform). _Done when:_ a visual finding
-  on one film can be reviewed, retimed, and skipped or blurred (blur via the
-  render from Slice 3).
-- [ ] **Slice 6 — Voice-only mute (remove the voice, keep the background).**
+- [x] **Slice 5 — Bad scenes (visual): analyze → review → skip/blur + scene
+  timing.** _Built 2026-08-09 (worker-side)._ The whole loop now exists for the
+  visual pass. Review: the per-finding **mute/blur/skip selector** (0.2.1.3)
+  lets a scene be set to skip (live) or blur (render). Retime: the timing editor
+  is now **dual-mode** — visual findings (`vlm`/`pureframe`) get a **filmstrip**
+  instead of a waveform. A new `GET /api/filmstrip` samples the finding ±`PAD`
+  window at 1 frame/s and tiles them into one JPEG in a single ffmpeg call
+  (160 px/frame = the editor's 160 px/s zoom, so a frame lines up with its real
+  time); the same draggable handles / ±25 ms nudge / Save apply. Act: an
+  approved skip is live (`Commercial` segment); an approved **blur** is applied
+  by the combined renderer (`render.py` `gblur`) in the clean copy from Slice 3.
+  _Verified:_ `build_filmstrip` returns a tiled JPEG and the page renders the
+  filmstrip editor for visual findings (tests); needs a worker restart to serve.
+  _Done when (to confirm live):_ a visual finding is reviewed, retimed on the
+  filmstrip, and skipped or blurred.
+- [ ] **Slice 6 — Voice-only mute (remove the voice, keep the background). ← NEXT**
   Today a mute silences *all* audio for the span, so a swear over music leaves an
   audible hole. Instead: Demucs 2-stem separation on a padded ~2–3 s window
   around the finding, zero **only** the vocals across the mute span, and remix so
@@ -259,6 +262,29 @@ its box (`[ ]` → `[x]`), and move the **← NEXT** marker on.
   so an interruption costs minutes, not the whole run.
 
 ## Recent changes
+
+### Slice 5 — visual timing via a filmstrip; scene skip/blur review (2026-08-09, worker)
+
+- **`GET /api/filmstrip`** — one ffmpeg call samples the finding ±`PAD` window
+  at 1 frame/s and tiles them into a single JPEG (`build_filmstrip`), so the
+  browser makes one request, not one per thumbnail.
+- **Dual-mode timing editor** — `vlm`/`pureframe` findings now open a
+  **filmstrip** (drag the scene boundaries by eye); audio findings keep the
+  waveform. Shared handles / ±25 ms nudge / ms readout / Save; preview adapts
+  (muted for mutes, plain scene otherwise).
+- Scene **skip** works live; scene **blur** renders via `render.py`'s existing
+  `gblur` path in the Slice-3 clean copy. Worker-only; needs a worker restart.
+
+### Library reorg — one folder per movie (2026-08-09)
+
+- Moved **1,194 files** so every film sits in its own folder, nested in its
+  collection (`Movies/<Collection>/<Film (Year)>/…`), across 11 collections
+  (TV Shows and New left as-is). Same-volume renames, 0 failures; each film's
+  companions (e.g. GotG2's `.cleanmedia.json` sidecar + engine files) travelled
+  with it, so review decisions are preserved. Fully logged for one-command undo.
+- After the move: the worker was restarted (rebuilds its filename→path index)
+  and Jellyfin rescanned. The worker resolves by filename recursively, so the
+  deeper layout is transparent to it.
 
 ### Slice 4 — waveform timing editor on the review page (2026-08-09, worker)
 

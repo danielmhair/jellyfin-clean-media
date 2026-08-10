@@ -32,6 +32,7 @@ from .queue import JobQueue
 from .review import (
     CLIP_PAD_S,
     build_clip,
+    build_filmstrip,
     build_peaks,
     create_segment,
     delete_segment,
@@ -212,6 +213,18 @@ def peaks(path: str, startMs: int, endMs: int, pad: float = CLIP_PAD_S) -> dict:
     if result is None:
         raise HTTPException(500, "could not read audio peaks")
     return result
+
+
+@app.get("/api/filmstrip")
+def filmstrip(path: str, startMs: int, endMs: int, pad: float = CLIP_PAD_S) -> Response:
+    """Tiled filmstrip of the ±pad window, for the visual timing editor."""
+    media = resolve_media(path)
+    if media is None:
+        raise HTTPException(404, f"media not found: {path}")
+    jpeg = build_filmstrip(media, startMs, endMs, pad)
+    if not jpeg:
+        raise HTTPException(500, "could not build filmstrip")
+    return Response(jpeg, media_type="image/jpeg", headers={"Cache-Control": "max-age=3600"})
 
 
 @app.patch("/api/segments", response_model=Timeline)

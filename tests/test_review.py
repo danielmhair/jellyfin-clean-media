@@ -155,3 +155,20 @@ def test_build_peaks_window_and_localization(tmp_path):
     loud = max(range(len(r["peaks"])), key=lambda i: r["peaks"][i])
     loud_ms = r["winStartMs"] + loud * (1000 // r["perSec"])
     assert 900 <= loud_ms <= 1350  # burst localizes at the finding (1000–1300ms)
+
+
+def test_build_filmstrip_returns_jpeg(tmp_path):
+    """The visual timing editor's frame strip is one tiled JPEG for the window."""
+    import subprocess
+
+    from worker.review import build_filmstrip
+
+    media = tmp_path / "clip.mkv"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+         "-i", "testsrc=size=320x240:rate=10:duration=12",
+         "-c:v", "libx264", str(media)],
+        check=True,
+    )
+    jpeg = build_filmstrip(media, 5000, 7000, pad_s=2.0)
+    assert jpeg is not None and jpeg[:2] == b"\xff\xd8"  # JPEG magic
