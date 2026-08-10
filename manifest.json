@@ -9,6 +9,14 @@
     "imageUrl": "",
     "versions": [
       {
+        "version": "0.2.1.3",
+        "changelog": "Simpler film view: it's now a launcher \u2014 analyze, render a clean copy, or open the review page \u2014 with no per-finding list or player. All per-finding review (set mute/blur/skip, approve) happens on the worker review page, which gains a mute/blur/skip selector. Analyze is disabled unless an engine is ticked; clearer note that mutes/blurs need a render while skips work live.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.1.3.zip",
+        "checksum": "db3d4e6ab4fdf082701335dce5b58a05",
+        "timestamp": "2026-08-10T02:20:29"
+      },
+      {
         "version": "0.2.1.2",
         "changelog": "Film-view polish: an ETA next to each pass's percent; disable analysis engines already running/queued/done so you can't re-queue them; hide 'Next undecided' until there are findings and 'Add finding at playhead' unless the film can play; and a link to the worker's standalone review page. Builds on 0.2.1.1's live per-pass progress.",
         "targetAbi": "10.11.0.0",
