@@ -32,6 +32,7 @@ from .queue import JobQueue
 from .review import (
     CLIP_PAD_S,
     build_clip,
+    build_peaks,
     create_segment,
     delete_segment,
     grab_thumbnail,
@@ -199,6 +200,18 @@ def clip(
     if built is None:
         raise HTTPException(500, "could not build clip")
     return FileResponse(built, media_type="video/mp4")
+
+
+@app.get("/api/peaks")
+def peaks(path: str, startMs: int, endMs: int, pad: float = CLIP_PAD_S) -> dict:
+    """Waveform peaks for the ±pad window around a finding, for the timing editor."""
+    media = resolve_media(path)
+    if media is None:
+        raise HTTPException(404, f"media not found: {path}")
+    result = build_peaks(media, startMs, endMs, pad)
+    if result is None:
+        raise HTTPException(500, "could not read audio peaks")
+    return result
 
 
 @app.patch("/api/segments", response_model=Timeline)

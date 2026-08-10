@@ -191,17 +191,20 @@ its box (`[ ]` → `[x]`), and move the **← NEXT** marker on.
   not just "not rejected". _Remaining (deploy step):_ install 0.2.1.0 into the
   running Jellyfin and walk one real film — approve a mute, click Render, confirm
   the clean copy; approve a skip, confirm playback skips it.
-- [ ] **Slice 4 — Word-lock timing editor (by ear, to the millisecond). ← NEXT** The
-  human answer to timings no ASR can place. Zoom a finding to ±~1.5 s, draw the
-  waveform (new worker peaks endpoint: ffmpeg → PCM → downsampled JSON), drag the
-  start/end handles by milliseconds, and loop-play the selected span *with the
-  mute applied* so you tune by ear until the word is gone and the words either
-  side survive. Saves via the existing `startMs`/`endMs` patch (no new
-  persistence); `/api/clip?mute=true` already supplies the looped audio. _Done
-  when:_ a reviewer moves a mute onto the exact word by ear and the new bounds
-  persist to the sidecar.
+- [x] **Slice 4 — Word-lock timing editor (by ear, to the millisecond).**
+  _Built 2026-08-09 (worker-side)._ The worker review page's read-only timing is
+  now an editor: a new `GET /api/peaks` decodes the finding ±`PAD` (15 s) window
+  to a downsampled waveform (ffmpeg → mono PCM → 40 peaks/s JSON, one peak per
+  25 ms), which the page draws in a horizontally-scrollable canvas zoomed to
+  ~160 px/s. Draggable start/end handles (snap 25 ms) plus ±25 ms nudge buttons
+  and a live millisecond readout move the mute onto the exact word; **Preview
+  muted** loop-plays the current selection via `/api/clip?mute=true` to tune by
+  ear; **Save** persists through the existing `startMs`/`endMs` patch. _Verified:_
+  `build_peaks` localizes a burst at the finding and the page renders the editor
+  (tests); needs a worker restart to serve. _Done when (to confirm live):_ a
+  reviewer drags a mute onto the exact word and the new bounds persist.
 - [ ] **Slice 5 — Bad scenes (visual): analyze → review → skip/blur + scene
-  timing.** The same loop as Slices 3–4, for the visual pass. Analyze one film
+  timing. ← NEXT** The same loop as Slices 3–4, for the visual pass. Analyze one film
   with the VLM, review the scene findings, approve **skip** (live) or **blur**
   (render), and adjust scene start/end with a frame-preview version of the timing
   editor (thumbnails/scrub rather than a waveform). _Done when:_ a visual finding
@@ -256,6 +259,19 @@ its box (`[ ]` → `[x]`), and move the **← NEXT** marker on.
   so an interruption costs minutes, not the whole run.
 
 ## Recent changes
+
+### Slice 4 — waveform timing editor on the review page (2026-08-09, worker)
+
+- **`GET /api/peaks`** — decodes a finding's ±`PAD` window to a downsampled
+  waveform (ffmpeg → mono 8 kHz PCM → 40 peaks/s, one per 25 ms). The browser
+  can't decode MKV, so the worker supplies the peaks as JSON with the window
+  bounds. `build_peaks` in [worker/review.py](worker/review.py).
+- **Timing editor** — the review page's timings were read-only text; now a
+  "✎ Timing" button opens a scrollable waveform (zoomed ~160 px/s so 25 ms is a
+  few pixels) with draggable start/end handles, ±25 ms nudge buttons, a live
+  millisecond readout, **Preview muted** (loops the current selection via
+  `/api/clip?mute=true`), and **Save** (existing `startMs`/`endMs` patch).
+- **Worker-only change** — no plugin rebuild; needs a worker restart to serve.
 
 ### Film view → launcher; per-finding review moves to the worker page (2026-08-09, plugin 0.2.1.3)
 

@@ -417,6 +417,56 @@ def build_clip(
     return out
 
 
+def build_peaks(
+    media: Path,
+    start_ms: int,
+    end_ms: int,
+    pad_s: float = CLIP_PAD_S,
+    per_sec: int = 40,
+) -> Optional[dict]:
+    """Downsampled audio peaks for the window around a finding, for the
+    waveform in the timing editor.
+
+    The browser can't decode an MKV to draw a waveform, so the worker decodes
+    the ±``pad_s`` window to mono PCM and reduces it to one peak per
+    ``1/per_sec`` s (40/s → a peak every 25 ms, matching the editor's nudge
+    step). Returns the window's real bounds so the page can map time → x, and
+    the finding's own start/end sit inside it.
+    """
+    import numpy as np
+
+    win_start = max(0.0, start_ms / 1000 - pad_s)
+    win_end = end_ms / 1000 + pad_s
+    win_dur = max(0.05, win_end - win_start)
+    sr = 8000
+    proc = subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-ss", f"{win_start:.3f}", "-i", str(media),
+            "-t", f"{win_dur:.3f}", "-map", "0:a:0?", "-ac", "1", "-ar", str(sr),
+            "-f", "s16le", "-",
+        ],
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+
+    n_buckets = max(1, int(round(win_dur * per_sec)))
+    data = np.frombuffer(proc.stdout, dtype="<i2")
+    if data.size < n_buckets:
+        peaks = [0.0] * n_buckets
+    else:
+        bucket = data.size // n_buckets
+        d = np.abs(data[: bucket * n_buckets].astype(np.float32)).reshape(n_buckets, bucket)
+        peaks = (d.max(axis=1) / 32768.0).round(3).tolist()
+
+    return {
+        "winStartMs": int(round(win_start * 1000)),
+        "winEndMs": int(round(win_end * 1000)),
+        "perSec": per_sec,
+        "peaks": peaks,
+    }
+
+
 def grab_thumbnail(media: Path, at_ms: int) -> Optional[bytes]:
     proc = subprocess.run(
         [
@@ -466,6 +516,20 @@ PAGE = """<!doctype html>
  button.yes.on{{background:#238636}} button.no.on{{background:#da3633}}
  .btns select{{flex:0 0 auto;padding:9px;border:0;border-radius:6px;background:#30363d;
                color:#eee;font-size:13px;font-weight:600;cursor:pointer}}
+ .editor{{padding:0 12px 12px;display:none}} .editor.open{{display:block}}
+ .wavewrap{{overflow-x:auto;background:#0c0c0d;border:1px solid #2a2f36;border-radius:6px}}
+ .wavebox{{position:relative}} .wavebox canvas{{display:block}}
+ .region{{position:absolute;top:0;bottom:0;background:rgba(255,212,121,.15);pointer-events:none}}
+ .handle{{position:absolute;top:0;bottom:0;width:2px;background:#ffd479;pointer-events:none}}
+ .handle.end{{background:#7ee787}}
+ .handle .grip{{position:absolute;top:0;left:-6px;width:14px;height:18px;border-radius:3px;
+                background:inherit;pointer-events:auto;cursor:ew-resize}}
+ .tctrls{{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px;
+          font-size:12px;color:#9aa}}
+ .tctrls button{{flex:0 0 auto;padding:6px 10px;background:#22262c;font-size:12px}}
+ .tctrls button.tsave{{background:#238636;color:#fff}}
+ .tread{{font-variant-numeric:tabular-nums;color:#eee;font-weight:600}}
+ .thint{{opacity:.6}} .tload{{padding:12px;color:#9aa;font-size:12px}}
  .bar{{position:sticky;top:0;background:#111;padding:10px 0;margin-bottom:10px;z-index:9}}
  .filters{{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px}}
  .filters button{{flex:0 0 auto;padding:6px 12px;background:#22262c;color:#9aa;font-size:12px}}
@@ -565,6 +629,7 @@ function card(s) {{
     <div class=clipbtns>
       <button class=play-plain>&#9654; Play scene</button>
       ${{canMute ? '<button class=play-muted>&#9654; Play muted</button>' : ''}}
+      <button class=edit-timing>&#9998; Timing</button>
     </div>
     <div class=meta>
       <b>#${{s.id}}</b> ${{fmt(s.startMs)}} – ${{fmt(s.endMs)}}
@@ -578,7 +643,8 @@ function card(s) {{
       <button class="yes ${{s.approved===true?'on':''}}">Bad — act on it</button>
       <button class="no ${{s.approved===false?'on':''}}">Fine — ignore</button>
       <select class=actsel title="What to do with this finding when acted on">${{acts}}</select>
-    </div>`;
+    </div>
+    <div class=editor></div>`;
   const shot = el.querySelector('.shot');
   shot.onclick = () => playClip(shot, s, false);
   el.querySelector('.play-plain').onclick = () => playClip(shot, s, false);
@@ -600,7 +666,135 @@ function card(s) {{
       method: 'PATCH', headers: {{'Content-Type':'application/json'}},
       body: JSON.stringify({{recommendedAction: sel.value}})
     }}).then(() => {{ s.recommendedAction = sel.value; el.replaceWith(card(s)); apply(); tally(); }});
+
+  el.querySelector('.edit-timing').onclick = () => toggleTiming(el, s, el.querySelector('.editor'));
   return el;
+}}
+
+const fmtMs = ms => {{ const s = Math.floor(ms / 1000);
+  return `${{Math.floor(s / 60)}}:${{String(s % 60).padStart(2, '0')}}`
+       + `.${{String(Math.floor(ms % 1000)).padStart(3, '0')}}`; }};
+
+// Waveform timing editor. Zoomed to ~160px/s so 25ms is a few pixels; the
+// scrollable window spans the finding ±PAD s, so a mute can be dragged onto
+// the exact word by eye (and ear, via Preview muted) and saved to the sidecar.
+function toggleTiming(cell, s, box) {{
+  if (box.dataset.open === '1') {{
+    box.dataset.open = ''; box.classList.remove('open'); box.innerHTML = ''; return;
+  }}
+  box.dataset.open = '1'; box.classList.add('open');
+  box.innerHTML = '<div class=tload>loading waveform&hellip;</div>';
+  fetch(`/api/peaks?path=${{encodeURIComponent(MEDIA)}}&startMs=${{s.startMs}}&endMs=${{s.endMs}}&pad=${{PAD}}`)
+    .then(r => r.json())
+    .then(d => buildTiming(cell, s, box, d))
+    .catch(() => box.innerHTML = '<div class=tload>could not load waveform</div>');
+}}
+
+function buildTiming(cell, s, box, d) {{
+  const winStart = d.winStartMs, winEnd = d.winEndMs, span = Math.max(1, winEnd - winStart);
+  const PXPS = 160, SNAP = 25, H = 90;
+  const W = Math.max(320, Math.round(span / 1000 * PXPS));
+  const clamp = t => Math.max(winStart, Math.min(winEnd, t));
+  let st = clamp(s.startMs), en = clamp(s.endMs);
+
+  box.innerHTML = `
+    <div class=wavewrap>
+      <div class=wavebox style="width:${{W}}px;height:${{H}}px">
+        <canvas width=${{W}} height=${{H}}></canvas>
+        <div class=region></div>
+        <div class="handle start"><div class=grip></div></div>
+        <div class="handle end"><div class=grip></div></div>
+      </div>
+    </div>
+    <div class=tctrls>
+      <span>Start</span>
+      <button data-h=start data-d=-25>&#9664; 25ms</button>
+      <button data-h=start data-d=25>25ms &#9654;</button>
+      <span class=tread id=tstart-${{s.id}}></span>
+      <span style="margin-left:14px">End</span>
+      <button data-h=end data-d=-25>&#9664; 25ms</button>
+      <button data-h=end data-d=25>25ms &#9654;</button>
+      <span class=tread id=tend-${{s.id}}></span>
+      <span style="margin-left:14px" class=tread id=tdur-${{s.id}}></span>
+    </div>
+    <div class=tctrls>
+      <button class=tprev>&#9654; Preview muted</button>
+      <button class=tsave>Save timing</button>
+      <button class=tcancel>Cancel</button>
+      <span class=thint>drag the handles or nudge; snaps to 25ms</span>
+    </div>`;
+
+  const wrap = box.querySelector('.wavewrap');
+  const wbox = box.querySelector('.wavebox');
+  const ctx = box.querySelector('canvas').getContext('2d');
+  const hStart = box.querySelector('.handle.start');
+  const hEnd = box.querySelector('.handle.end');
+  const region = box.querySelector('.region');
+  const rStart = box.querySelector('#tstart-' + s.id);
+  const rEnd = box.querySelector('#tend-' + s.id);
+  const rDur = box.querySelector('#tdur-' + s.id);
+
+  const xOf = t => (t - winStart) / span * W;
+  const tOf = x => Math.round((winStart + x / W * span) / SNAP) * SNAP;
+
+  // Waveform: one bar per peak.
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#3a4650';
+  const n = d.peaks.length, bw = W / n;
+  for (let i = 0; i < n; i++) {{
+    const h = d.peaks[i] * (H - 8);
+    ctx.fillRect(i * bw, (H - h) / 2, Math.max(1, bw - 0.5), h);
+  }}
+
+  function upd() {{
+    hStart.style.left = xOf(st) + 'px';
+    hEnd.style.left = xOf(en) + 'px';
+    region.style.left = xOf(st) + 'px';
+    region.style.width = Math.max(0, xOf(en) - xOf(st)) + 'px';
+    rStart.textContent = fmtMs(st);
+    rEnd.textContent = fmtMs(en);
+    rDur.textContent = (en - st) + 'ms';
+  }}
+  upd();
+  // Centre the finding in the scroll view.
+  wrap.scrollLeft = xOf((st + en) / 2) - wrap.clientWidth / 2;
+
+  function drag(handle, isStart) {{
+    handle.querySelector('.grip').addEventListener('mousedown', e => {{
+      e.preventDefault();
+      const move = ev => {{
+        const x = ev.clientX - wbox.getBoundingClientRect().left;
+        const t = Math.max(winStart, Math.min(winEnd, tOf(x)));
+        if (isStart) st = Math.min(t, en - SNAP); else en = Math.max(t, st + SNAP);
+        upd();
+      }};
+      const up = () => {{ document.removeEventListener('mousemove', move);
+                          document.removeEventListener('mouseup', up); }};
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
+    }});
+  }}
+  drag(hStart, true); drag(hEnd, false);
+
+  box.querySelectorAll('.tctrls [data-h]').forEach(b => b.onclick = () => {{
+    const d2 = parseInt(b.dataset.d, 10);
+    if (b.dataset.h === 'start') st = clamp(Math.min(st + d2, en - SNAP));
+    else en = clamp(Math.max(en + d2, st + SNAP));
+    upd();
+  }});
+
+  box.querySelector('.tprev').onclick = () =>
+    playClip(cell.querySelector('.shot'), {{startMs: st, endMs: en}}, true);
+
+  box.querySelector('.tcancel').onclick = () => toggleTiming(cell, s, box);
+
+  box.querySelector('.tsave').onclick = () => {{
+    fetch(`/api/segments/${{s.id}}?path=${{encodeURIComponent(MEDIA)}}`, {{
+      method: 'PATCH', headers: {{'Content-Type':'application/json'}},
+      body: JSON.stringify({{startMs: st, endMs: en}})
+    }}).then(() => {{ s.startMs = st; s.endMs = en;
+                      cell.replaceWith(card(s)); apply(); tally(); }});
+  }};
 }}
 
 function visible(s) {{

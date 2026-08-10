@@ -127,3 +127,31 @@ def test_muted_clip_has_its_own_cache_path(tmp_path):
     plain = clip_path(media, 1000, 2000, 15.0, mute=False)
     muted = clip_path(media, 1000, 2000, 15.0, mute=True)
     assert plain != muted
+
+
+def test_build_peaks_window_and_localization(tmp_path):
+    """The waveform spans the finding ±pad, at 40 peaks/s, and the loud burst
+    lands at the finding — so a reviewer can see the word to drag onto it."""
+    import wave
+
+    import numpy as np
+
+    from worker.review import build_peaks
+
+    sr = 8000
+    wav = tmp_path / "tone.wav"
+    buf = np.zeros(sr * 4, dtype=np.int16)
+    buf[sr : sr + int(0.3 * sr)] = (15000 * np.sin(
+        2 * np.pi * 900 * np.arange(int(0.3 * sr)) / sr)).astype(np.int16)  # burst at 1.0s
+    with wave.open(str(wav), "w") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes(buf.tobytes())
+
+    r = build_peaks(wav, 1000, 1300, pad_s=0.5)
+    assert (r["winStartMs"], r["winEndMs"], r["perSec"]) == (500, 1800, 40)
+    assert abs(len(r["peaks"]) - round(1.3 * 40)) <= 1  # 40 peaks/s over the window
+    loud = max(range(len(r["peaks"])), key=lambda i: r["peaks"][i])
+    loud_ms = r["winStartMs"] + loud * (1000 // r["perSec"])
+    assert 900 <= loud_ms <= 1350  # burst localizes at the finding (1000–1300ms)
