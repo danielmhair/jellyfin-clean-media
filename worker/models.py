@@ -96,6 +96,19 @@ class BulkApproval(BaseModel):
     approved: Optional[bool] = None
 
 
+class SegmentMerge(BaseModel):
+    """Combine several findings into one segment spanning all of them.
+
+    Used to collapse a run of adjacent detections — a scene flagged shot by
+    shot — into a single segment to skip. Defaults to an approved skip, since
+    merging is itself the reviewer's decision.
+    """
+
+    ids: list[int] = Field(default_factory=list)
+    recommendedAction: str = "skip"
+    approved: Optional[bool] = True
+
+
 class SegmentCreate(BaseModel):
     """A finding added by hand, for what the models missed."""
 

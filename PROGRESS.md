@@ -288,6 +288,21 @@ its box (`[ ]` → `[x]`), and move the **← NEXT** marker on.
 
 ## Recent changes
 
+### Merge findings into one segment (2026-08-10, worker)
+
+- **Why:** the visual pass flags a scene *shot by shot* (e.g. a dance number as
+  four adjacent "suggestive" findings) — a reviewer wants to skip the whole
+  thing as one segment, not tick four.
+- **Worker review page** — each finding card gets a **"merge"** checkbox; ticking
+  2+ enables a **"Merge selected"** button (with an action picker, default skip).
+  Merge POSTs to a new `POST /api/segments/merge`, which replaces the chosen
+  findings with a single one spanning the earliest start to the latest end
+  (`merge_into_one` in [worker/review.py](worker/review.py)). The merged finding
+  is `MANUAL_ENGINE` (so a re-analysis won't erase it), an **approved skip** by
+  default (merging is the decision), and takes the most severe source category.
+  The page reloads after merge (ids/counts change). 3 new tests; 136 green.
+- **Worker-only** — needs a worker restart to serve; no plugin change.
+
 ### Analysis schedule — run only during allowed hours (2026-08-10, worker + plugin 0.2.3.0)
 
 - **Why:** a whole-library scan shouldn't hammer the GPU while someone's

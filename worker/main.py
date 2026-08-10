@@ -24,6 +24,7 @@ from .models import (
     RenderRequest,
     Segment,
     SegmentCreate,
+    SegmentMerge,
     SegmentPatch,
     StatusRequest,
     Timeline,
@@ -40,6 +41,7 @@ from .review import (
     delete_segment,
     grab_thumbnail,
     load_timeline,
+    merge_into_one,
     render_page,
     resolve_media,
     set_approvals,
@@ -264,6 +266,24 @@ def approve_segments(path: str, req: BulkApproval) -> Timeline:
     timeline = load_timeline(media)
     if timeline is None:
         raise HTTPException(404, f"no analysis found for {media}")
+    return timeline
+
+
+@app.post("/api/segments/merge", response_model=Timeline)
+def merge_segments_endpoint(path: str, req: SegmentMerge) -> Timeline:
+    """Combine several findings into one segment spanning them all, by media path.
+
+    The review UI calls this to collapse a run of adjacent detections (a scene
+    the visual pass flagged shot by shot) into a single approved skip. The
+    originals are removed and replaced by one MANUAL_ENGINE finding.
+    """
+    media = resolve_media(path)
+    if media is None:
+        raise HTTPException(404, f"media not found: {path}")
+    if merge_into_one(media, req.ids, req.recommendedAction, req.approved) is None:
+        raise HTTPException(400, "need at least two existing findings to merge")
+    timeline = load_timeline(media)
+    assert timeline is not None
     return timeline
 
 

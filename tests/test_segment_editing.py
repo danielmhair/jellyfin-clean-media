@@ -17,6 +17,7 @@ from worker.review import (
     create_segment,
     delete_segment,
     load_timeline,
+    merge_into_one,
     merge_segments,
     sidecar_for,
     update_segment,
@@ -56,6 +57,74 @@ def test_retiming_persists_and_leaves_other_fields_alone(tmp_path):
     assert reloaded.category == "nudity"
     assert reloaded.engine == "vlm"
     assert reloaded.recommendedAction == "skip"
+
+
+def _scene_film(tmp_path):
+    """A film with a run of adjacent visual findings, as a scene flagged shot
+    by shot — the case merge exists for."""
+    media = tmp_path / "Scene.mkv"
+    media.write_bytes(b"pretend video with a real size on disk")
+    timeline = Timeline(
+        mediaFingerprint="fp",
+        segments=[
+            Segment(id=1, startMs=359_700, endMs=368_500, category="suggestive",
+                    confidence=0.5, engine="vlm", recommendedAction="skip",
+                    engineRef="shot-72"),
+            Segment(id=2, startMs=386_000, endMs=390_100, category="suggestive",
+                    confidence=0.5, engine="vlm", recommendedAction="skip",
+                    engineRef="shot-88"),
+            Segment(id=3, startMs=402_300, endMs=404_700, category="nudity",
+                    confidence=1.0, engine="vlm", recommendedAction="skip",
+                    engineRef="shot-97"),
+            # An unrelated finding elsewhere that must be left untouched.
+            Segment(id=9, startMs=900_000, endMs=901_000, category="profanity",
+                    confidence=1.0, engine="subtitles", recommendedAction="mute"),
+        ],
+    )
+    sidecar_for(media).write_text(json.dumps(timeline.model_dump()), encoding="utf-8")
+    return media
+
+
+def test_merge_spans_all_and_replaces_the_originals(tmp_path):
+    media = _scene_film(tmp_path)
+
+    merged = merge_into_one(media, [1, 2, 3])
+
+    # Spans the earliest start to the latest end of the three.
+    assert (merged.startMs, merged.endMs) == (359_700, 404_700)
+    assert merged.recommendedAction == "skip"
+    assert merged.approved is True
+    assert merged.engine == MANUAL_ENGINE  # survives a re-analysis
+    assert merged.category == "nudity"  # the most severe of the sources
+
+    ids = {s.id for s in load_timeline(media).segments}
+    assert 1 not in ids and 2 not in ids and 3 not in ids
+    assert 9 in ids  # the unrelated finding is left alone
+    assert merged.id in ids
+
+
+def test_merge_needs_at_least_two_findings(tmp_path):
+    media = _scene_film(tmp_path)
+    assert merge_into_one(media, [1]) is None
+    assert merge_into_one(media, [999, 998]) is None  # none exist
+    # Nothing changed.
+    assert len(load_timeline(media).segments) == 4
+
+
+def test_merge_endpoint_returns_updated_timeline(client, tmp_path):
+    media = _scene_film(tmp_path)
+    resp = client.post(
+        "/api/segments/merge",
+        params={"path": media.name},
+        json={"ids": [1, 2, 3], "recommendedAction": "skip"},
+    )
+    assert resp.status_code == 200
+    segs = resp.json()["segments"]
+    # 4 originals - 3 merged + 1 new = 2.
+    assert len(segs) == 2
+    merged = [s for s in segs if s["engine"] == MANUAL_ENGINE][0]
+    assert merged["startMs"] == 359_700 and merged["endMs"] == 404_700
+    assert merged["approved"] is True
 
 
 def test_inverted_span_is_corrected_not_stored(tmp_path):

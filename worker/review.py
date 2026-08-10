@@ -311,6 +311,69 @@ def create_segment(
     return segment
 
 
+# Category severity for labelling a merged finding: the worst one wins.
+_MERGE_SEVERITY = {
+    "nudity": 5,
+    "gore": 5,
+    "sexual": 4,
+    "sex": 4,
+    "violence": 3,
+    "suggestive": 2,
+    "profanity": 1,
+}
+
+
+def merge_into_one(
+    media: Path,
+    ids: list[int],
+    action: str = "skip",
+    approved: Optional[bool] = True,
+) -> Optional[Segment]:
+    """Combine several findings into a single one spanning them all.
+
+    The merged finding runs from the earliest start to the latest end of the
+    selected findings, so a run of adjacent detections — a whole scene the
+    engine flagged shot by shot — becomes one segment to skip. The originals are
+    removed; the merged finding is marked MANUAL_ENGINE so a re-analysis will
+    not erase this administrator decision, and defaults to an approved skip
+    because merging is itself the decision. Its category is the most severe of
+    the sources. Returns the new segment, or None if fewer than two of the ids
+    exist.
+    """
+    timeline = load_timeline(media)
+    if timeline is None:
+        return None
+    wanted = set(ids)
+    chosen = [s for s in timeline.segments if s.id in wanted]
+    if len(chosen) < 2:
+        return None
+
+    start = min(s.startMs for s in chosen)
+    end = max(s.endMs for s in chosen)
+    category = max(chosen, key=lambda s: _MERGE_SEVERITY.get(s.category, 0)).category
+    labels = ", ".join(f"#{s.id}" for s in sorted(chosen, key=lambda s: s.startMs))
+
+    remaining = [s for s in timeline.segments if s.id not in wanted]
+    segment_id = next_segment_id(remaining, timeline.nextSegmentId)
+    timeline.nextSegmentId = segment_id + 1
+    merged = Segment(
+        id=segment_id,
+        startMs=start,
+        endMs=end,
+        category=category,
+        confidence=1.0,  # a human deliberately grouped these
+        engine=MANUAL_ENGINE,
+        recommendedAction=action,
+        approved=approved,
+        reasoning=f"merged {len(chosen)} findings ({labels})",
+    )
+    remaining.append(merged)
+    remaining.sort(key=lambda s: s.startMs)
+    timeline.segments = remaining
+    save_timeline(media, timeline)
+    return merged
+
+
 def merge_segments(
     prior: list[Segment],
     fresh: list[Segment],
@@ -627,6 +690,13 @@ PAGE = """<!doctype html>
  #bulk button.set-no{{background:#da3633;color:#fff}}
  #bulk button.set-clear{{background:#3a3f47;color:#eee}}
  #bulk button:disabled{{opacity:.4;cursor:default}}
+ /* merge: pick 2+ findings and collapse them into one segment */
+ #mergebar button{{background:#30588c;color:#fff}}
+ #mergebar button:disabled{{opacity:.4;cursor:default}}
+ #mergebar .mhint{{font-size:12px;color:#8b949e;margin-left:8px}}
+ .mergepick{{font-size:11px;color:#8b949e;cursor:pointer;user-select:none;float:right}}
+ .mergepick input{{vertical-align:middle;margin:0 3px 0 0}}
+ .cell.picked{{outline:2px solid #30588c}}
 </style>
 <div class=bar>
   <h1>{title}</h1>
@@ -648,6 +718,17 @@ PAGE = """<!doctype html>
     <button class=set-no>Fine — ignore all</button>
     <button class=set-clear>Reset all</button>
   </div>
+  <div class=filters id=mergebar>
+    <span class=flabel>Merge into one:</span>
+    <select id=mergeAction>
+      <option value=skip selected>skip</option>
+      <option value=mute>mute</option>
+      <option value=voice>voice-only mute</option>
+      <option value=blur>blur</option>
+    </select>
+    <button id=mergeBtn disabled>Merge selected (0)</button>
+    <span class=mhint>tick “merge” on 2+ findings to combine them into one segment spanning them all</span>
+  </div>
 </div>
 <div class=grid id=grid></div>
 <script>
@@ -659,6 +740,8 @@ const PAD = {pad:.0f};
 const TENTATIVE = ['suggestive'];
 let filter = 'all';
 let typeFilter = 'all';
+// Ids ticked for merging. Merge collapses them into one segment spanning all.
+const selected = new Set();
 
 // The reviewer-facing "type" of a finding: for profanity that is the muted
 // word — each word its own group — and otherwise the category. This is what
@@ -722,6 +805,7 @@ function card(s) {{
       <button class=edit-timing>&#9998; Timing</button>
     </div>
     <div class=meta>
+      <label class=mergepick title="Select to merge with others"><input type=checkbox class=mergesel> merge</label>
       <b>#${{s.id}}</b> ${{fmt(s.startMs)}} – ${{fmt(s.endMs)}}
       (${{((s.endMs-s.startMs)/1000).toFixed(1)}}s)${{
         tm ? `<span class="tag ${{tm.exact?'exact':'est'}}">${{tm.label}}</span>` : ''}}<br>
@@ -758,6 +842,16 @@ function card(s) {{
       method: 'PATCH', headers: {{'Content-Type':'application/json'}},
       body: JSON.stringify({{recommendedAction: sel.value}})
     }}).then(() => {{ s.recommendedAction = sel.value; el.replaceWith(card(s)); apply(); tally(); }});
+
+  // Tick to include this finding in a merge. The card highlights while picked.
+  const mp = el.querySelector('.mergesel');
+  mp.checked = selected.has(s.id);
+  el.classList.toggle('picked', mp.checked);
+  mp.onchange = () => {{
+    if (mp.checked) selected.add(s.id); else selected.delete(s.id);
+    el.classList.toggle('picked', mp.checked);
+    updateMergeBtn();
+  }};
 
   el.querySelector('.edit-timing').onclick = () => toggleTiming(el, s, el.querySelector('.editor'));
   return el;
@@ -991,6 +1085,31 @@ function bulkSet(v) {{
 document.querySelector('#bulk .set-yes').onclick   = () => bulkSet(true);
 document.querySelector('#bulk .set-no').onclick    = () => bulkSet(false);
 document.querySelector('#bulk .set-clear').onclick = () => bulkSet(null);
+
+// Merge the ticked findings into one segment spanning the earliest start to
+// the latest end. The originals are replaced by a single approved skip (or the
+// chosen action), so a scene flagged shot by shot becomes one clean skip. The
+// timeline changes shape (ids, counts), so reload rather than patch in place.
+function updateMergeBtn() {{
+  const n = selected.size;
+  const b = document.getElementById('mergeBtn');
+  b.textContent = 'Merge selected (' + n + ')';
+  b.disabled = n < 2;
+}}
+function doMerge() {{
+  const ids = [...selected];
+  if (ids.length < 2) return;
+  const action = document.getElementById('mergeAction').value;
+  const b = document.getElementById('mergeBtn');
+  b.disabled = true; b.textContent = 'Merging&hellip;';
+  fetch(`/api/segments/merge?path=${{encodeURIComponent(MEDIA)}}`, {{
+    method: 'POST', headers: {{'Content-Type':'application/json'}},
+    body: JSON.stringify({{ids, recommendedAction: action, approved: true}})
+  }}).then(r => {{ if (!r.ok) throw new Error('merge failed'); return r.json(); }})
+    .then(() => location.reload())
+    .catch(() => {{ updateMergeBtn(); }});
+}}
+document.getElementById('mergeBtn').onclick = doMerge;
 
 buildTypeFilters();
 renderGrid();
