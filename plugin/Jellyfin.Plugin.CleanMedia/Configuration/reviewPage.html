@@ -81,6 +81,8 @@
                     </label>
                     <button is="emby-button" type="button" id="CmAnalyzeFilm"
                             class="raised button-submit emby-button"><span>Analyze this film</span></button>
+                    <button is="emby-button" type="button" id="CmAnalyzeEverything"
+                            class="raised emby-button"><span>Analyze everything</span></button>
                     <span id="CmAnalyzeResult" class="fieldDescription"></span>
                 </div>
 
@@ -111,6 +113,14 @@
     .cmCard .cmState{padding:0 .6em .6em;font-size:12px;opacity:.85;}
     .cmPending{color:#e3b341;} .cmDone{color:#3fb950;} .cmNone{opacity:.55;}
     .cmRunning{color:#00a4dc;} .cmFail{color:#f85149;}
+
+    .cmCardActions{padding:0 .6em .6em;display:flex;gap:.4em;min-height:1.4em;}
+    .cmCardBtn{font-size:11px;padding:.25em .7em;border:none;border-radius:4px;
+               cursor:pointer;background:#333;color:#ddd;}
+    .cmCardBtn.cmAnalyze{background:#1f6feb;color:#fff;}
+    .cmCardBtn.cmCancel{background:#6e2b2b;color:#fff;}
+    .cmCardBtn:hover{filter:brightness(1.15);}
+    .cmCardBtn:disabled{opacity:.5;cursor:default;filter:none;}
 
     .cmFilmJobs{margin:.6em 0;}
     .cmJobLine{font-size:13px;margin:.35em 0;color:#00a4dc;}
@@ -182,6 +192,26 @@
                 return j.status === 'running' || j.status === 'rendering'
                     || j.status === 'queued';
             });
+        }
+
+        // Engines an "analyze everything" would still run for a film: the
+        // profanity slot (subtitles) plus the visual slot (vlm), minus any
+        // already done or in flight. Either profanity engine (subtitles or
+        // whisper) satisfies the profanity slot, so a film already run with
+        // whisper is not re-run with subtitles.
+        var EVERYTHING = ['subtitles', 'vlm'];
+        function neededEngines(s) {
+            s = s || {};
+            var done = {};
+            (s.enginesDone || []).forEach(function (e) { done[e] = true; });
+            var inflight = {};
+            activeJobs(s).forEach(function (j) { if (j.engine) { inflight[j.engine] = true; } });
+            var need = [];
+            var profanity = done.subtitles || done.whisper
+                || inflight.subtitles || inflight.whisper;
+            if (!profanity) { need.push('subtitles'); }
+            if (!done.vlm && !inflight.vlm) { need.push('vlm'); }
+            return need;
         }
 
         // ETA from the rate of progress across polls, smoothed. The worker only
@@ -300,7 +330,8 @@
                         + '<img src="' + imageUrl(i) + '" loading="lazy" />'
                         + '<div class="cmName">' + escapeHtml(i.Name) + '</div>'
                         + '<div class="cmState cmNone" id="cmState-' + i.Id + '">'
-                        + stateText(state.statuses[i.Id]).text + '</div></div>';
+                        + stateText(state.statuses[i.Id]).text + '</div>'
+                        + '<div class="cmCardActions" id="cmActions-' + i.Id + '"></div></div>';
                 }).join('') + '</div>'
                 : '<p class="fieldDescription">Nothing matches that filter.</p>';
 
@@ -308,8 +339,81 @@
                 var id = card.getAttribute('data-id');
                 card.addEventListener('click', function () { openFilm(id); });
                 var s = state.statuses[id];
-                if (s) { applyState(page.querySelector('#cmState-' + id), s); }
+                if (s) { applyState(page.querySelector('#cmState-' + id), s); cardActions(id, s); }
             });
+        }
+
+        // Per-card actions on the grid: Cancel while a pass is in flight, or
+        // Analyze (for everything still outstanding) otherwise. The buttons sit
+        // over the card, so stop the click from also opening the film view.
+        function cardActions(id, s) {
+            var el = page.querySelector('#cmActions-' + id);
+            if (!el) { return; }
+            var active = activeJobs(s || {});
+            if (active.length) {
+                el.innerHTML = '<button type="button" class="cmCardBtn cmCancel">Cancel</button>';
+                el.querySelector('button').addEventListener('click', function (ev) {
+                    ev.stopPropagation();
+                    cancelFilm(id);
+                });
+                return;
+            }
+            var need = neededEngines(s);
+            if (!need.length) { el.innerHTML = ''; return; }  // nothing left to run
+            var label = need.length === EVERYTHING.length ? 'Analyze all' : 'Analyze';
+            el.innerHTML = '<button type="button" class="cmCardBtn cmAnalyze">'
+                + label + '</button>';
+            el.querySelector('button').addEventListener('click', function (ev) {
+                ev.stopPropagation();
+                analyzeEverything(id);
+            });
+        }
+
+        // One-action "analyze for everything": queue every engine a film still
+        // needs (profanity + visual) in one click, from the grid card.
+        function analyzeEverything(id) {
+            var item = state.items.filter(function (i) { return i.Id === id; })[0];
+            if (!item) { return; }
+            var engines = neededEngines(state.statuses[id]);
+            if (!engines.length) { engines = EVERYTHING.slice(); }
+            var out = page.querySelector('#CmQueueResult');
+            var run = function () {
+                out.textContent = 'Queuing ' + item.Name + '…';
+                // One job per engine; the worker runs them in order.
+                Promise.all(engines.map(function (engine) {
+                    return api('POST', 'Analyze', {}, { itemIds: [id], engine: engine });
+                })).then(function (results) {
+                    var queued = 0;
+                    results.forEach(function (res) {
+                        (res.queued || []).forEach(function (q) { if (q.jobId) { queued++; } });
+                    });
+                    out.textContent = queued
+                        ? 'Queued ' + item.Name + ' (' + engines.join(' + ') + ').'
+                        : 'Could not queue — the worker could not find this file.';
+                    loadStatus();
+                }).catch(function (err) { out.textContent = 'Could not queue: ' + err; });
+            };
+            // The visual pass is GPU-heavy and takes hours; guard it.
+            if (engines.indexOf('vlm') !== -1) {
+                confirmThen('Analyze "' + item.Name + '" for everything (profanity + visual)? '
+                    + 'The visual pass is GPU-heavy and can take hours.', run);
+            } else { run(); }
+        }
+
+        // Cancel just this film's in-flight passes (each active job), from the
+        // grid card — the bulk "Cancel all" stops the whole library instead.
+        function cancelFilm(id) {
+            var jobs = activeJobs(state.statuses[id] || {});
+            if (!jobs.length) { return; }
+            var item = state.items.filter(function (i) { return i.Id === id; })[0];
+            var out = page.querySelector('#CmQueueResult');
+            out.textContent = 'Cancelling ' + (item ? item.Name : '') + '…';
+            Promise.all(jobs.map(function (j) {
+                return api('DELETE', 'Jobs/' + encodeURIComponent(j.id), {});
+            })).then(function () {
+                out.textContent = 'Cancelled ' + (item ? item.Name : 'analysis') + '.';
+                loadStatus();
+            }).catch(function (err) { out.textContent = 'Could not cancel: ' + err; });
         }
 
         function stateText(s) {
@@ -365,12 +469,15 @@
                     state.items.forEach(function (i) {
                         var el = page.querySelector('#cmState-' + i.Id);
                         if (el) { el.className = 'cmState cmFail'; el.innerHTML = 'worker unreachable'; }
+                        var act = page.querySelector('#cmActions-' + i.Id);
+                        if (act) { act.innerHTML = ''; }  // no jobs known — no buttons
                     });
                     return;
                 }
                 (res.items || []).forEach(function (s) {
                     state.statuses[s.itemId] = s;
                     applyState(page.querySelector('#cmState-' + s.itemId), s);
+                    cardActions(s.itemId, s);
                 });
                 schedulePoll();
             }).catch(function (err) {
@@ -655,6 +762,25 @@
             } else {
                 run();
             }
+        });
+
+        // One click that queues every outstanding engine (profanity + visual):
+        // tick the still-available engines and run the same Analyze flow, so an
+        // already-done or running engine is left alone rather than re-queued.
+        page.querySelector('#CmAnalyzeEverything').addEventListener('click', function () {
+            if (!state.film) { return; }
+            var want = { subtitles: true, vlm: true };
+            page.querySelectorAll('.cmEngine').forEach(function (cb) {
+                cb.checked = !cb.disabled && !!want[cb.value];
+            });
+            refreshAnalyzeButton();
+            var btn = page.querySelector('#CmAnalyzeFilm');
+            if (btn.disabled) {
+                page.querySelector('#CmAnalyzeResult').textContent =
+                    'Already analyzed for everything.';
+                return;
+            }
+            btn.click();
         });
 
         // -- render a clean copy ---------------------------------------------

@@ -12,3 +12,4 @@ obj/
 *.vlm-progress.json
 *.srt
 plugin/dist/
+.pytest-tmp/

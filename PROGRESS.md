@@ -7,12 +7,12 @@ review loop has its own spec in
 This file tracks the current state and open threads. Keep entries generic — no
 real film names (see [CLAUDE.md](CLAUDE.md)).
 
-_Last updated: 2026-08-09._
+_Last updated: 2026-08-10._
 
 ## Where it's running now
 
 The current build is **deployed and in active use**, not just built. The boot
-worker serves current code; the plugin (**0.2.1.3**) installs from the repo
+worker serves current code; the plugin (**0.2.2.0**) installs from the repo
 manifest and its film view + settings work; one film has been analyzed
 (profanity: 26 findings; visual: 1) and **reviewed inside Jellyfin**; and the
 media library has been reorganized to one folder per movie. Per-pass progress,
@@ -213,22 +213,47 @@ its box (`[ ]` → `[x]`), and move the **← NEXT** marker on.
   filmstrip editor for visual findings (tests); needs a worker restart to serve.
   _Done when (to confirm live):_ a visual finding is reviewed, retimed on the
   filmstrip, and skipped or blurred.
-- [ ] **Slice 6 — Voice-only mute (remove the voice, keep the background). ← NEXT**
-  Today a mute silences *all* audio for the span, so a swear over music leaves an
-  audible hole. Instead: Demucs 2-stem separation on a padded ~2–3 s window
-  around the finding, zero **only** the vocals across the mute span, and remix so
-  music / Foley / ambient play through. New mode in `mute_render` ("voice-only"
-  vs "hard mute") + a "Play voice-removed" preview. Render-only. _Done when:_ a
-  rendered clean copy drops a swear over music while the music plays through the
-  gap.
-- [ ] **Slice 7 — Queue many + cancel (bulk).** _Largely built already:_ bulk
-  "Queue shown videos" (with a confirm), "Cancel all analysis" + cooperative
-  cancellation (`POST /api/jobs/cancel-all`), and the per-film Analyze from Slice
-  2. _Remaining:_ per-card Analyze/Cancel on the grid (story 40), a graphical
-  progress bar + ETA (worker adds elapsed ÷ progress to `JobBrief`), and a
-  one-action "analyze for everything" (both engines in one submit). _Done when:_
-  a batch runs with visible per-film progress/ETA and can be cancelled per film.
-- [ ] **Slice 8 — Anything else (polish & deferred PRD stories).** Grid sort by
+- [x] **Slice 6 — Voice-only mute (remove the voice, keep the background).**
+  _Built 2026-08-09 (worker-side)._ A new **"voice-only mute"** action drops the
+  spoken word while music / Foley / ambient play straight through, so a swear
+  over music no longer leaves an audible hole. Demucs (`htdemucs`, 2-stem)
+  separates a padded ±1 s window around each finding; only the finding's own
+  span has its vocals subtracted (mixture − vocals = accompaniment), the rest of
+  the track untouched. New engine module
+  [worker/engines/voice_render.py](worker/engines/voice_render.py): the render
+  path (`render_voice_removed_pcm`) edits a full-length s16le track **in place
+  via a memmap** — only the ~1 s window per finding is ever held as floats — and
+  the combined renderer feeds it to FFmpeg as a second audio input in place of
+  the source (`render.py` `build_command` gained `audio_path`). Review page: a
+  **voice-only mute** option in the action selector plus a **"Play
+  voice-removed"** preview (`/api/clip?voice=true`, `voice_removed_wav`) so a
+  reviewer hears it before approving. Render-only (like mute/blur); the plugin
+  reports only *skips* to Jellyfin, so nothing changed there. _Verified:_ 8 new
+  tests cover the splice (only the span changes, accompaniment survives) and the
+  FFmpeg wiring, all with an injected fake separator; and real Demucs was run
+  end-to-end on a synthetic window (correct stem shape, untouched region
+  byte-preserved). Needs a worker restart + `uv sync` (adds `demucs`). _Done when
+  (to confirm live):_ a rendered clean copy drops a swear over music while the
+  music plays through the gap.
+- [x] **Slice 7 — Queue many + cancel (bulk).** _Built 2026-08-10 (plugin
+  0.2.2.0)._ The two remaining plugin-side gaps are closed. **Per-card Analyze +
+  Cancel on the grid** (story 40): each grid card now carries its own action
+  button — **Cancel** while a pass is in flight (deletes each of that film's
+  active jobs via `DELETE /CleanMedia/Jobs/{id}` → `DELETE /api/jobs/{id}`, which
+  cancels queued *and* running), or **Analyze** otherwise; the button
+  `stopPropagation`s so it doesn't also open the film. **One-action "analyze for
+  everything"**: the card's Analyze (and a new **"Analyze everything"** button on
+  the film view) queues every engine the film still needs — profanity (subtitles)
+  + visual (vlm), one job each — skipping any already done or in flight
+  (`neededEngines()`; either profanity engine satisfies the profanity slot, so a
+  whisper-analyzed film isn't re-run with subtitles). ETA stayed client-side
+  (server-side ETA left as the optional item). _Verified:_ Release build is clean
+  (0 warnings) and the 125-test worker suite passes after `uv sync` (demucs 4.1.0
+  now installed, so Slices 4–6 + the ±1s buttons go live on the next worker
+  restart). _Done when (to confirm live):_ from the grid, a per-card Cancel stops
+  that film's running pass and a per-card Analyze queues both engines — check the
+  invariant (the pass actually stops), not the exit code.
+- [ ] **Slice 8 — Anything else (polish & deferred PRD stories). ← NEXT** Grid sort by
   pending count (story 11), ± nudge buttons on a finding (story 26),
   preview-as-it-plays (story 28: a skip jumps over, a mute via
   `/api/clip?mute=true`), clear display of overlapping findings (story 35), and a
@@ -262,6 +287,66 @@ its box (`[ ]` → `[x]`), and move the **← NEXT** marker on.
   so an interruption costs minutes, not the whole run.
 
 ## Recent changes
+
+### Slice 7 — per-card Analyze / Cancel + one-action "analyze everything" (2026-08-10, plugin 0.2.2.0)
+
+- **Per-card grid actions** — each film card in the review grid gets its own
+  button: **Cancel** while any pass is in flight (fires `DELETE
+  /CleanMedia/Jobs/{id}` for each active job — the worker cancels queued and
+  running alike), or **Analyze** otherwise. The button `stopPropagation`s so a
+  click acts on the card without also opening the film view. The bulk "Cancel
+  all analysis" still stops the whole library; per-card stops just that film.
+- **One-action "analyze everything"** — the card's Analyze, and a new **"Analyze
+  everything"** button on the film-view launcher, queue every engine a film still
+  needs (profanity `subtitles` + visual `vlm`) in one click, one job per engine.
+  `neededEngines()` skips any engine already done or in flight; either profanity
+  engine (subtitles or whisper) satisfies the profanity slot, so a whisper-run
+  film isn't needlessly re-run with subtitles. The visual pass is still guarded
+  by a confirm (GPU-heavy, hours).
+- **Worker-side unblocked** — `uv sync` installed `demucs 4.1.0`, so Slices 4–6
+  (waveform/filmstrip editors, voice-only mute) and the ±1s nudge buttons go live
+  on the next worker restart. Plugin-only change otherwise; needs 0.2.2.0
+  installed. Release build clean (0 warnings); 125-test worker suite green.
+
+### Timing editor — ±1s coarse nudge (2026-08-10, worker)
+
+- The waveform/filmstrip timing editor now has **±1s** nudge buttons on each
+  handle alongside the existing **±25ms**, for findings whose timing is *way*
+  off (a badly mistimed subtitle line). 1s jumps get a handle into the right
+  neighbourhood; 25ms (and dragging) fine-tune to the word. Values stay on the
+  25ms grid. Start/End split onto their own rows so eight buttons don't crowd.
+- **Save timing persists to disk** — the editor's Save PATCHes
+  `/api/segments/{id}` (by path) → `update_segment` → `save_timeline`, a full
+  rewrite of the film's `.cleanmedia.json` sidecar (the source of truth every
+  render and the plugin's `approvedOnly` read use). Only sent fields change, so
+  retiming leaves approve/reject and the action untouched. _Known limit:_ the
+  write is in-place, not write-temp-then-`os.replace`, so it isn't crash-atomic
+  (fine for single-reviewer use; an easy follow-up if wanted).
+- Reach is bounded by the editor window (finding ±15s / `CLIP_PAD_S`), so ±1s
+  gives up to ~15s of travel each way — enough for the usual mistimings; a
+  subtitle off by more than that would need a wider fetched window (deferred).
+- **Worker-only** — needs a worker restart to serve; no plugin rebuild.
+
+### Slice 6 — voice-only mute (drop the voice, keep the background) (2026-08-09, worker)
+
+- **New engine module** [worker/engines/voice_render.py](worker/engines/voice_render.py)
+  — Demucs `htdemucs` 2-stem separation, windowed. `separate_vocals` isolates
+  the vocal stem of a ±1 s window (standard normalise → separate → denormalise,
+  GPU with a CPU fallback for the 4 GB card); `remove_vocals` subtracts it
+  **only** across the finding's span so the accompaniment carries through.
+- **Render path** — `render_voice_removed_pcm` builds a full-length s16le audio
+  track with the voice gone across every voice-only span, editing it **in place
+  through a memmap** (only the window per finding is loaded as floats). The
+  combined renderer (`render.py`) feeds it to FFmpeg as a second input in place
+  of the source audio; `build_command` gained `audio_path`/`audio_sr`/`audio_ch`
+  and the skip filter-graph now references the chosen audio input. Voice-only
+  mutes force an audio re-encode but leave the video stream-copied.
+- **Review UI** — a **voice-only mute** option in the per-finding action
+  selector, and a **"Play voice-removed"** preview (`/api/clip?voice=true` →
+  `voice_removed_wav` muxed over the clip) so the reviewer hears it first.
+- **Dependency** — adds `demucs>=4.0` (downloads a model on first use). Worker
+  restart + `uv sync` needed to serve it; the plugin is unchanged (voice-only is
+  render-only, and only skips reach Jellyfin live).
 
 ### Slice 5 — visual timing via a filmstrip; scene skip/blur review (2026-08-09, worker)
 
