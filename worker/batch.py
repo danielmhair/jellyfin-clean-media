@@ -148,7 +148,25 @@ def main(argv: list[str] | None = None) -> int:
             print("    -> nothing found\n", flush=True)
 
     print(f"done in {(time.time() - started) / 3600:.1f} h", flush=True)
+
+    # Nudge a running worker to rebuild its media index, so the review grid
+    # shows these freshly written sidecars now instead of after its TTL.
+    # Best-effort: the worker may not be running, and that is fine.
+    _ping_reindex()
     return 0
+
+
+def _ping_reindex(port: int = 8765) -> None:
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/reindex", data=b"", method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=60):
+            print("    (asked the worker to refresh its review grid)", flush=True)
+    except Exception:
+        pass  # no worker, or it is busy — the TTL will catch up
 
 
 if __name__ == "__main__":

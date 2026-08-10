@@ -353,10 +353,12 @@ def merge_segments(
     return kept
 
 
-def clip_path(media: Path, start_ms: int, end_ms: int, pad_s: float, mute: bool) -> Path:
+def clip_path(
+    media: Path, start_ms: int, end_ms: int, pad_s: float, mute: bool, voice: bool = False
+) -> Path:
     """Cache location for a review clip; regenerating one is a few seconds."""
     key = hashlib.sha256(
-        f"{media}|{start_ms}|{end_ms}|{pad_s}|{mute}".encode("utf-8")
+        f"{media}|{start_ms}|{end_ms}|{pad_s}|{mute}|{voice}".encode("utf-8")
     ).hexdigest()[:20]
     cache = Path(tempfile.gettempdir()) / "cleanmedia-clips"
     cache.mkdir(exist_ok=True)
@@ -364,7 +366,12 @@ def clip_path(media: Path, start_ms: int, end_ms: int, pad_s: float, mute: bool)
 
 
 def build_clip(
-    media: Path, start_ms: int, end_ms: int, pad_s: float = 15.0, mute: bool = False
+    media: Path,
+    start_ms: int,
+    end_ms: int,
+    pad_s: float = 15.0,
+    mute: bool = False,
+    voice: bool = False,
 ) -> Optional[Path]:
     """Extract the flagged span plus padding, transcoded for the browser.
 
@@ -377,13 +384,20 @@ def build_clip(
     to confirm a word's timing lands on the word and not the syllable beside
     it. The muted window is the finding's own span, offset by the padding
     that precedes it in the clip.
+
+    With ``voice`` the span's **vocals** are removed (Demucs) instead of the
+    whole audio, so a reviewer can hear the voice-only mute — the word gone,
+    the music playing through — before approving it. Render-only either way.
     """
-    out = clip_path(media, start_ms, end_ms, pad_s, mute)
+    out = clip_path(media, start_ms, end_ms, pad_s, mute, voice)
     if out.is_file() and out.stat().st_size > 0:
         return out
 
     start = max(0.0, start_ms / 1000 - pad_s)
     duration = (end_ms - start_ms) / 1000 + 2 * pad_s
+
+    if voice:
+        return _build_voice_clip(media, start, duration, start_ms, end_ms, out)
 
     audio_args = ["-c:a", "aac", "-b:a", "128k"]
     if mute:
@@ -411,6 +425,41 @@ def build_clip(
         ],
         capture_output=True, text=True, errors="replace",
     )
+    if proc.returncode != 0 or not out.is_file():
+        out.unlink(missing_ok=True)
+        return None
+    return out
+
+
+def _build_voice_clip(
+    media: Path, start: float, duration: float, start_ms: int, end_ms: int, out: Path
+) -> Optional[Path]:
+    """Voice-removed review clip: separate the vocals from the padded window,
+    zero them across the flagged span, and mux that audio over the video."""
+    from .engines.voice_render import voice_removed_wav
+
+    wav = out.with_suffix(".wav")
+    made = voice_removed_wav(
+        media, start, duration, start_ms / 1000, end_ms / 1000, wav
+    )
+    if made is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-v", "error", "-y",
+                "-ss", f"{start:.3f}", "-i", str(media), "-t", f"{duration:.3f}",
+                "-i", str(wav),
+                "-map", "0:v:0", "-map", "1:a:0", "-shortest",
+                "-vf", "scale=640:-2",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
+                "-c:a", "aac", "-b:a", "128k",
+                "-movflags", "+faststart", str(out),
+            ],
+            capture_output=True, text=True, errors="replace",
+        )
+    finally:
+        wav.unlink(missing_ok=True)
     if proc.returncode != 0 or not out.is_file():
         out.unlink(missing_ok=True)
         return None
@@ -562,6 +611,7 @@ PAGE = """<!doctype html>
           font-size:12px;color:#9aa}}
  .tctrls button{{flex:0 0 auto;padding:6px 10px;background:#22262c;font-size:12px}}
  .tctrls button.tsave{{background:#238636;color:#fff}}
+ .tlabel{{display:inline-block;min-width:34px}}
  .tread{{font-variant-numeric:tabular-nums;color:#eee;font-weight:600}}
  .thint{{opacity:.6}} .tload{{padding:12px;color:#9aa;font-size:12px}}
  .bar{{position:sticky;top:0;background:#111;padding:10px 0;margin-bottom:10px;z-index:9}}
@@ -629,15 +679,17 @@ function timing(s) {{
 // The muted word, from the [word] the subtitle engine prefixes.
 function word(s) {{ const m = /^\\[([^\\]]+)\\]/.exec(s.reasoning||''); return m ? m[1] : null; }}
 
-function playClip(box, s, mute) {{
-  box.innerHTML = '<div class=play><span>loading clip&hellip;</span></div>';
+function playClip(box, s, mute, voice) {{
+  box.innerHTML = '<div class=play><span>'
+    + (voice ? 'separating voice&hellip; (a few seconds)' : 'loading clip&hellip;')
+    + '</span></div>';
   const tight = document.getElementById('tight').checked;
   const pad = tight ? 2 : PAD;
   const v = document.createElement('video');
   v.controls = true; v.autoplay = true; v.preload = 'auto';
   v.src = `/api/clip?path=${{encodeURIComponent(MEDIA)}}`
         + `&startMs=${{s.startMs}}&endMs=${{s.endMs}}&pad=${{pad}}`
-        + (mute ? '&mute=true' : '');
+        + (mute ? '&mute=true' : '') + (voice ? '&voice=true' : '');
   // The clip is padded, so jump to where the flagged part actually begins.
   v.onloadedmetadata = () => {{ box.innerHTML = ''; box.appendChild(v);
                                 v.currentTime = Math.min(pad, v.duration / 3); }};
@@ -651,10 +703,13 @@ function card(s) {{
     + (s.approved === true ? ' approved' : s.approved === false ? ' rejected' : '');
   const tm = timing(s), w = word(s);
   const canMute = s.recommendedAction === 'mute';
+  const canVoice = s.recommendedAction === 'voice';
   // Each finding is set to how it should be acted on. skip works live in
-  // Jellyfin; mute/blur only take effect in a rendered clean copy.
-  const acts = ['mute','blur','skip'].map(a =>
-    `<option value=${{a}} ${{s.recommendedAction===a?'selected':''}}>${{a}}</option>`).join('');
+  // Jellyfin; mute/voice/blur only take effect in a rendered clean copy.
+  // "voice" removes only the vocals (Demucs) so music/ambient play through.
+  const actLabels = {{mute:'mute (silence all)', voice:'voice-only mute', blur:'blur', skip:'skip'}};
+  const acts = ['mute','voice','blur','skip'].map(a =>
+    `<option value=${{a}} ${{s.recommendedAction===a?'selected':''}}>${{actLabels[a]}}</option>`).join('');
   el.innerHTML = `
     <div class=shot>
       <img loading=lazy src="/api/thumbnail?path=${{encodeURIComponent(MEDIA)}}&ms=${{Math.floor((s.startMs+s.endMs)/2)}}">
@@ -663,6 +718,7 @@ function card(s) {{
     <div class=clipbtns>
       <button class=play-plain>&#9654; Play scene</button>
       ${{canMute ? '<button class=play-muted>&#9654; Play muted</button>' : ''}}
+      ${{canVoice ? '<button class=play-voice>&#9654; Play voice-removed</button>' : ''}}
       <button class=edit-timing>&#9998; Timing</button>
     </div>
     <div class=meta>
@@ -683,7 +739,9 @@ function card(s) {{
   shot.onclick = () => playClip(shot, s, false);
   el.querySelector('.play-plain').onclick = () => playClip(shot, s, false);
   const pm = el.querySelector('.play-muted');
-  if (pm) pm.onclick = () => playClip(shot, s, true);
+  if (pm) pm.onclick = () => playClip(shot, s, true, false);
+  const pv = el.querySelector('.play-voice');
+  if (pv) pv.onclick = () => playClip(shot, s, false, true);
 
   const [yes, no] = el.querySelectorAll('.btns button');
   const send = v => fetch(`/api/segments/${{s.id}}?path=${{encodeURIComponent(MEDIA)}}`, {{
@@ -743,6 +801,7 @@ function buildTiming(cell, s, box, mode) {{
   const clamp = t => Math.max(winStart, Math.min(winEnd, t));
   let st = clamp(s.startMs), en = clamp(s.endMs);
   const canMute = s.recommendedAction === 'mute';
+  const canVoice = s.recommendedAction === 'voice';
   const bg = mode.visual
     ? `<img class=strip style="width:${{W}}px;height:${{H}}px" `
       + `src="/api/filmstrip?path=${{encodeURIComponent(MEDIA)}}`
@@ -759,21 +818,27 @@ function buildTiming(cell, s, box, mode) {{
       </div>
     </div>
     <div class=tctrls>
-      <span>Start</span>
+      <span class=tlabel>Start</span>
+      <button data-h=start data-d=-1000>&#9664;&#9664; 1s</button>
       <button data-h=start data-d=-25>&#9664; 25ms</button>
       <button data-h=start data-d=25>25ms &#9654;</button>
+      <button data-h=start data-d=1000>1s &#9654;&#9654;</button>
       <span class=tread id=tstart-${{s.id}}></span>
-      <span style="margin-left:14px">End</span>
+    </div>
+    <div class=tctrls>
+      <span class=tlabel>End</span>
+      <button data-h=end data-d=-1000>&#9664;&#9664; 1s</button>
       <button data-h=end data-d=-25>&#9664; 25ms</button>
       <button data-h=end data-d=25>25ms &#9654;</button>
+      <button data-h=end data-d=1000>1s &#9654;&#9654;</button>
       <span class=tread id=tend-${{s.id}}></span>
       <span style="margin-left:14px" class=tread id=tdur-${{s.id}}></span>
     </div>
     <div class=tctrls>
-      <button class=tprev>&#9654; ${{canMute ? 'Preview muted' : 'Preview scene'}}</button>
+      <button class=tprev>&#9654; ${{canMute ? 'Preview muted' : canVoice ? 'Preview voice-removed' : 'Preview scene'}}</button>
       <button class=tsave>Save timing</button>
       <button class=tcancel>Cancel</button>
-      <span class=thint>drag the handles or nudge; snaps to 25ms</span>
+      <span class=thint>drag the handles, or nudge &plusmn;1s / &plusmn;25ms; snaps to 25ms</span>
     </div>`;
 
   const wrap = box.querySelector('.wavewrap');
@@ -839,7 +904,7 @@ function buildTiming(cell, s, box, mode) {{
   }});
 
   box.querySelector('.tprev').onclick = () =>
-    playClip(cell.querySelector('.shot'), {{startMs: st, endMs: en}}, canMute);
+    playClip(cell.querySelector('.shot'), {{startMs: st, endMs: en}}, canMute, canVoice);
 
   box.querySelector('.tcancel').onclick = () => toggleTiming(cell, s, box);
 

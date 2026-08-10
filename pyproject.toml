@@ -12,6 +12,9 @@ dependencies = [
     # Declared directly (not just via pureframe) so the CUDA index pin below applies.
     "torch>=2.6,<2.8",
     "faster-whisper>=1.0",
+    # Voice-only mute: 2-stem source separation (vocals vs accompaniment) so a
+    # rendered mute drops the spoken word while music/ambient play through.
+    "demucs>=4.0",
 ]
 
 [dependency-groups]

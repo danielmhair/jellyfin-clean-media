@@ -56,7 +56,8 @@ spoken word while keeping music/ambient, windowed per finding, render-only.
 - `worker/engines/` — one adapter per detector behind a common interface
   (`base.py`): `subtitle_engine` (profanity from subs), `whisper_engine`,
   `vlm_engine` (Ollama Qwen3-VL vision), `pureframe_engine`, `vobsub` (OCR),
-  `mute_render`, `profanity` (word lists), `subtitles` (SRT parse).
+  `mute_render`, `voice_render` (Demucs voice-only mute), `profanity` (word
+  lists), `subtitles` (SRT parse).
 - `plugin/Jellyfin.Plugin.CleanMedia/` — the Jellyfin plugin (C#, net9.0).
 - `scripts/` — every routine command (`.sh`, plus `install-service.ps1`).
 - `manifest.json` — Jellyfin plugin-repository manifest at repo root.

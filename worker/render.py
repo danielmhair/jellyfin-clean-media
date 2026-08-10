@@ -58,23 +58,29 @@ def keep_intervals(skips, duration_s: float) -> list[tuple[float, float]]:
 
 
 def _cut_filter_complex(
-    keeps: list[tuple[float, float]], blur_expr: Optional[str], mute_expr: Optional[str]
+    keeps: list[tuple[float, float]],
+    blur_expr: Optional[str],
+    mute_expr: Optional[str],
+    audio_in: str = "0",
 ) -> str:
     """Blur/mute, then cut and re-join with trim+concat.
 
     concat preserves real durations, unlike select+setpts=N/FRAME_RATE/TB,
     which silently desyncs telecined sources whose container frame rate does
     not match the frames the decoder actually emits.
+
+    ``audio_in`` is the input index the audio is drawn from — 0 for the source,
+    or 1 when a voice-removed track is supplied as a second input.
     """
     n = len(keeps)
     parts: list[str] = []
 
-    vsrc, asrc = "0:v", "0:a"
+    vsrc, asrc = "0:v", f"{audio_in}:a"
     if blur_expr:
         parts.append(f"[0:v]{blur_expr}[vb]")
         vsrc = "vb"
     if mute_expr:
-        parts.append(f"[0:a]{mute_expr}[ab]")
+        parts.append(f"[{audio_in}:a]{mute_expr}[ab]")
         asrc = "ab"
 
     parts.append(f"[{vsrc}]split={n}" + "".join(f"[vs{i}]" for i in range(n)))
@@ -98,19 +104,38 @@ def build_command(
     use_nvenc: bool = True,
     blur_sigma: int = BLUR_SIGMA,
     duration_s: Optional[float] = None,
+    audio_path: Optional[Path] = None,
+    audio_sr: Optional[int] = None,
+    audio_ch: Optional[int] = None,
 ) -> tuple[list[str], int, int]:
-    """Build the FFmpeg command. Returns (cmd, n_blur, n_mute)."""
+    """Build the FFmpeg command. Returns (cmd, n_blur, n_mute).
+
+    ``audio_path`` supplies a pre-rendered voice-removed audio track (raw
+    s16le) to use in place of the source audio, for voice-only mutes — the
+    separation happens outside FFmpeg (see :mod:`worker.engines.voice_render`).
+    """
     approved = [s for s in timeline.segments if s.approved is not False]
     blur = [s for s in approved if s.recommendedAction == "blur"]
     mute = [s for s in approved if s.recommendedAction == "mute"]
     skip = [s for s in approved if s.recommendedAction == "skip"]
-    if not blur and not mute and not skip:
+    # Voice-only mutes never reach FFmpeg as a filter — the vocals are already
+    # gone from audio_path — but they still count as work to render, and they
+    # force an audio re-encode (the new track replaces the original).
+    voice = [s for s in approved if s.recommendedAction == "voice"]
+    if not blur and not mute and not skip and not voice:
         raise RuntimeError("timeline has no approved segments to render")
 
     if skip and not duration_s:
         raise ValueError("duration_s is required to render skips")
 
     cmd = ["ffmpeg", "-y", "-i", str(media_path)]
+    audio_in = "0"
+    if audio_path is not None:
+        # Raw PCM carries no header, so its rate/layout must be declared before
+        # -i; the audio then comes from this second input instead of the source.
+        cmd += ["-f", "s16le", "-ar", str(audio_sr), "-ac", str(audio_ch), "-i", str(audio_path)]
+        audio_in = "1"
+
     blur_expr = (
         f"gblur=sigma={blur_sigma}:enable='{_enable_expr(blur)}'" if blur else None
     )
@@ -118,11 +143,11 @@ def build_command(
 
     if skip:
         keeps = keep_intervals(skip, duration_s)
-        cmd += ["-filter_complex", _cut_filter_complex(keeps, blur_expr, mute_expr)]
+        cmd += ["-filter_complex", _cut_filter_complex(keeps, blur_expr, mute_expr, audio_in)]
         # A cut shortens the timeline; copied subtitles would drift out of sync.
         cmd += ["-map", "[outv]", "-map", "[outa]", "-sn"]
     else:
-        cmd += ["-map", "0:v:0", "-map", "0:a:0", "-map", "0:s?"]
+        cmd += ["-map", "0:v:0", "-map", f"{audio_in}:a:0", "-map", "0:s?"]
         if blur_expr:
             cmd += ["-vf", blur_expr]
         if mute_expr:
@@ -137,7 +162,7 @@ def build_command(
     else:
         cmd += ["-c:v", "copy"]
 
-    if mute or skip:
+    if mute or skip or voice:
         cmd += ["-c:a", "ac3", "-b:a", "448k"]
     else:
         cmd += ["-c:a", "copy"]
@@ -156,8 +181,57 @@ def render(
     use_nvenc: bool = True,
     duration_s: Optional[float] = None,
 ) -> Path:
+    approved = [s for s in timeline.segments if s.approved is not False]
+    voice = [s for s in approved if s.recommendedAction == "voice"]
+
+    # Voice-only mutes need Demucs source separation, which FFmpeg can't do:
+    # build a vocals-removed audio track first, then feed it to FFmpeg in place
+    # of the original audio. Cleaned up in the finally below.
+    audio_path = audio_sr = audio_ch = None
+    if voice:
+        from .engines.voice_render import (
+            DEFAULT_CH,
+            DEFAULT_SR,
+            render_voice_removed_pcm,
+        )
+
+        audio_sr, audio_ch = DEFAULT_SR, DEFAULT_CH
+        audio_path = Path(tempfile.mkstemp(suffix=".pcm")[1])
+        # Scale the separation pass into the first 90% so the bar keeps moving;
+        # FFmpeg's own progress (skips only) takes it the rest of the way.
+        render_voice_removed_pcm(
+            media_path,
+            voice,
+            audio_path,
+            lambda f, s: progress(min(0.9, f * 0.9), s),
+            sr=audio_sr,
+            ch=audio_ch,
+        )
+
+    try:
+        return _run_render(
+            media_path, timeline, output_path, progress, use_nvenc, duration_s,
+            audio_path, audio_sr, audio_ch,
+        )
+    finally:
+        if audio_path is not None:
+            audio_path.unlink(missing_ok=True)
+
+
+def _run_render(
+    media_path: Path,
+    timeline: Timeline,
+    output_path: Path,
+    progress: ProgressCb,
+    use_nvenc: bool,
+    duration_s: Optional[float],
+    audio_path: Optional[Path],
+    audio_sr: Optional[int],
+    audio_ch: Optional[int],
+) -> Path:
     cmd, n_blur, n_mute = build_command(
-        media_path, timeline, output_path, use_nvenc=use_nvenc, duration_s=duration_s
+        media_path, timeline, output_path, use_nvenc=use_nvenc, duration_s=duration_s,
+        audio_path=audio_path, audio_sr=audio_sr, audio_ch=audio_ch,
     )
     n_skip = len(
         [

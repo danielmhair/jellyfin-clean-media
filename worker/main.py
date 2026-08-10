@@ -186,18 +186,25 @@ def thumbnail(path: str, ms: int) -> Response:
 
 @app.get("/api/clip")
 def clip(
-    path: str, startMs: int, endMs: int, pad: float = CLIP_PAD_S, mute: bool = False
+    path: str,
+    startMs: int,
+    endMs: int,
+    pad: float = CLIP_PAD_S,
+    mute: bool = False,
+    voice: bool = False,
 ) -> FileResponse:
     """A short, browser-playable clip around a finding, for review.
 
     With mute=true the flagged span is silenced, so a reviewer can hear the
     scene as it will play once the finding is acted on — the way to confirm a
-    profanity mute lands on the word.
+    profanity mute lands on the word. With voice=true only the vocals are
+    removed across the span (Demucs), so the reviewer hears the voice-only mute
+    — the word gone, the music playing through.
     """
     media = resolve_media(path)
     if media is None:
         raise HTTPException(404, f"media not found: {path}")
-    built = build_clip(media, startMs, endMs, pad, mute)
+    built = build_clip(media, startMs, endMs, pad, mute, voice)
     if built is None:
         raise HTTPException(500, "could not build clip")
     return FileResponse(built, media_type="video/mp4")
@@ -434,6 +441,20 @@ def status_for_media(req: StatusRequest) -> list[MediaStatus]:
                 status.pending = status.total - status.approved - status.rejected
         out.append(status)
     return out
+
+
+@app.post("/api/reindex")
+def reindex() -> dict:
+    """Rebuild the media/sidecar index now, instead of waiting out its TTL.
+
+    The review grid answers "analyzed?" from a cached walk of the media roots.
+    A sidecar written after that walk — by the batch tool, or copied in by
+    hand — is invisible until the cache expires, so the grid shows a reviewed
+    film as "not analyzed". The batch pings this when it finishes, and the
+    grid can offer it as a manual refresh.
+    """
+    warm_media_index()
+    return {"status": "ok"}
 
 
 @app.post("/api/jobs/{job_id}/render", response_model=Job, status_code=202)
