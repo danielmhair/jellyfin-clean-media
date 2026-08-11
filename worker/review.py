@@ -1088,7 +1088,8 @@ function buildTiming(cell, s, box, mode) {{
   function drawSel() {{
     if (selA === null || selB === null) {{ selEl.style.display = 'none'; return; }}
     const a = Math.min(selA, selB), b = Math.max(selA, selB);
-    selEl.style.display = '';
+    // Explicit 'block': the class sets display:none, so '' would revert to that.
+    selEl.style.display = 'block';
     selEl.style.left = cx(a) + 'px';
     selEl.style.width = Math.max(0, cx(b) - cx(a)) + 'px';
   }}
