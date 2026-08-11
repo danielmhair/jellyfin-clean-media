@@ -288,6 +288,21 @@ its box (`[ ]` → `[x]`), and move the **← NEXT** marker on.
 
 ## Recent changes
 
+### Audition selection on the waveform + delete a finding (2026-08-10, worker)
+
+- **Audition-to-play** — in the timing editor, drag across the waveform/filmstrip
+  background to select a region; on release it plays **just that span** (tight,
+  ~0.15s pad) so you can hear/see what's there before moving the handles. The
+  selection is a **separate blue overlay** — the segment's own start/end bars
+  stay put. Dragging a handle still wins (the selection ignores mousedowns on a
+  handle); a plain click clears the selection. `playClip` gained a pad override
+  so the audition isn't padded ±15s like the normal preview.
+- **Delete** — each card gets a **"✕ Delete"** button (confirmed) that removes the
+  finding via the existing `DELETE /api/segments/{id}` and reloads. Needed now
+  that findings can be added/duplicated.
+- **Worker-only** — no new backend logic (reuses the delete endpoint); needs a
+  worker restart to serve. 136 tests green.
+
 ### Add / duplicate a finding + editable start/end times (2026-08-10, worker)
 
 - **Why:** a reviewer wants to place a skip/mute somewhere the engines missed,

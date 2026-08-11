@@ -665,7 +665,12 @@ PAGE = """<!doctype html>
  .wavewrap{{overflow-x:auto;background:#0c0c0d;border:1px solid #2a2f36;border-radius:6px}}
  .wavebox{{position:relative}} .wavebox canvas,.wavebox .strip{{display:block}}
  .strip{{object-fit:fill;image-rendering:auto}}
+ .wavebox{{cursor:crosshair}}
  .region{{position:absolute;top:0;bottom:0;background:rgba(255,212,121,.15);pointer-events:none}}
+ /* a scratch selection to audition a spot, separate from the segment bounds */
+ .selregion{{position:absolute;top:0;bottom:0;background:rgba(88,166,255,.22);
+             border-left:2px solid #58a6ff;border-right:2px solid #58a6ff;
+             pointer-events:none;display:none}}
  .handle{{position:absolute;top:0;bottom:0;width:2px;background:#ffd479;pointer-events:none}}
  .handle.end{{background:#7ee787}}
  .handle .grip{{position:absolute;top:0;left:-6px;width:14px;height:18px;border-radius:3px;
@@ -685,6 +690,7 @@ PAGE = """<!doctype html>
  #addbar .tosep{{margin:0 4px;color:#8b949e}}
  #addbar .mhint{{font-size:12px;color:#8b949e;margin-left:8px}}
  .clipbtns button.dup{{margin-left:auto}}
+ .clipbtns button.del{{color:#ff7b72}}
  .bar{{position:sticky;top:0;background:#111;padding:10px 0;margin-bottom:10px;z-index:9}}
  .filters{{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px}}
  .filters button{{flex:0 0 auto;padding:6px 12px;background:#22262c;color:#9aa;font-size:12px}}
@@ -788,12 +794,13 @@ function timing(s) {{
 // The muted word, from the [word] the subtitle engine prefixes.
 function word(s) {{ const m = /^\\[([^\\]]+)\\]/.exec(s.reasoning||''); return m ? m[1] : null; }}
 
-function playClip(box, s, mute, voice) {{
+function playClip(box, s, mute, voice, padOverride) {{
   box.innerHTML = '<div class=play><span>'
     + (voice ? 'separating voice&hellip; (a few seconds)' : 'loading clip&hellip;')
     + '</span></div>';
   const tight = document.getElementById('tight').checked;
-  const pad = tight ? 2 : PAD;
+  // padOverride lets an audition play just the selected span, not padded ±PAD.
+  const pad = padOverride != null ? padOverride : (tight ? 2 : PAD);
   const v = document.createElement('video');
   v.controls = true; v.autoplay = true; v.preload = 'auto';
   v.src = `/api/clip?path=${{encodeURIComponent(MEDIA)}}`
@@ -830,6 +837,7 @@ function card(s) {{
       ${{canVoice ? '<button class=play-voice>&#9654; Play voice-removed</button>' : ''}}
       <button class=edit-timing>&#9998; Timing</button>
       <button class=dup title="Copy this finding; then retime the copy to another place">&#10697; Duplicate</button>
+      <button class=del title="Delete this finding">&#10005; Delete</button>
     </div>
     <div class=meta>
       <label class=mergepick title="Select to merge with others"><input type=checkbox class=mergesel> merge</label>
@@ -890,6 +898,15 @@ function card(s) {{
       body: JSON.stringify({{startMs: s.startMs, endMs: s.endMs, category: s.category,
         recommendedAction: s.recommendedAction, reasoning: s.reasoning || ''}})
     }}).then(r => {{ if (!r.ok) throw new Error('duplicate failed'); return r.json(); }})
+      .then(() => location.reload()).catch(() => {{}});
+  }};
+
+  // Delete: remove the finding outright (we can add them now, so we must be
+  // able to remove them). Confirmed, since it can't be undone.
+  el.querySelector('.del').onclick = () => {{
+    if (!confirm('Delete finding #' + s.id + '? This cannot be undone.')) return;
+    fetch(`/api/segments/${{s.id}}?path=${{encodeURIComponent(MEDIA)}}`, {{ method: 'DELETE' }})
+      .then(r => {{ if (!r.ok) throw new Error('delete failed'); return r.json(); }})
       .then(() => location.reload()).catch(() => {{}});
   }};
   return el;
@@ -964,6 +981,7 @@ function buildTiming(cell, s, box, mode) {{
       <div class=wavebox style="width:${{W}}px;height:${{H}}px">
         ${{bg}}
         <div class=region></div>
+        <div class=selregion></div>
         <div class="handle start"><div class=grip></div></div>
         <div class="handle end"><div class=grip></div></div>
       </div>
@@ -989,7 +1007,7 @@ function buildTiming(cell, s, box, mode) {{
       <button class=tprev>&#9654; ${{canMute ? 'Preview muted' : canVoice ? 'Preview voice-removed' : 'Preview scene'}}</button>
       <button class=tsave>Save timing</button>
       <button class=tcancel>Cancel</button>
-      <span class=thint>drag the handles, or nudge &plusmn;1s / &plusmn;25ms; snaps to 25ms</span>
+      <span class=thint>drag the handles or type a time to set the bounds; drag the waveform itself to hear a spot</span>
     </div>`;
 
   const wrap = box.querySelector('.wavewrap');
@@ -1060,6 +1078,44 @@ function buildTiming(cell, s, box, mode) {{
     }});
   }}
   drag(hStart, true); drag(hEnd, false);
+
+  // Audition a spot: drag across the waveform/filmstrip background to select a
+  // region and play just that on release, so you can hear/see what is there
+  // before moving the handles. The segment's own start/end bars stay put — this
+  // selection is a separate scratch overlay, not the saved bounds.
+  const selEl = box.querySelector('.selregion');
+  let selA = null, selB = null;
+  function drawSel() {{
+    if (selA === null || selB === null) {{ selEl.style.display = 'none'; return; }}
+    const a = Math.min(selA, selB), b = Math.max(selA, selB);
+    selEl.style.display = '';
+    selEl.style.left = cx(a) + 'px';
+    selEl.style.width = Math.max(0, cx(b) - cx(a)) + 'px';
+  }}
+  wbox.addEventListener('mousedown', e => {{
+    if (e.target.closest('.handle')) return;  // let handle drags win
+    e.preventDefault();
+    const originX = wbox.getBoundingClientRect().left;
+    selA = Math.max(winStart, Math.min(winEnd, tOf(e.clientX - originX)));
+    selB = selA;
+    drawSel();
+    const move = ev => {{
+      selB = Math.max(winStart, Math.min(winEnd, tOf(ev.clientX - originX)));
+      drawSel();
+    }};
+    const up = () => {{
+      document.removeEventListener('mousemove', move);
+      document.removeEventListener('mouseup', up);
+      const a = Math.min(selA, selB), b = Math.max(selA, selB);
+      if (b - a >= 100) {{  // a real drag (>=100ms), not a stray click
+        playClip(cell.querySelector('.shot'), {{startMs: a, endMs: b}}, false, false, 0.15);
+      }} else {{
+        selA = selB = null; drawSel();  // a click clears any selection
+      }}
+    }};
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+  }});
 
   box.querySelectorAll('.tctrls [data-h]').forEach(b => b.onclick = () => {{
     const d2 = parseInt(b.dataset.d, 10);
