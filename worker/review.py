@@ -677,6 +677,14 @@ PAGE = """<!doctype html>
  .tlabel{{display:inline-block;min-width:34px}}
  .tread{{font-variant-numeric:tabular-nums;color:#eee;font-weight:600}}
  .thint{{opacity:.6}} .tload{{padding:12px;color:#9aa;font-size:12px}}
+ /* editable time fields (timing editor + add-segment form) */
+ .tinput{{background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:4px;
+          padding:3px 6px;font:inherit;font-size:12px;font-variant-numeric:tabular-nums}}
+ .tinput:focus{{outline:none;border-color:#30588c}}
+ #addbar button{{background:#30588c;color:#fff}}
+ #addbar .tosep{{margin:0 4px;color:#8b949e}}
+ #addbar .mhint{{font-size:12px;color:#8b949e;margin-left:8px}}
+ .clipbtns button.dup{{margin-left:auto}}
  .bar{{position:sticky;top:0;background:#111;padding:10px 0;margin-bottom:10px;z-index:9}}
  .filters{{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px}}
  .filters button{{flex:0 0 auto;padding:6px 12px;background:#22262c;color:#9aa;font-size:12px}}
@@ -728,6 +736,24 @@ PAGE = """<!doctype html>
     </select>
     <button id=mergeBtn disabled>Merge selected (0)</button>
     <span class=mhint>tick “merge” on 2+ findings to combine them into one segment spanning them all</span>
+  </div>
+  <div class=filters id=addbar>
+    <span class=flabel>Add:</span>
+    <button id=addToggle>&#43; Add segment</button>
+    <span id=addform style="display:none">
+      <input id=addStart class=tinput size=11 placeholder="0:00:00.000">
+      <span class=tosep>to</span>
+      <input id=addEnd class=tinput size=11 placeholder="0:00:00.000">
+      <select id=addAction>
+        <option value=skip selected>skip</option>
+        <option value=mute>mute</option>
+        <option value=voice>voice-only mute</option>
+        <option value=blur>blur</option>
+      </select>
+      <button id=addSave>Add</button>
+      <button id=addCancel>Cancel</button>
+      <span class=mhint>times as H:MM:SS.mmm</span>
+    </span>
   </div>
 </div>
 <div class=grid id=grid></div>
@@ -803,6 +829,7 @@ function card(s) {{
       ${{canMute ? '<button class=play-muted>&#9654; Play muted</button>' : ''}}
       ${{canVoice ? '<button class=play-voice>&#9654; Play voice-removed</button>' : ''}}
       <button class=edit-timing>&#9998; Timing</button>
+      <button class=dup title="Copy this finding; then retime the copy to another place">&#10697; Duplicate</button>
     </div>
     <div class=meta>
       <label class=mergepick title="Select to merge with others"><input type=checkbox class=mergesel> merge</label>
@@ -854,12 +881,42 @@ function card(s) {{
   }};
 
   el.querySelector('.edit-timing').onclick = () => toggleTiming(el, s, el.querySelector('.editor'));
+
+  // Duplicate: create a manual copy at the same spot, then reload so the new
+  // card appears. The reviewer retimes the copy (editable times) to its place.
+  el.querySelector('.dup').onclick = () => {{
+    fetch(`/api/segments?path=${{encodeURIComponent(MEDIA)}}`, {{
+      method: 'POST', headers: {{'Content-Type':'application/json'}},
+      body: JSON.stringify({{startMs: s.startMs, endMs: s.endMs, category: s.category,
+        recommendedAction: s.recommendedAction, reasoning: s.reasoning || ''}})
+    }}).then(r => {{ if (!r.ok) throw new Error('duplicate failed'); return r.json(); }})
+      .then(() => location.reload()).catch(() => {{}});
+  }};
   return el;
 }}
 
 const fmtMs = ms => {{ const s = Math.floor(ms / 1000);
   return `${{Math.floor(s / 60)}}:${{String(s % 60).padStart(2, '0')}}`
        + `.${{String(Math.floor(ms % 1000)).padStart(3, '0')}}`; }};
+
+// H:MM:SS.mmm, for the editable time fields, so hours-in are readable.
+const fmtHMS = ms => {{ const t = Math.floor(ms / 1000);
+  return `${{Math.floor(t / 3600)}}:${{String(Math.floor(t % 3600 / 60)).padStart(2, '0')}}`
+       + `:${{String(t % 60).padStart(2, '0')}}.${{String(Math.floor(ms % 1000)).padStart(3, '0')}}`; }};
+
+// Flexible parse for a typed time: H:MM:SS.mmm, MM:SS(.mmm), or plain seconds.
+// Returns ms (>= 0) or null if it can't be read.
+function parseTime(str) {{
+  str = String(str == null ? '' : str).trim();
+  if (!str) return null;
+  const p = str.split(':').map(x => parseFloat(x));
+  if (!p.length || p.some(x => !isFinite(x))) return null;
+  let sec;
+  if (p.length === 3) sec = p[0] * 3600 + p[1] * 60 + p[2];
+  else if (p.length === 2) sec = p[0] * 60 + p[1];
+  else sec = p[0];
+  return Math.max(0, Math.round(sec * 1000));
+}}
 
 // Waveform timing editor. Zoomed to ~160px/s so 25ms is a few pixels; the
 // scrollable window spans the finding ±PAD s, so a mute can be dragged onto
@@ -917,7 +974,7 @@ function buildTiming(cell, s, box, mode) {{
       <button data-h=start data-d=-25>&#9664; 25ms</button>
       <button data-h=start data-d=25>25ms &#9654;</button>
       <button data-h=start data-d=1000>1s &#9654;&#9654;</button>
-      <span class=tread id=tstart-${{s.id}}></span>
+      <input class=tinput id=tstart-${{s.id}} size=11 title="type any time: H:MM:SS.mmm">
     </div>
     <div class=tctrls>
       <span class=tlabel>End</span>
@@ -925,7 +982,7 @@ function buildTiming(cell, s, box, mode) {{
       <button data-h=end data-d=-25>&#9664; 25ms</button>
       <button data-h=end data-d=25>25ms &#9654;</button>
       <button data-h=end data-d=1000>1s &#9654;&#9654;</button>
-      <span class=tread id=tend-${{s.id}}></span>
+      <input class=tinput id=tend-${{s.id}} size=11 title="type any time: H:MM:SS.mmm">
       <span style="margin-left:14px" class=tread id=tdur-${{s.id}}></span>
     </div>
     <div class=tctrls>
@@ -960,15 +1017,29 @@ function buildTiming(cell, s, box, mode) {{
     }}
   }}
 
+  // A typed time can fall outside the drawn window, so clamp only the handle's
+  // pixel position — the value stays whatever was entered and is what gets saved.
+  const cx = t => Math.max(0, Math.min(W, xOf(t)));
   function upd() {{
-    hStart.style.left = xOf(st) + 'px';
-    hEnd.style.left = xOf(en) + 'px';
-    region.style.left = xOf(st) + 'px';
-    region.style.width = Math.max(0, xOf(en) - xOf(st)) + 'px';
-    rStart.textContent = fmtMs(st);
-    rEnd.textContent = fmtMs(en);
+    hStart.style.left = cx(st) + 'px';
+    hEnd.style.left = cx(en) + 'px';
+    region.style.left = cx(st) + 'px';
+    region.style.width = Math.max(0, cx(en) - cx(st)) + 'px';
+    // Don't overwrite the field being typed in.
+    if (document.activeElement !== rStart) rStart.value = fmtHMS(st);
+    if (document.activeElement !== rEnd) rEnd.value = fmtHMS(en);
     rDur.textContent = (en - st) + 'ms';
   }}
+
+  // Type any time into the fields (H:MM:SS.mmm). Unlike drag/nudge, this is not
+  // clamped to the window — so a duplicated or added finding can be moved
+  // anywhere. Preview and Save use these values.
+  rStart.addEventListener('change', () => {{
+    const v = parseTime(rStart.value); if (v !== null) st = v; upd();
+  }});
+  rEnd.addEventListener('change', () => {{
+    const v = parseTime(rEnd.value); if (v !== null) en = v; upd();
+  }});
   upd();
   // Centre the finding in the scroll view.
   wrap.scrollLeft = xOf((st + en) / 2) - wrap.clientWidth / 2;
@@ -1110,6 +1181,30 @@ function doMerge() {{
     .catch(() => {{ updateMergeBtn(); }});
 }}
 document.getElementById('mergeBtn').onclick = doMerge;
+
+// Add a finding by hand: type a start and end (any time) and it's created as an
+// approved manual segment. Reloading shows it, and its Play clip loads the video
+// from that time. Duplicate (per card) uses the same create path.
+const addForm = document.getElementById('addform');
+document.getElementById('addToggle').onclick = () => {{
+  addForm.style.display = addForm.style.display === 'none' ? '' : 'none';
+}};
+document.getElementById('addCancel').onclick = () => {{ addForm.style.display = 'none'; }};
+document.getElementById('addSave').onclick = () => {{
+  const a = parseTime(document.getElementById('addStart').value);
+  const b = parseTime(document.getElementById('addEnd').value);
+  if (a === null || b === null) {{ alert('Enter start and end times as H:MM:SS.mmm'); return; }}
+  const st = Math.min(a, b), en = Math.max(a, b);
+  const btn = document.getElementById('addSave');
+  btn.disabled = true;
+  fetch(`/api/segments?path=${{encodeURIComponent(MEDIA)}}`, {{
+    method: 'POST', headers: {{'Content-Type':'application/json'}},
+    body: JSON.stringify({{startMs: st, endMs: en, category: 'manual',
+      recommendedAction: document.getElementById('addAction').value}})
+  }}).then(r => {{ if (!r.ok) throw new Error('add failed'); return r.json(); }})
+    .then(() => location.reload())
+    .catch(() => {{ btn.disabled = false; alert('Could not add the segment.'); }});
+}};
 
 buildTypeFilters();
 renderGrid();

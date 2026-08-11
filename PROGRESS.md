@@ -288,6 +288,26 @@ its box (`[ ]` → `[x]`), and move the **← NEXT** marker on.
 
 ## Recent changes
 
+### Add / duplicate a finding + editable start/end times (2026-08-10, worker)
+
+- **Why:** a reviewer wants to place a skip/mute somewhere the engines missed,
+  or reuse one finding in another spot — and to type an exact time, not only
+  drag within the ±15s editor window.
+- **Editable times** — the timing editor's start/end readouts are now **text
+  inputs** (`H:MM:SS.mmm`). Typing sets the value with no window clamp (drag/nudge
+  still snap within the window), so a finding can be moved anywhere; Preview and
+  Save use the typed values. Handle positions clamp to the canvas so an
+  out-of-window value doesn't fly off.
+- **Add segment** — an **"+ Add segment"** control in the top bar: type a start
+  and end, pick an action, and it's created (approved manual finding) via the
+  existing `POST /api/segments`; the page reloads so the new card shows and its
+  Play clip loads the video from that time.
+- **Duplicate** — a **"⧉ Duplicate"** button per card copies the finding
+  (times, category, action, reasoning) via the same create path; the copy
+  appears and can be retimed to another place with the editable inputs.
+- **Worker-only** — reuses the existing create/patch endpoints; no new backend
+  logic, no plugin change. Needs a worker restart to serve. 136 tests green.
+
 ### Merge findings into one segment (2026-08-10, worker)
 
 - **Why:** the visual pass flags a scene *shot by shot* (e.g. a dance number as
