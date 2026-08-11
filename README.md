@@ -245,7 +245,7 @@ registered. It prints the LAN addresses to use as the plugin's Worker URL.
 |---|---|
 | **Log (structured)** | `data\logs\worker.log` in the repo — one readable line per request and per job, rotates at 5 MB (three backups). This is the one to watch. |
 | Log (raw stdout) | `%LOCALAPPDATA%\CleanMedia\worker.log` — everything the console printed, mixed together, truncated past 10 MB |
-| Launcher | `%LOCALAPPDATA%\CleanMedia\worker-service.cmd`, regenerated on install |
+| Launcher | `%LOCALAPPDATA%\CleanMedia\worker-service.cmd` (+ a `.vbs` wrapper that runs it with no visible window), regenerated on install |
 | Task | `CleanMediaWorker` in Task Scheduler |
 
 The worker runs as a **background scheduled task**, so its output never
