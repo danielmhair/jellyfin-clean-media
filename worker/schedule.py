@@ -6,20 +6,30 @@ is per-day-of-week: each weekday has its own allowed window. It is edited from
 the Jellyfin plugin settings page and pushed here; the worker is the single
 source of truth because the worker is what enforces it.
 
-Time is worker-local wall-clock (``datetime.now()``). Renders are never gated —
-only analysis passes — because a "Render clean copy" is an explicit, immediate
-action.
+Time is evaluated in the schedule's own timezone (``Schedule.tz``, an IANA name
+like ``America/Denver`` captured from the admin's browser when they save). This
+keeps the window anchored to the person who set it up rather than to whatever
+clock the worker box happens to run — a Docker container defaulting to UTC would
+otherwise fire hours off from what the admin meant. When ``tz`` is unset we fall
+back to worker-local wall-clock (the original behaviour). Renders are never
+gated — only analysis passes — because a "Render clean copy" is an explicit,
+immediate action.
 """
 
 from __future__ import annotations
 
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from pydantic import BaseModel, Field
 
 from .store import DATA_DIR
+
+try:  # zoneinfo is stdlib on 3.9+, but IANA data needs `tzdata` on Windows.
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover — 3.11+ always has it, kept defensive.
+    ZoneInfo = None  # type: ignore[assignment, misc]
 
 # Index 0..6 lines up with datetime.weekday() (Monday=0 .. Sunday=6).
 DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -54,6 +64,9 @@ class Schedule(BaseModel):
 
     enabled: bool = False
     days: list[DayWindow] = Field(default_factory=lambda: [DayWindow() for _ in range(7)])
+    # IANA timezone the windows are expressed in (e.g. "America/Denver"), set
+    # from the admin's browser. Empty means worker-local wall-clock.
+    tz: str = ""
 
 
 class ScheduleView(BaseModel):
@@ -61,7 +74,36 @@ class ScheduleView(BaseModel):
 
     schedule: Schedule
     allowedNow: bool
-    now: str  # worker-local, e.g. "Mon 21:15"
+    now: str  # wall-clock in the schedule's timezone, e.g. "Mon 21:15"
+
+
+def _valid_tz(name: str) -> str:
+    """Return ``name`` if it is a usable IANA zone, else "" (worker-local)."""
+    name = (name or "").strip()
+    if not name or ZoneInfo is None:
+        return ""
+    try:
+        ZoneInfo(name)
+    except Exception:  # noqa: BLE001 — unknown/missing zone falls back to local
+        return ""
+    return name
+
+
+def _wall_clock(now: datetime, tz: str) -> datetime:
+    """Express ``now`` as wall-clock in the schedule's zone.
+
+    A naive ``now`` (tests, legacy callers) is taken as already-local and
+    returned unchanged. An aware ``now`` is converted to ``tz`` when set, or to
+    the worker's local zone otherwise — preserving the pre-timezone behaviour.
+    """
+    if now.tzinfo is None:
+        return now
+    if tz and ZoneInfo is not None:
+        try:
+            return now.astimezone(ZoneInfo(tz))
+        except Exception:  # noqa: BLE001 — bad zone falls back to worker-local
+            pass
+    return now.astimezone()
 
 
 def _normalize(schedule: Schedule) -> Schedule:
@@ -77,7 +119,7 @@ def _normalize(schedule: Schedule) -> Schedule:
         )
         for d in days
     ]
-    return Schedule(enabled=bool(schedule.enabled), days=fixed)
+    return Schedule(enabled=bool(schedule.enabled), days=fixed, tz=_valid_tz(schedule.tz))
 
 
 def _load_from_disk() -> Schedule:
@@ -124,8 +166,9 @@ def is_allowed(now: datetime, schedule: Optional[Schedule] = None) -> bool:
     while len(days) < 7:
         days.append(DayWindow())
 
-    mins = now.hour * 60 + now.minute
-    weekday = now.weekday()
+    local = _wall_clock(now, schedule.tz)
+    mins = local.hour * 60 + local.minute
+    weekday = local.weekday()
 
     today = days[weekday]
     if today.enabled:
@@ -148,10 +191,11 @@ def is_allowed(now: datetime, schedule: Optional[Schedule] = None) -> bool:
 
 def view(now: Optional[datetime] = None) -> ScheduleView:
     """The current schedule plus a right-now allowed snapshot, for the UI."""
-    now = now or datetime.now()
+    now = now or datetime.now(timezone.utc)
     schedule = get_schedule()
+    local = _wall_clock(now, schedule.tz)
     return ScheduleView(
         schedule=schedule,
         allowedNow=is_allowed(now, schedule),
-        now=f"{DAY_NAMES[now.weekday()]} {now.hour:02d}:{now.minute:02d}",
+        now=f"{DAY_NAMES[local.weekday()]} {local.hour:02d}:{local.minute:02d}",
     )

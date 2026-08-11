@@ -7,15 +7,33 @@ import threading
 import time
 import traceback
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
 from . import schedule as schedule_mod
 from .engines import ENGINES
+from .logging_config import get_logger
 from .models import Job, JobCreate, JobStatus, Timeline
 from .render import approved_for_render, render as render_clean
 from .store import Store, media_fingerprint
+
+log = get_logger("queue")
+
+
+def _name(job: Job) -> str:
+    """Just the file name, for readable log lines (paths are long)."""
+    return Path(job.mediaPath).name
+
+
+def _fmt_duration(seconds: float) -> str:
+    """A compact human duration, e.g. '4.2s', '3m12s', '1h04m'."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    whole = int(seconds)
+    if whole < 3600:
+        return f"{whole // 60}m{whole % 60:02d}s"
+    return f"{whole // 3600}h{(whole % 3600) // 60:02d}m"
 
 
 class JobCancelled(Exception):
@@ -50,11 +68,74 @@ class JobQueue:
         # analysis run at this moment?"; the queue holds analysis jobs outside
         # the window and pauses a resumable pass when the window closes.
         self._allowed_fn = allowed_fn or schedule_mod.is_allowed
-        self._now_fn = now_fn or datetime.now
+        # Aware UTC so the schedule can convert into its own timezone; a naive
+        # injected now_fn (tests) is still honoured as local wall-clock.
+        self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         self._sleep_fn = sleep_fn or time.sleep
         self._poll_s = poll_s
+        # Re-enqueue anything a previous run left unfinished BEFORE the worker
+        # starts, so it resumes in the original order rather than losing the
+        # in-memory queue on restart.
+        self._recover()
         self._worker = threading.Thread(target=self._loop, daemon=True, name="job-worker")
         self._worker.start()
+
+    # -- crash/restart recovery ----------------------------------------------
+
+    @staticmethod
+    def _kind_for(job: Job) -> Optional[str]:
+        """The queue 'kind' to reprocess a persisted job with, or None if done.
+
+        Mirrors how the submit_* methods classify work: a queued/running job is
+        an analysis pass; a rendering job is a sidecar render (engine=="render")
+        or an engine-plan render (any other engine, via ``submit_render``).
+        """
+        if job.status in (JobStatus.queued, JobStatus.running):
+            return "analyze"
+        if job.status == JobStatus.rendering:
+            return "render_media" if job.engine == "render" else "render"
+        return None
+
+    def _recover(self) -> None:
+        """Re-queue jobs left unfinished by a previous run, in submission order.
+
+        The processing queue is in memory, so a restart empties it while the job
+        rows persist in the store. Everything still queued/running/rendering is
+        put back oldest-first, so the worker picks up where it left off and the
+        order the administrator submitted is preserved. A pass interrupted
+        mid-run reads as ``running``/``rendering``; it is reset to its pre-start
+        state so the UI shows it waiting and the worker re-runs it. Resumable
+        analysis engines (the VLM) then resume from their on-disk checkpoint;
+        others re-run from the start. Terminal jobs are left untouched.
+        """
+        pending = [
+            j for j in self.store.list_jobs()
+            if j.status in (JobStatus.queued, JobStatus.running, JobStatus.rendering)
+        ]
+        pending.sort(key=lambda j: j.createdAt)  # oldest first == original order
+
+        recovered = 0
+        for job in pending:
+            kind = self._kind_for(job)
+            if kind is None:
+                continue
+            if job.status == JobStatus.running:
+                # Interrupted analysis: back to queued so _analyze re-runs it.
+                # Progress is kept so a resumable engine shows where it resumes.
+                job.status = JobStatus.queued
+                job.stage = "resuming after restart"
+                self.store.save_job(job)
+            elif job.status == JobStatus.rendering:
+                job.stage = "resuming render after restart"
+                self.store.save_job(job)
+            self._queue.put((kind, job.id))
+            recovered += 1
+
+        if recovered:
+            log.info(
+                "recovery: re-queued %d unfinished job(s) from the store, "
+                "resuming in submission order", recovered,
+            )
 
     def _analysis_allowed(self) -> bool:
         return bool(self._allowed_fn(self._now_fn()))
@@ -69,6 +150,10 @@ class JobQueue:
         fingerprint = media_fingerprint(media)
         duplicate = self.store.find_completed_by_fingerprint(fingerprint, req.engine)
         if duplicate:
+            log.info(
+                "job %s: reusing completed %s result for %s (no re-analysis)",
+                duplicate.id, req.engine, media.name,
+            )
             return duplicate
 
         job = Job(
@@ -80,6 +165,10 @@ class JobQueue:
         )
         self.store.save_job(job)
         self._queue.put(("analyze", job.id))
+        log.info(
+            "job %s queued: %s on %s (queue depth %d)",
+            job.id, req.engine, media.name, self._queue.qsize(),
+        )
         return job
 
     def submit_render(self, job_id: str, output_path: Optional[str]) -> Job:
@@ -198,22 +287,36 @@ class JobQueue:
                 job.stage = "paused — outside scheduled hours"
                 self.store.save_job(job)
                 self._queue.put((kind, job_id))
+                log.info(
+                    "job %s paused at %.0f%% (outside scheduled hours) - will resume",
+                    job_id, (job.progress or 0.0) * 100,
+                )
             except JobCancelled:
                 # Requested stop, not a failure: record it as cancelled.
                 job = self.store.get_job(job_id) or job
                 job.status = JobStatus.cancelled
                 job.stage = "cancelled"
                 self.store.save_job(job)
+                log.info("job %s cancelled (%s on %s)", job_id, job.engine, _name(job))
             except Exception as exc:  # noqa: BLE001 — job errors must not kill the worker
                 job = self.store.get_job(job_id) or job
                 job.status = JobStatus.failed
                 job.error = f"{exc}\n{traceback.format_exc(limit=3)}"
                 self.store.save_job(job)
+                log.error(
+                    "job %s FAILED (%s on %s): %s",
+                    job_id, job.engine, _name(job), exc, exc_info=True,
+                )
             finally:
                 with self._cancel_lock:
                     self._cancelled.discard(job_id)
 
     def _progress_cb(self, job: Job, resumable: bool = False):
+        # Progress fires many times a second; log only when a new 10% decile is
+        # crossed or the stage text changes, so the log tracks the pass without
+        # drowning in ticks. Held in a dict so the closure can mutate it.
+        marks = {"decile": -1, "stage": None}
+
         def cb(fraction, stage):
             # Check first: cancel() has already written status=cancelled, and
             # saving progress here would clobber it back to running.
@@ -223,10 +326,26 @@ class JobQueue:
             # it re-queues and resumes later instead of running out of hours.
             if resumable and not self._analysis_allowed():
                 raise JobPaused()
+            advanced_decile = False
             if fraction is not None:
                 job.progress = round(float(fraction), 4)
+                decile = int(job.progress * 10)
+                if decile > marks["decile"]:
+                    marks["decile"] = decile
+                    advanced_decile = True
+            stage_changed = bool(stage) and stage != marks["stage"]
             if stage:
+                marks["stage"] = stage
                 job.stage = stage
+            # One DEBUG line per pass step: a new 10% decile (with the current
+            # stage), or a stage change on its own if progress didn't advance.
+            if advanced_decile:
+                log.debug(
+                    "job %s: %3d%% - %s", job.id,
+                    int(job.progress * 100), stage or job.stage or "",
+                )
+            elif stage_changed:
+                log.debug("job %s: %s", job.id, stage)
             self.store.save_job(job)
 
         return cb
@@ -247,6 +366,10 @@ class JobQueue:
                 job.stage = "waiting for scheduled hours"
                 self.store.save_job(job)
                 announced = True
+                log.info(
+                    "job %s waiting for scheduled hours (%s on %s)",
+                    job.id, job.engine, _name(job),
+                )
             self._sleep_fn(self._poll_s)
 
     def _analyze(self, job: Job) -> None:
@@ -258,6 +381,8 @@ class JobQueue:
         job.status = JobStatus.running
         job.stage = "analyzing"
         self.store.save_job(job)
+        started = time.monotonic()
+        log.info("job %s started: %s on %s", job.id, job.engine, _name(job))
 
         timeline, plan_path = engine.analyze(
             Path(job.mediaPath),
@@ -273,6 +398,11 @@ class JobQueue:
         job.progress = 1.0
         job.stage = f"found {len(timeline.segments)} segment(s)"
         self.store.save_job(job)
+        log.info(
+            "job %s completed: %s on %s - %d finding(s) in %s",
+            job.id, job.engine, _name(job), len(timeline.segments),
+            _fmt_duration(time.monotonic() - started),
+        )
 
     def _render(self, job: Job) -> None:
         engine = ENGINES[job.engine]
@@ -283,6 +413,8 @@ class JobQueue:
         media = Path(job.mediaPath)
         default_out = media.parent / "cleaned" / f"{media.stem} (Clean){media.suffix}"
         output = Path(job.options.get("renderOutputPath") or default_out)
+        started = time.monotonic()
+        log.info("job %s rendering: %s (%s) -> %s", job.id, media.name, job.engine, output)
 
         rendered = engine.render(
             media, Path(job.enginePlanPath), timeline, output, self._progress_cb(job)
@@ -294,6 +426,10 @@ class JobQueue:
         job.progress = 1.0
         job.stage = "rendered clean copy"
         self.store.save_job(job)
+        log.info(
+            "job %s rendered clean copy in %s -> %s",
+            job.id, _fmt_duration(time.monotonic() - started), rendered,
+        )
 
     def _render_media(self, job: Job) -> None:
         """Render a clean copy straight from the sidecar's approved findings.
@@ -315,6 +451,11 @@ class JobQueue:
 
         default_out = media.parent / "cleaned" / f"{media.stem} (Clean){media.suffix}"
         output = Path(job.options.get("renderOutputPath") or default_out)
+        started = time.monotonic()
+        log.info(
+            "job %s rendering: %s -> %s (%d approved finding(s))",
+            job.id, media.name, output, len(approved),
+        )
 
         # Skips shorten the film, so the renderer needs its true length to work
         # out the spans to keep. Mute/blur-only renders don't, so skip the probe.
@@ -336,3 +477,7 @@ class JobQueue:
         job.progress = 1.0
         job.stage = "rendered clean copy"
         self.store.save_job(job)
+        log.info(
+            "job %s rendered clean copy in %s -> %s",
+            job.id, _fmt_duration(time.monotonic() - started), rendered,
+        )

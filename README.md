@@ -243,9 +243,15 @@ registered. It prints the LAN addresses to use as the plugin's Worker URL.
 
 | Where | What |
 |---|---|
-| Log | `%LOCALAPPDATA%\CleanMedia\worker.log` (truncated past 10 MB) |
+| **Log (structured)** | `data\logs\worker.log` in the repo — one readable line per request and per job, rotates at 5 MB (three backups). This is the one to watch. |
+| Log (raw stdout) | `%LOCALAPPDATA%\CleanMedia\worker.log` — everything the console printed, mixed together, truncated past 10 MB |
 | Launcher | `%LOCALAPPDATA%\CleanMedia\worker-service.cmd`, regenerated on install |
 | Task | `CleanMediaWorker` in Task Scheduler |
+
+The worker runs as a **background scheduled task**, so its output never
+appears in the PowerShell window you launched it from — that window only shows
+the installer's own messages. Everything the worker does goes to the log files
+above.
 
 By default the task runs under your account with no stored password
 (`S4U`), which means it has **no network credentials**. That is fine for
@@ -254,12 +260,21 @@ add `-UsePassword` and the script will prompt for and store your Windows
 password with the task.
 
 ```powershell
-Get-Content "$env:LOCALAPPDATA\CleanMedia\worker.log" -Tail 40   # what went wrong
+# watch the worker live — every request, each job starting, progress by 10%,
+# completions and errors as they happen (Ctrl+C stops watching, not the worker).
+# Run from the repo root, where the other commands here also assume you are.
+Get-Content data\logs\worker.log -Wait -Tail 50
+
 Get-ScheduledTask CleanMediaWorker | Get-ScheduledTaskInfo       # last run result
 
 # restart it after pulling new worker code (elevated)
 .\scripts\install-service.ps1 -Restart
 ```
+
+Logging is verbose (`DEBUG`) by default — every polling request and per-job
+progress step. Set `CLEANMEDIA_LOG_LEVEL=INFO` to quieten the routine polling,
+or `CLEANMEDIA_LOG_FILE` to move (or, with an empty value, disable) the
+structured log file.
 
 A stale worker serving old code looks exactly like a bug in the new code —
 restart after every `git pull`. Use `-Restart`, **not** a bare
@@ -267,6 +282,13 @@ restart after every `git pull`. Use `-Restart`, **not** a bare
 process it spawned orphaned on the port, and that orphan runs in a service
 context only an elevated `taskkill` (which `-Restart` does for you) or a
 reboot can clear.
+
+**The queue survives a restart.** Jobs are persisted to SQLite
+(`data\cleanmedia.db`), not just held in memory, so on startup the worker
+re-queues everything still unfinished — in the original submission order — and
+resumes. A pass that was mid-run is re-run (the `vlm` engine resumes from its
+own checkpoint; others start that film over). You will see a
+`recovery: re-queued N unfinished job(s)` line in the log right after startup.
 
 ### One folder per movie
 

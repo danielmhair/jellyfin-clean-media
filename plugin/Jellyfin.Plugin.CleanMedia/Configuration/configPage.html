@@ -250,15 +250,27 @@
                 if (row) { row.className = 'cmSchedRow' + (d.enabled ? '' : ' cmOff'); }
             }
             var status = page.querySelector('#SchedStatus');
+            var zone = browserTz();
+            var zoneNote = sched.tz
+                ? (sched.tz === zone
+                    ? ' — times are in your timezone (' + sched.tz + ')'
+                    : ' — times are in ' + sched.tz + '; your browser is ' + zone)
+                : ' — times are in the worker’s local timezone';
             if (!sched.enabled) {
-                status.textContent = 'Schedule off — analysis runs whenever it is queued.';
+                status.textContent = 'Schedule off — analysis runs whenever it is queued.'
+                    + zoneNote + '.';
             } else if (view && view.allowedNow) {
-                status.textContent = 'Analysis is allowed right now (worker time '
-                    + (view.now || '') + ').';
+                status.textContent = 'Analysis is allowed right now (' + (view.now || '')
+                    + zoneNote + ').';
             } else {
-                status.textContent = 'Analysis is paused by the schedule right now (worker time '
-                    + (view.now || '') + ') — queued passes are waiting.';
+                status.textContent = 'Analysis is paused by the schedule right now ('
+                    + (view.now || '') + zoneNote + ') — queued passes are waiting.';
             }
+        }
+
+        function browserTz() {
+            try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; }
+            catch (e) { return ''; }
         }
 
         function readSchedule() {
@@ -270,7 +282,13 @@
                     end: hmToMins(page.querySelector('.cmSchedEnd[data-i="' + i + '"]').value)
                 });
             }
-            return { enabled: page.querySelector('#SchedEnabled').checked, days: days };
+            // Anchor the windows to the admin's timezone (the person setting it
+            // up), not the worker box's clock. The worker converts using this.
+            return {
+                enabled: page.querySelector('#SchedEnabled').checked,
+                days: days,
+                tz: browserTz()
+            };
         }
 
         function loadSchedule() {

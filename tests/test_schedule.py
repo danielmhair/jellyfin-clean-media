@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -18,7 +18,7 @@ import pytest
 from worker.engines.base import EngineAdapter
 from worker.models import JobCreate, JobStatus, Timeline
 from worker.queue import JobQueue
-from worker.schedule import DayWindow, Schedule, is_allowed
+from worker.schedule import DayWindow, Schedule, _normalize, is_allowed
 from worker.store import Store
 
 MON, TUE, WED, THU, FRI, SAT, SUN = range(7)
@@ -79,6 +79,39 @@ def test_disabled_day_blocks():
     sched = Schedule(enabled=True, days=days)
     assert is_allowed(_at(TUE, 12), sched) is True
     assert is_allowed(_at(WED, 12), sched) is False
+
+
+# -- timezone -----------------------------------------------------------------
+
+
+def test_aware_now_is_evaluated_in_the_schedule_timezone():
+    # 02:00–07:00 nightly, windows expressed in America/Denver (UTC-6 in Aug).
+    sched = Schedule(enabled=True, days=[_day(2, 7) for _ in range(7)], tz="America/Denver")
+    # 08:30 UTC on a Monday == 02:30 Denver — inside the window.
+    inside = datetime(2026, 8, 10, 8, 30, tzinfo=timezone.utc)
+    assert is_allowed(inside, sched) is True
+    # 08:30 UTC is 02:30 Denver but that instant is still Sunday-night's window
+    # rolling into Monday morning; a mid-afternoon UTC instant is daytime Denver.
+    daytime = datetime(2026, 8, 10, 20, 0, tzinfo=timezone.utc)  # 14:00 Denver
+    assert is_allowed(daytime, sched) is False
+
+
+def test_naive_now_is_treated_as_local_wall_clock_even_with_tz():
+    # A naive datetime (tests / legacy callers) is read verbatim, so the tz field
+    # doesn't retroactively shift the existing per-weekday assertions.
+    sched = Schedule(enabled=True, days=[_day(2, 7) for _ in range(7)], tz="America/Denver")
+    assert is_allowed(_at(MON, 3), sched) is True
+    assert is_allowed(_at(MON, 12), sched) is False
+
+
+def test_bad_timezone_is_dropped_on_normalize():
+    sched = _normalize(Schedule(enabled=True, days=[_day(2, 7)], tz="Not/AZone"))
+    assert sched.tz == ""  # falls back to worker-local rather than erroring
+
+
+def test_valid_timezone_survives_normalize():
+    sched = _normalize(Schedule(enabled=True, days=[_day(2, 7)], tz="America/Denver"))
+    assert sched.tz == "America/Denver"
 
 
 # -- queue gating -------------------------------------------------------------

@@ -15,6 +15,9 @@ dependencies = [
     # Voice-only mute: 2-stem source separation (vocals vs accompaniment) so a
     # rendered mute drops the spoken word while music/ambient play through.
     "demucs>=4.0",
+    # IANA timezone database for zoneinfo — Windows ships no system tz data, so
+    # the analysis schedule's timezone lookups need this package present.
+    "tzdata>=2024.1",
 ]
 
 [dependency-groups]

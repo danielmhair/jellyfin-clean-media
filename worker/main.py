@@ -5,14 +5,25 @@ Run: uv run uvicorn worker.main:app --host 0.0.0.0 --port 8765
 
 from __future__ import annotations
 
+import logging
+import os
 import platform
 import threading
+import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse
 
 from . import __version__
+from .logging_config import configure_logging, get_logger, tame_uvicorn_loggers
+
+# Configure logging before anything else imports/logs, so import-time messages
+# (engine load, model warm-up) land in the same format and file.
+_LOG_FILE = configure_logging()
+log = get_logger("api")
+
 from .engines import ENGINES
 from .models import (
     BulkApproval,
@@ -49,17 +60,103 @@ from .review import (
     update_segment,
     warm_media_index,
 )
-from .store import Store, media_fingerprint
+from .store import DATA_DIR, Store, media_fingerprint
 
-app = FastAPI(title="Clean Media Worker", version=__version__)
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    _log_startup_banner()
+    yield
+
+
+app = FastAPI(title="Clean Media Worker", version=__version__, lifespan=_lifespan)
 
 store = Store()
 jobs = JobQueue(store)
 
+
+# GET endpoints the UI/plugin poll on a timer — logged at DEBUG so a normal INFO
+# log isn't drowned by the review grid refreshing every few seconds.
+_QUIET_GET_PREFIXES = (
+    "/api/status", "/api/jobs", "/api/health", "/api/segments",
+    "/api/thumbnail", "/api/filmstrip", "/api/peaks", "/api/clip",
+)
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log every request with its status and how long it took.
+
+    Mutations and errors log at INFO/WARNING so they stand out; routine GET
+    polling logs at DEBUG. A slow request (>1s) is always surfaced at INFO so a
+    stall is visible without turning on DEBUG.
+    """
+    started = time.monotonic()
+    try:
+        response = await call_next(request)
+    except Exception:
+        elapsed_ms = (time.monotonic() - started) * 1000
+        log.exception(
+            "%s %s -> unhandled error after %.0fms",
+            request.method, request.url.path, elapsed_ms,
+        )
+        raise
+    elapsed_ms = (time.monotonic() - started) * 1000
+
+    path = request.url.path
+    quiet = request.method == "GET" and any(
+        path.startswith(p) for p in _QUIET_GET_PREFIXES
+    )
+    if response.status_code >= 500:
+        level = logging.ERROR
+    elif response.status_code >= 400:
+        level = logging.WARNING
+    elif quiet and elapsed_ms < 1000:
+        level = logging.DEBUG
+    else:
+        level = logging.INFO
+    log.log(
+        level, "%s %s -> %d (%.0fms)",
+        request.method, path, response.status_code, elapsed_ms,
+    )
+    return response
+
+
+def _log_startup_banner() -> None:
+    tame_uvicorn_loggers()
+    roots = os.environ.get("CLEANMEDIA_MEDIA_ROOTS", "(none set)")
+    gpu = _gpu_info()
+    gpu_desc = gpu.get("name", "none") if gpu.get("available") else "none (CPU only)"
+    sched = schedule.view()
+    log.info("Clean Media Worker %s starting", __version__)
+    log.info("  platform : %s", platform.platform())
+    log.info("  gpu      : %s", gpu_desc)
+    log.info("  engines  : %s", ", ".join(ENGINES) or "(none)")
+    log.info("  media    : %s", roots)
+    log.info("  data dir : %s", DATA_DIR)
+    log.info("  log file : %s", _LOG_FILE or "(console only)")
+    log.info(
+        "  schedule : %s",
+        f"restricted (now {sched.now}, allowed={sched.allowedNow})"
+        if sched.schedule.enabled else "unrestricted (runs whenever queued)",
+    )
+
+
+def _warm_media_index_logged() -> None:
+    log.info("media index: warming (walking media roots)...")
+    started = time.monotonic()
+    try:
+        warm_media_index()
+        log.info("media index: ready in %.1fs", time.monotonic() - started)
+    except Exception:
+        log.exception("media index: warm-up failed")
+
+
 # Build the media-path index in the background at startup (overlapping model
 # load) so the first review-grid /api/status doesn't wait on a cold walk of a
 # large NAS share and time out the plugin.
-threading.Thread(target=warm_media_index, name="media-index-warm", daemon=True).start()
+threading.Thread(
+    target=_warm_media_index_logged, name="media-index-warm", daemon=True
+).start()
 
 
 def _gpu_info() -> dict:
@@ -94,7 +191,17 @@ def get_schedule() -> ScheduleView:
 @app.put("/api/schedule", response_model=ScheduleView)
 def put_schedule(new: Schedule) -> ScheduleView:
     """Replace the analysis schedule (edited from the Jellyfin settings page)."""
-    schedule.set_schedule(new)
+    saved = schedule.set_schedule(new)
+    if saved.enabled:
+        tz = saved.tz or "worker-local"
+        enabled_days = ", ".join(
+            f"{schedule.DAY_NAMES[i]} {d.start // 60:02d}:{d.start % 60:02d}-"
+            f"{d.end // 60:02d}:{d.end % 60:02d}"
+            for i, d in enumerate(saved.days) if d.enabled
+        )
+        log.info("schedule updated: restricted [%s] in %s", enabled_days or "no days", tz)
+    else:
+        log.info("schedule updated: unrestricted (analysis runs whenever queued)")
     return schedule.view()
 
 
