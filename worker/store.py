@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -17,6 +18,18 @@ from typing import Optional
 from .models import Job, JobStatus, Segment, Timeline
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+
+def default_db_path() -> Path:
+    """Where the jobs DB lives, overridable via ``CLEANMEDIA_DB``.
+
+    The override exists so the test suite (which imports ``worker.main`` and
+    thereby instantiates a live ``Store``/``JobQueue``) can point at a throwaway
+    database instead of the production one — without it, importing the app would
+    open the real ``cleanmedia.db`` and its recovery would disturb a running job.
+    """
+    override = os.environ.get("CLEANMEDIA_DB")
+    return Path(override) if override else DATA_DIR / "cleanmedia.db"
 
 
 def media_fingerprint(path: Path) -> str:
@@ -35,7 +48,8 @@ def media_fingerprint(path: Path) -> str:
 class Store:
     def __init__(self, db_path: Optional[Path] = None):
         DATA_DIR.mkdir(exist_ok=True)
-        self.db_path = db_path or DATA_DIR / "cleanmedia.db"
+        self.db_path = Path(db_path) if db_path else default_db_path()
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._init_db()
 
