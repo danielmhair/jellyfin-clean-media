@@ -81,6 +81,18 @@ _QUIET_GET_PREFIXES = (
     "/api/thumbnail", "/api/filmstrip", "/api/peaks", "/api/clip",
 )
 
+# Negative-lookup cache for /api/segments. The plugin polls this endpoint for
+# every item a client plays; for an unanalyzed film there is no timeline, and
+# `timeline_for` reaches that verdict by fingerprinting the media — a 24 MB read
+# off the (often NAS) share, per poll. A client playing an unanalyzed film hits
+# it ~1/sec, so we cache the "no analysis" answer briefly, keyed by the exact
+# path the caller repeats, and short-circuit before touching the NAS. The TTL is
+# short so a film that finishes analyzing starts serving segments within seconds;
+# /api/reindex also clears it for an immediate refresh.
+_SEGMENTS_NEG_TTL_S = 30.0
+_segments_neg_cache: dict[str, float] = {}  # request path -> monotonic time cached
+_segments_neg_lock = threading.Lock()
+
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -108,6 +120,12 @@ async def log_requests(request: Request, call_next):
     )
     if response.status_code >= 500:
         level = logging.ERROR
+    elif response.status_code == 404 and quiet:
+        # Expected for the plugin's polling endpoints: an unanalyzed film has no
+        # segments/thumbnail yet, and a client playing it polls ~1/sec. Keep
+        # these at DEBUG so they don't bury real warnings — but still surface a
+        # pathologically slow one (a cold NAS walk) at INFO.
+        level = logging.INFO if elapsed_ms >= 3000 else logging.DEBUG
     elif response.status_code >= 400:
         level = logging.WARNING
     elif quiet and elapsed_ms < 1000:
@@ -495,13 +513,32 @@ def segments_for_media(path: str, approvedOnly: bool = True) -> Timeline:
     the file are merged, so one call returns skips, mutes and blurs
     together.
     """
+    # A recent miss for this exact path? Answer 404 without the NAS round trip
+    # `timeline_for` would otherwise cost (see _segments_neg_cache). Keyed by the
+    # raw path so a repeated poll skips even resolve_media.
+    now = time.monotonic()
+    with _segments_neg_lock:
+        cached = _segments_neg_cache.get(path)
+        if cached is not None and now - cached < _SEGMENTS_NEG_TTL_S:
+            raise HTTPException(404, f"no analysis found for {path}")
+
+    def _remember_miss() -> None:
+        with _segments_neg_lock:
+            _segments_neg_cache[path] = now
+
     # Jellyfin sends its own mount path, which will not exist on this box.
     media = resolve_media(path)
     if media is None:
+        _remember_miss()
         raise HTTPException(404, f"media not found: {path}")
     timeline = timeline_for(media)
     if timeline is None:
+        _remember_miss()
         raise HTTPException(404, f"no analysis found for {media}")
+
+    # Hit: drop any stale miss so a freshly analyzed film serves immediately.
+    with _segments_neg_lock:
+        _segments_neg_cache.pop(path, None)
 
     if approvedOnly:
         timeline.segments = [s for s in timeline.segments if s.approved is True]
@@ -596,6 +633,10 @@ def reindex() -> dict:
     grid can offer it as a manual refresh.
     """
     warm_media_index()
+    # A film analyzed since the last walk now has a sidecar; forget any cached
+    # "no analysis" misses so /api/segments reflects it at once.
+    with _segments_neg_lock:
+        _segments_neg_cache.clear()
     return {"status": "ok"}
 
 
