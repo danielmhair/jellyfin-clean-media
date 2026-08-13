@@ -13,3 +13,4 @@ obj/
 *.srt
 plugin/dist/
 .pytest-tmp/
+.playwright-cli/
