@@ -75,8 +75,29 @@ def true_fps(media_path: Path) -> tuple[float, float, int]:
     return frames / duration, duration, frames
 
 
+# Reaching the true duration by scaling scenedetect's timeline up by more than
+# this is not a frame-rate mislabel (telecine pulldown tops out at 29.97/23.976
+# ≈ 1.25×) but a decode that stopped well short of the film — a genuinely
+# partial timeline we refuse rather than smear across the whole runtime.
+_MAX_TIMELINE_STRETCH = 1.5
+
+
 def detect_shots(media_path: Path, threshold: float = 27.0) -> list[Shot]:
-    """Detect shot boundaries, timed against the real decoded frame rate."""
+    """Detect shot boundaries, timed against the film's true duration.
+
+    PySceneDetect times shots in the container's frame space. On a telecined
+    MPEG-2 DVD rip that space runs at the advertised rate (29.97) while the film
+    really plays at the decoded rate, so its timecodes come up short of the true
+    runtime — by enough (5–20%) to look like a truncated analysis and, before,
+    to fail the film outright. But the shot *positions* are right; only the
+    seconds-per-frame is wrong, and uniformly so. So rescale scenedetect's whole
+    timeline onto the reliable container duration: the last shot maps to the end,
+    every shot lands proportionally, and no boundary can fall past EOF. A
+    constant frame-rate lie is corrected exactly by a constant factor. A decode
+    that genuinely stopped short would need too large a factor and is refused
+    (see ``_MAX_TIMELINE_STRETCH``) rather than stretched over the whole film —
+    so we neither drop the tail of a telecined rip nor analyze a partial one.
+    """
     from scenedetect import ContentDetector, SceneManager, open_video
 
     fps, duration, frames = true_fps(media_path)
@@ -86,35 +107,31 @@ def detect_shots(media_path: Path, threshold: float = 27.0) -> list[Shot]:
     manager.add_detector(ContentDetector(threshold=threshold))
     manager.detect_scenes(video, show_progress=False)
     scenes = manager.get_scene_list()
-
-    # Use scenedetect's own timecodes rather than converting its frame
-    # numbers. On a telecined source it counts frames at the container rate
-    # (29.97) while ffmpeg decodes at 23.976, so dividing its frame index by
-    # the decode rate pushes later shots past the end of the file — which
-    # silently dropped the last fifth of one film from a run, because every
-    # frame grab beyond EOF just returned nothing.
-    shots: list[Shot] = []
-    for i, (start, end) in enumerate(scenes):
-        start_s, end_s = start.get_seconds(), end.get_seconds()
-        if start_s >= duration:
-            break
-        shots.append(
-            Shot(i, start.get_frames(), end.get_frames(), start_s, min(end_s, duration))
-        )
-    if not shots:
+    if not scenes:
         return [Shot(0, 0, frames, 0.0, duration)]
 
-    # Guard the invariant directly rather than trusting it. Shot detection
-    # has silently produced timestamps for a longer film than the one on
-    # disk, and every sample past the end simply yields no frame — analysis
-    # skips that stretch and still reports success.
-    covered = max(s.end_s for s in shots)
-    if covered < duration * 0.95:
+    # How far scenedetect thinks the film runs, in its own (frame-rate-lying)
+    # timeline. Rescale that onto the true duration so full coverage is exact.
+    span = scenes[-1][1].get_seconds()
+    if span <= 0:
+        raise RuntimeError(f"shot detection produced an empty timeline for {media_path}")
+    scale = duration / span
+    if scale > _MAX_TIMELINE_STRETCH:
         raise RuntimeError(
-            f"shot detection covered only {covered:.0f}s of a {duration:.0f}s "
-            f"film ({covered / duration:.0%}) — refusing to analyze a partial "
-            "timeline"
+            f"shot detection covered only {span:.0f}s of a {duration:.0f}s "
+            f"film ({span / duration:.0%}) — decode stopped short, refusing a "
+            "partial timeline"
         )
+
+    shots: list[Shot] = []
+    for i, (start, end) in enumerate(scenes):
+        start_s = min(duration, start.get_seconds() * scale)
+        end_s = min(duration, end.get_seconds() * scale)
+        if start_s >= duration:
+            break
+        shots.append(Shot(i, start.get_frames(), end.get_frames(), start_s, end_s))
+    if not shots:
+        return [Shot(0, 0, frames, 0.0, duration)]
     return shots
 
 

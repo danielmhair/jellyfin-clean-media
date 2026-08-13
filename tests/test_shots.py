@@ -1,4 +1,40 @@
+import pytest
+
 from worker.shots import Shot, sample_times
+
+
+class _TC:
+    """A stand-in for a PySceneDetect FrameTimecode carrying just seconds."""
+
+    def __init__(self, s, fps=24.0):
+        self._s = s
+        self._fps = fps
+
+    def get_seconds(self):
+        return self._s
+
+    def get_frames(self):
+        return int(self._s * self._fps)
+
+
+def _install_fake_scenedetect(monkeypatch, scenes):
+    """Make detect_shots run against a fixed scene list, no real video decode."""
+
+    class _Mgr:
+        def add_detector(self, _d):
+            pass
+
+        def detect_scenes(self, _v, show_progress=False):
+            pass
+
+        def get_scene_list(self):
+            return scenes
+
+    import scenedetect
+
+    monkeypatch.setattr(scenedetect, "SceneManager", _Mgr)
+    monkeypatch.setattr(scenedetect, "open_video", lambda _p: object())
+    monkeypatch.setattr(scenedetect, "ContentDetector", lambda threshold=27.0: None)
 
 
 def test_shot_times_must_stay_inside_the_film():
@@ -24,41 +60,69 @@ def test_sampling_a_valid_shot_stays_in_range():
 
 
 def test_coverage_guard_rejects_a_partial_timeline(monkeypatch, tmp_path):
-    """A shot list that stops early must fail loudly, not analyze 60% quietly."""
-    import pytest
-
+    """A decode that stops far short (here half the film) must fail loudly,
+    not be silently stretched over the whole runtime."""
     from worker import shots as shots_mod
 
     media = tmp_path / "film.mkv"
     media.touch()
     monkeypatch.setattr(shots_mod, "true_fps", lambda _p: (24.0, 1000.0, 24000))
-
-    class _TC:
-        def __init__(self, s):
-            self._s = s
-
-        def get_seconds(self):
-            return self._s
-
-        def get_frames(self):
-            return int(self._s * 24)
-
-    class _Mgr:
-        def add_detector(self, _d):
-            pass
-
-        def detect_scenes(self, _v, show_progress=False):
-            pass
-
-        def get_scene_list(self):
-            return [(_TC(0.0), _TC(500.0))]  # only half the film
-
-    # detect_shots imports these lazily from scenedetect, so patch there
-    import scenedetect
-
-    monkeypatch.setattr(scenedetect, "SceneManager", _Mgr)
-    monkeypatch.setattr(scenedetect, "open_video", lambda _p: object())
-    monkeypatch.setattr(scenedetect, "ContentDetector", lambda threshold=27.0: None)
+    _install_fake_scenedetect(monkeypatch, [(_TC(0.0), _TC(500.0))])  # only half → scale 2.0
 
     with pytest.raises(RuntimeError, match="covered only"):
         shots_mod.detect_shots(media)
+
+
+def test_telecine_undercoverage_is_rescaled_not_rejected(monkeypatch, tmp_path):
+    """A telecined rip whose timeline runs a few % short (like Salt at 93% or
+    Jumper at 95%) is rescaled onto the true duration and analyzed in full,
+    rather than rejected as partial."""
+    from worker import shots as shots_mod
+
+    media = tmp_path / "film.mkv"
+    media.touch()
+    # scenedetect sees the film as 930s; it is really 1000s (the frame-rate lie).
+    monkeypatch.setattr(shots_mod, "true_fps", lambda _p: (23.976, 1000.0, 23976))
+    _install_fake_scenedetect(monkeypatch, [
+        (_TC(0.0), _TC(465.0)),
+        (_TC(465.0), _TC(930.0)),
+    ])
+
+    shots = shots_mod.detect_shots(media)
+
+    assert shots, "a 93% telecined timeline must be analyzed, not rejected"
+    # The whole film is covered: the last shot maps exactly to the true end.
+    assert shots[-1].end_s == pytest.approx(1000.0)
+    # Boundaries land proportionally: 465/930 of the film → 500/1000.
+    assert shots[0].end_s == pytest.approx(500.0)
+    # Nothing spills past EOF.
+    assert all(s.end_s <= 1000.0 for s in shots)
+
+
+def test_overshooting_timeline_is_shrunk_to_the_duration(monkeypatch, tmp_path):
+    """If scenedetect overshoots the real duration, shots are scaled down to fit
+    rather than sampling past EOF."""
+    from worker import shots as shots_mod
+
+    media = tmp_path / "film.mkv"
+    media.touch()
+    monkeypatch.setattr(shots_mod, "true_fps", lambda _p: (30.0, 1000.0, 30000))
+    _install_fake_scenedetect(monkeypatch, [(_TC(0.0), _TC(1250.0))])  # 1.25x too long
+
+    shots = shots_mod.detect_shots(media)
+
+    assert shots[-1].end_s == pytest.approx(1000.0)
+    assert all(0 <= s.end_s <= 1000.0 for s in shots)
+
+
+def test_no_scenes_falls_back_to_one_full_length_shot(monkeypatch, tmp_path):
+    from worker import shots as shots_mod
+
+    media = tmp_path / "film.mkv"
+    media.touch()
+    monkeypatch.setattr(shots_mod, "true_fps", lambda _p: (24.0, 1000.0, 24000))
+    _install_fake_scenedetect(monkeypatch, [])
+
+    shots = shots_mod.detect_shots(media)
+    assert len(shots) == 1
+    assert (shots[0].start_s, shots[0].end_s) == (0.0, 1000.0)
