@@ -699,6 +699,9 @@ PAGE = """<!doctype html>
           font-size:12px;color:#9aa}}
  .tctrls button{{flex:0 0 auto;padding:6px 10px;background:#22262c;font-size:12px}}
  .tctrls button.tsave{{background:#238636;color:#fff}}
+ .selread{{font-size:12px;color:#9aa;margin-left:8px;font-variant-numeric:tabular-nums}}
+ .selread b{{color:#e6edf3}}
+ .seluse{{flex:0 0 auto;padding:4px 9px;background:#30588c;color:#fff;font-size:11px;margin-left:8px}}
  .tlabel{{display:inline-block;min-width:34px}}
  .tread{{font-variant-numeric:tabular-nums;color:#eee;font-weight:600}}
  .thint{{opacity:.6}} .tload{{padding:12px;color:#9aa;font-size:12px}}
@@ -1040,33 +1043,44 @@ function toggleTiming(cell, s, box) {{
     box.dataset.open = ''; box.classList.remove('open'); box.innerHTML = ''; return;
   }}
   box.dataset.open = '1'; box.classList.add('open');
+  openTimingAt(cell, s, box, s.startMs, s.endMs);
+}}
+
+// (Re)load the editor's frames/waveform for a window centred on [atStart,atEnd]:
+// the finding's saved spot on first open, or the edited bounds when the reviewer
+// moves the finding somewhere the current window doesn't reach (a duplicate
+// dragged minutes away). Without re-anchoring, the strip stayed at the old spot
+// and a far-moved finding showed a blank/mismatched strip.
+function openTimingAt(cell, s, box, atStart, atEnd) {{
   if (isVisual(s)) {{
     box.innerHTML = '<div class=tload>loading frames&hellip;</div>';
-    buildTiming(cell, s, box, {{visual: true}});
+    buildTiming(cell, s, box, {{visual: true}}, atStart, atEnd);
   }} else {{
     box.innerHTML = '<div class=tload>loading waveform&hellip;</div>';
-    fetch(`/api/peaks?path=${{encodeURIComponent(MEDIA)}}&startMs=${{s.startMs}}&endMs=${{s.endMs}}&pad=${{PAD}}`)
+    fetch(`/api/peaks?path=${{encodeURIComponent(MEDIA)}}&startMs=${{atStart}}&endMs=${{atEnd}}&pad=${{PAD}}`)
       .then(r => r.json())
-      .then(d => buildTiming(cell, s, box, {{peaks: d.peaks}}))
+      .then(d => buildTiming(cell, s, box, {{peaks: d.peaks}}, atStart, atEnd))
       .catch(() => box.innerHTML = '<div class=tload>could not load waveform</div>');
   }}
 }}
 
-function buildTiming(cell, s, box, mode) {{
-  // Window bounds match the server (build_peaks/build_filmstrip): finding ±PAD,
-  // clamped at the file start.
-  const winStart = Math.max(0, s.startMs - PAD * 1000), winEnd = s.endMs + PAD * 1000;
+function buildTiming(cell, s, box, mode, atStart, atEnd) {{
+  // Window bounds match the server (build_peaks/build_filmstrip): the anchor
+  // span ±PAD, clamped at the file start. The anchor is the finding's saved
+  // spot on open, or its edited bounds after a recenter — so the strip always
+  // shows where the finding currently is.
+  const winStart = Math.max(0, atStart - PAD * 1000), winEnd = atEnd + PAD * 1000;
   const span = Math.max(1, winEnd - winStart);
   const PXPS = 160, SNAP = 25, H = 90;
   const W = Math.max(320, Math.round(span / 1000 * PXPS));
   const clamp = t => Math.max(winStart, Math.min(winEnd, t));
-  let st = clamp(s.startMs), en = clamp(s.endMs);
+  let st = clamp(atStart), en = clamp(atEnd);
   const canMute = s.recommendedAction === 'mute';
   const canVoice = s.recommendedAction === 'voice';
   const bg = mode.visual
     ? `<img class=strip style="width:${{W}}px;height:${{H}}px" `
       + `src="/api/filmstrip?path=${{encodeURIComponent(MEDIA)}}`
-      + `&startMs=${{s.startMs}}&endMs=${{s.endMs}}&pad=${{PAD}}">`
+      + `&startMs=${{atStart}}&endMs=${{atEnd}}&pad=${{PAD}}">`
     : `<canvas width=${{W}} height=${{H}}></canvas>`;
 
   box.innerHTML = `
@@ -1098,9 +1112,14 @@ function buildTiming(cell, s, box, mode) {{
     </div>
     <div class=tctrls>
       <button class=tprev>&#9654; ${{canMute ? 'Preview muted' : canVoice ? 'Preview voice-removed' : 'Preview scene'}}</button>
+      <button class=trecenter title="Reload the frames/waveform around the current start and end">&#8635; Frames here</button>
       <button class=tsave>Save timing</button>
       <button class=tcancel>Cancel</button>
-      <span class=thint>drag the handles or type a time to set the bounds; drag the waveform itself to hear a spot</span>
+      <span class=selread id=tsel-${{s.id}}></span>
+    </div>
+    <div class=tctrls>
+      <span class=thint>drag the handles or type a time to set the bounds; drag across the
+      strip to select a span — it shows its time and can be used as the bounds</span>
     </div>`;
 
   const wrap = box.querySelector('.wavewrap');
@@ -1177,14 +1196,25 @@ function buildTiming(cell, s, box, mode) {{
   // before moving the handles. The segment's own start/end bars stay put — this
   // selection is a separate scratch overlay, not the saved bounds.
   const selEl = box.querySelector('.selregion');
+  const selRead = box.querySelector('#tsel-' + s.id);
   let selA = null, selB = null;
   function drawSel() {{
-    if (selA === null || selB === null) {{ selEl.style.display = 'none'; return; }}
+    if (selA === null || selB === null) {{
+      selEl.style.display = 'none';
+      if (selRead) selRead.textContent = '';
+      return;
+    }}
     const a = Math.min(selA, selB), b = Math.max(selA, selB);
     // Explicit 'block': the class sets display:none, so '' would revert to that.
     selEl.style.display = 'block';
     selEl.style.left = cx(a) + 'px';
     selEl.style.width = Math.max(0, cx(b) - cx(a)) + 'px';
+    // Live time of the selection, so a reviewer can read the exact spot they
+    // watched and set the finding's bounds to it.
+    if (selRead) {{
+      selRead.textContent = 'selection ' + fmtHMS(a) + ' – ' + fmtHMS(b)
+        + ' (' + ((b - a) / 1000).toFixed(2) + 's)';
+    }}
   }}
   wbox.addEventListener('mousedown', e => {{
     if (e.target.closest('.handle')) return;  // let handle drags win
@@ -1203,6 +1233,16 @@ function buildTiming(cell, s, box, mode) {{
       const a = Math.min(selA, selB), b = Math.max(selA, selB);
       if (b - a >= 100) {{  // a real drag (>=100ms), not a stray click
         playClip(cell.querySelector('.shot'), {{startMs: a, endMs: b}}, false, false, 0.15);
+        // Offer the selection as the finding's bounds — one click sets both.
+        if (selRead) {{
+          selRead.innerHTML = 'selection <b>' + fmtHMS(a) + '</b> – <b>' + fmtHMS(b)
+            + '</b> (' + ((b - a) / 1000).toFixed(2) + 's)';
+          const use = document.createElement('button');
+          use.className = 'seluse';
+          use.textContent = 'Use as bounds';
+          use.onclick = () => {{ st = a; en = b; upd(); selA = selB = null; drawSel(); }};
+          selRead.appendChild(use);
+        }}
       }} else {{
         selA = selB = null; drawSel();  // a click clears any selection
       }}
@@ -1221,14 +1261,28 @@ function buildTiming(cell, s, box, mode) {{
   box.querySelector('.tprev').onclick = () =>
     playClip(cell.querySelector('.shot'), {{startMs: st, endMs: en}}, canMute, canVoice);
 
+  // Re-anchor the strip around the current bounds — for when a finding has been
+  // typed/nudged to a spot the drawn window doesn't cover.
+  box.querySelector('.trecenter').onclick = () => openTimingAt(cell, s, box, st, en);
+
   box.querySelector('.tcancel').onclick = () => toggleTiming(cell, s, box);
 
   box.querySelector('.tsave').onclick = () => {{
     fetch(`/api/segments/${{s.id}}?path=${{encodeURIComponent(MEDIA)}}`, {{
       method: 'PATCH', headers: {{'Content-Type':'application/json'}},
       body: JSON.stringify({{startMs: st, endMs: en}})
-    }}).then(() => {{ s.startMs = st; s.endMs = en;
-                      cell.replaceWith(card(s)); apply(); tally(); }});
+    }}).then(() => {{
+      // Did the finding move out of the window we were showing? Only then is a
+      // reset worth the reload — a small in-window nudge shouldn't flash.
+      const moved = st < winStart || en > winEnd || en < winStart || st > winEnd;
+      s.startMs = st; s.endMs = en;
+      // Rebuild the card (updates the displayed times/badges); if it moved, reopen
+      // the editor anchored on the NEW bounds so the strip and preview reset to
+      // 15s either side of where the finding now is, not where it was.
+      const fresh = card(s);
+      cell.replaceWith(fresh); apply(); tally();
+      if (moved) fresh.querySelector('.edit-timing').click();
+    }});
   }};
 }}
 
