@@ -82,6 +82,9 @@ class SegmentPatch(BaseModel):
     #: leaves part of a scene visible. Only applied when explicitly sent.
     startMs: Optional[int] = None
     endMs: Optional[int] = None
+    #: Editable description/note — e.g. correcting the stale shot reference on a
+    #: duplicated finding. Only applied when explicitly sent.
+    reasoning: Optional[str] = None
 
 
 class BulkApproval(BaseModel):

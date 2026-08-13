@@ -59,6 +59,45 @@ def test_retiming_persists_and_leaves_other_fields_alone(tmp_path):
     assert reloaded.recommendedAction == "skip"
 
 
+def test_editing_the_description_persists_and_leaves_other_fields_alone(tmp_path):
+    media = _film(tmp_path)
+
+    updated = update_segment(media, 1, reasoning="shots 900-905: the new spot")
+
+    assert updated.reasoning == "shots 900-905: the new spot"
+    reloaded = load_timeline(media).segments[0]
+    assert reloaded.reasoning == "shots 900-905: the new spot"
+    # Editing the note is neither a decision nor a retime.
+    assert reloaded.approved is None
+    assert (reloaded.startMs, reloaded.endMs) == (1000, 2000)
+    assert reloaded.recommendedAction == "skip"
+
+
+def test_adding_a_segment_stores_its_description(tmp_path):
+    media = _film(tmp_path)
+
+    seg = create_segment(media, 9000, 9500, "manual", "skip",
+                         reasoning="a scene the model missed")
+
+    assert seg.reasoning == "a scene the model missed"
+    reloaded = next(s for s in load_timeline(media).segments if s.id == seg.id)
+    assert reloaded.reasoning == "a scene the model missed"
+
+
+def test_patch_reasoning_through_the_api(tmp_path, monkeypatch):
+    # Exercises the main.py wiring (SegmentPatch.reasoning -> update_segment),
+    # where a dropped field would silently ignore the edit.
+    monkeypatch.setenv("CLEANMEDIA_MEDIA_ROOTS", str(tmp_path))
+    media = _film(tmp_path)
+    client = TestClient(app)
+
+    r = client.patch(f"/api/segments/1?path={media.name}",
+                     json={"reasoning": "edited via api"})
+
+    assert r.status_code == 200
+    assert load_timeline(media).segments[0].reasoning == "edited via api"
+
+
 def _scene_film(tmp_path):
     """A film with a run of adjacent visual findings, as a scene flagged shot
     by shot — the case merge exists for."""

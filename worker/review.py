@@ -224,6 +224,7 @@ def update_segment(
     start_ms=...,
     end_ms=...,
     action=...,
+    reasoning=...,
 ) -> Optional[Segment]:
     """Edit one finding in place. Returns None if it does not exist.
 
@@ -244,6 +245,8 @@ def update_segment(
             segment.endMs = max(0, int(end_ms))
         if action is not ...:
             segment.recommendedAction = action
+        if reasoning is not ...:
+            segment.reasoning = reasoning
         # An inverted span would silently skip nothing, or everything.
         if segment.endMs < segment.startMs:
             segment.startMs, segment.endMs = segment.endMs, segment.startMs
@@ -665,7 +668,11 @@ PAGE = """<!doctype html>
  .meta{{padding:10px 12px;font-size:13px;line-height:1.55}}
  .cat{{color:#ff8f6b;font-weight:600}} .act{{color:#7ee787}}
  .word{{color:#ffd479;font-weight:600}}
- .why{{color:#9aa;font-style:italic}}
+ .why{{color:#9aa;font-style:italic;cursor:text;border-radius:4px;
+       padding:1px 3px;margin:0 -3px}}
+ .why:hover{{background:#1b1f24}}
+ .why:focus{{outline:none;font-style:normal;color:#e6edf3;background:#0d1117;
+             box-shadow:0 0 0 1px #30588c}}
  .clipbtns{{display:flex;gap:8px;padding:0 12px 8px}}
  .clipbtns button{{background:#22262c;font-size:12px;padding:7px}}
  .btns{{display:flex;gap:8px;padding:0 12px 12px}}
@@ -769,6 +776,7 @@ PAGE = """<!doctype html>
         <option value=voice>voice-only mute</option>
         <option value=blur>blur</option>
       </select>
+      <input id=addNote class=tinput size=22 placeholder="description (optional)">
       <button id=addSave>Add</button>
       <button id=addCancel>Cancel</button>
       <span class=mhint>times as H:MM:SS.mmm</span>
@@ -947,6 +955,26 @@ function card(s) {{
   }};
 
   el.querySelector('.edit-timing').onclick = () => toggleTiming(el, s, el.querySelector('.editor'));
+
+  // The description is editable in place — e.g. to fix the stale shot reference
+  // a duplicated finding carries, or to annotate a manual one. Saves on blur if
+  // it changed (Ctrl/Cmd+Enter commits without leaving the field).
+  const why = el.querySelector('.why');
+  why.contentEditable = 'true';
+  why.spellcheck = false;
+  why.title = 'Click to edit the description';
+  why.addEventListener('keydown', e => {{
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {{ e.preventDefault(); why.blur(); }}
+  }});
+  why.addEventListener('blur', () => {{
+    const val = why.textContent;
+    if (val === (s.reasoning || '')) return;  // unchanged
+    fetch(`/api/segments/${{s.id}}?path=${{encodeURIComponent(MEDIA)}}`, {{
+      method: 'PATCH', headers: {{'Content-Type':'application/json'}},
+      body: JSON.stringify({{reasoning: val}})
+    }}).then(r => {{ if (r.ok) s.reasoning = val; else why.textContent = s.reasoning || ''; }})
+      .catch(() => {{ why.textContent = s.reasoning || ''; }});
+  }});
 
   // Duplicate: create a manual copy at the same spot, then reload so the new
   // card appears. The reviewer retimes the copy (editable times) to its place.
@@ -1322,7 +1350,8 @@ document.getElementById('addSave').onclick = () => {{
   fetch(`/api/segments?path=${{encodeURIComponent(MEDIA)}}`, {{
     method: 'POST', headers: {{'Content-Type':'application/json'}},
     body: JSON.stringify({{startMs: st, endMs: en, category: 'manual',
-      recommendedAction: document.getElementById('addAction').value}})
+      recommendedAction: document.getElementById('addAction').value,
+      reasoning: document.getElementById('addNote').value}})
   }}).then(r => {{ if (!r.ok) throw new Error('add failed'); return r.json(); }})
     .then(() => location.reload())
     .catch(() => {{ btn.disabled = false; alert('Could not add the segment.'); }});

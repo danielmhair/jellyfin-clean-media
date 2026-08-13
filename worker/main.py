@@ -436,6 +436,8 @@ def approve_segment(segment_id: int, path: str, patch: SegmentPatch) -> Timeline
         changes["end_ms"] = patch.endMs
     if "recommendedAction" in sent and patch.recommendedAction is not None:
         changes["action"] = patch.recommendedAction
+    if "reasoning" in sent:
+        changes["reasoning"] = patch.reasoning or ""
 
     if update_segment(media, segment_id, **changes) is None:
         raise HTTPException(404, f"segment {segment_id} not found for {media}")
