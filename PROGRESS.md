@@ -7,7 +7,7 @@ review loop has its own spec in
 This file tracks the current state and open threads. Keep entries generic — no
 real film names (see [CLAUDE.md](CLAUDE.md)).
 
-_Last updated: 2026-08-12._
+_Last updated: 2026-08-13._
 
 ## Where it's running now
 
@@ -290,6 +290,40 @@ its box (`[ ]` → `[x]`), and move the **← NEXT** marker on.
   the fix. Recovery + logging mean the run survives restarts and is observable.
 
 ## Recent changes
+
+### Review editor polish — duplicates, editable notes, timing follow (2026-08-13, worker)
+
+Fixes from using the review page to place skips by hand. All **worker review
+page** (`review.py` + a thin model/API change); need a worker restart to serve.
+
+- **Duplicated/merged visual findings open the filmstrip, not a waveform**
+  (`a3d76bd`). The timing editor picks filmstrip vs waveform via `isVisual()`,
+  which only checked the engine (`vlm`/`pureframe`). A duplicated or merged
+  finding is created with the `manual` engine but keeps its scene category, so a
+  copy of a visual finding wrongly opened a waveform. `isVisual()` now also
+  treats the visual categories (nudity / sexual_activity / intense_kissing /
+  suggestive, mirroring [policy.py](worker/policy.py)) as visual.
+- **Editable finding description** (`6e28904`). A duplicate copied the original's
+  reasoning verbatim — including its stale `shots 412-418` reference — with no way
+  to fix it, and Add-segment had no description field. The card's description is
+  now editable in place (contentEditable, saves on blur; Ctrl/Cmd+Enter commits)
+  via a new `reasoning` field on `PATCH /api/segments/{id}` (added to
+  `SegmentPatch` + `update_segment`, applied only when sent so it leaves
+  approve/reject/timing/action alone), and the Add-segment form gained an
+  optional description input. +3 tests.
+- **Timing editor follows the edited times** (`50da2f2`). Three linked fixes: the
+  blue audition selection now shows its exact time span live
+  (`H:MM:SS.mmm – H:MM:SS.mmm`, seconds) with a **"Use as bounds"** button on
+  release, so a reviewer reads the spot they watched and sets the finding to it
+  in one click; `buildTiming` now anchors its window on the passed bounds (not
+  the finding's open-time position) and a **"↻ Frames here"** button re-anchors
+  the strip around the current edited bounds — fixing a duplicate moved minutes
+  away showing a blank/stale strip; and **Save resets the editor to the new
+  window** (15 s either side of the new bounds) when the finding moved out of the
+  shown window, instead of leaving it on the old spot.
+- **Card times shown to the millisecond** (`9d91651`, from the prior session but
+  same area) — the card rounded to tenths, which read as "the exact timing wasn't
+  saved" even though it was; now matches the editor's `H:MM:SS.mmm`.
 
 ### Reliability, ops & telecine session (2026-08-11/12, worker)
 

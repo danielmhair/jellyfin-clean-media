@@ -95,14 +95,24 @@ The administrator's review surface, served by the worker at `/api/review`.
 - **Preview muted / voice-removed** — hear the scene as it will play once acted
   on, before approving.
 - **Timing editor** — dual-mode: a **waveform** for audio findings, a
-  **filmstrip** for visual ones. Draggable start/end handles (25 ms snap), ±25 ms
-  and ±1 s nudges, typed `H:MM:SS.mmm` times (millisecond precision on the card
-  and in the fields), a live readout, and drag-to-audition any spot.
+  **filmstrip** for visual ones (chosen by category, so a duplicated or merged
+  scene still opens frames). Draggable start/end handles (25 ms snap), ±25 ms and
+  ±1 s nudges, typed `H:MM:SS.mmm` times (millisecond precision on the card and
+  in the fields), and a live readout. Drag across the strip to **audition** any
+  span — it shows its exact time and offers "Use as bounds" to set the finding to
+  what you just watched. The window **follows the edited times**: a "↻ Frames
+  here" button re-anchors the strip around the current bounds (so a finding moved
+  far away doesn't show a stale/blank strip), and Save resets the window to 15 s
+  either side of the new bounds.
+- **Editable description** — the finding's note/reasoning is editable in place
+  (e.g. to fix the stale shot reference a duplicate carries), and Add-segment
+  takes an optional description.
 - **Per-finding action** — set each finding to mute / voice-only mute / blur /
   skip.
 - **Add / duplicate / delete / merge** — add a finding the engines missed,
-  duplicate one to reuse elsewhere, delete noise, or merge several adjacent
-  detections (a scene flagged shot-by-shot) into one segment.
+  duplicate one to reuse elsewhere (retime and re-describe the copy), delete
+  noise, or merge several adjacent detections (a scene flagged shot-by-shot) into
+  one segment.
 - **Filters & bulk** — filter by decision state or by type (each profane word
   its own group), and bulk-approve/reject exactly what's shown.
 
