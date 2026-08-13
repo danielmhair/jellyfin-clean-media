@@ -898,7 +898,7 @@ function card(s) {{
     </div>
     <div class=meta>
       <label class=mergepick title="Select to merge with others"><input type=checkbox class=mergesel> merge</label>
-      <b>#${{s.id}}</b> ${{fmt(s.startMs)}} – ${{fmt(s.endMs)}}
+      <b>#${{s.id}}</b> ${{fmtHMS(s.startMs)}} – ${{fmtHMS(s.endMs)}}
       (${{((s.endMs-s.startMs)/1000).toFixed(1)}}s)${{
         tm ? `<span class="tag ${{tm.exact?'exact':'est'}}">${{tm.label}}</span>` : ''}}<br>
       <span class=cat>${{s.category}}</span>${{w ? ` <span class=word>“${{w}}”</span>` : ''}}${{
