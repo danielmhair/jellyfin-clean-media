@@ -8,6 +8,7 @@ Full spec: [plan/prds/clean-media-prd.md](plan/prds/clean-media-prd.md).
 In-Jellyfin review loop:
 [plan/prds/2026-07-20-jellyfin-review-ui.md](plan/prds/2026-07-20-jellyfin-review-ui.md).
 User-facing docs: [README.md](README.md). Current status: [PROGRESS.md](PROGRESS.md).
+Feature catalog: [docs/FEATURES.md](docs/FEATURES.md).
 
 ## Where things stand (read [PROGRESS.md](PROGRESS.md) for the living detail)
 

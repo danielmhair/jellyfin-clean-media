@@ -7,7 +7,7 @@ review loop has its own spec in
 This file tracks the current state and open threads. Keep entries generic — no
 real film names (see [CLAUDE.md](CLAUDE.md)).
 
-_Last updated: 2026-08-10._
+_Last updated: 2026-08-12._
 
 ## Where it's running now
 
@@ -280,13 +280,87 @@ its box (`[ ]` → `[x]`), and move the **← NEXT** marker on.
 
 ## In flight
 
-- **Visual re-run of two test films** with the tightened VLM prompt (v2),
-  running detached and resumable (checkpoints every 25 samples). ~11–12
-  s/sample, ~16 h total. A prior run died when the editor was closed
-  mid-pass; the engine now retries per request and resumes from checkpoint,
-  so an interruption costs minutes, not the whole run.
+- **Whole-library analysis run** (2026-08-11 →). ~119 jobs queued (profanity +
+  visual per film across ~60 films), processing one at a time through the
+  recovery-backed queue; the first film is through end to end. Measured VLM
+  throughput on the 4 GB card is **~12 s/sample → ~24 h per film** (see GPU
+  throughput below), so the visual queue is a multi-week grind — audio passes
+  are ~1 min each. Telecined DVD rips no longer fail (see the telecine fix); the
+  two prior failures are terminal and need re-queuing to pick up
+  the fix. Recovery + logging mean the run survives restarts and is observable.
 
 ## Recent changes
+
+### Reliability, ops & telecine session (2026-08-11/12, worker)
+
+A run of the whole library exposed operational gaps — no logs, a queue that
+didn't survive a restart, DVD rips failing outright, and noisy plugin polling.
+Seven commits (`162f140`…`9d91651`) address them. All are **worker-side**; they
+go live on the next worker restart. Full suite **159 green**.
+
+- **Telecine shot detection now rescales instead of failing** (`7c36264`,
+  [worker/shots.py](worker/shots.py)). Soft-telecined NTSC DVD rips advertise
+  29.97 fps while the film really plays slower, so PySceneDetect's timeline came
+  up 5–20 % short of the true runtime and the ≥95 % coverage guard **rejected the
+  whole film** (two rips came up at 93 % and 95 % — and much of the queued library is
+  such rips). The shot *positions* are right; only the seconds-per-frame is
+  wrong, uniformly. So the timeline is now rescaled onto the reliable ffprobe
+  duration: the last shot maps to the true end, every shot lands proportionally,
+  nothing falls past EOF — the **whole film is covered, no partial timeline**. A
+  decode that genuinely stopped short still fails (needs a >1.5× stretch). 4 new
+  tests. _This unblocks the ~57 queued visual passes._
+- **Crash/restart-resilient job queue** (`162f140`,
+  [worker/queue.py](worker/queue.py)). The processing queue was in-memory only,
+  so a restart emptied it while the job rows sat in SQLite. On startup the queue
+  now re-enqueues every unfinished job **in submission order** before the worker
+  thread starts; a pass caught mid-run resets `running`→`queued` and re-runs
+  (the VLM resumes from its 25-sample checkpoint; others restart that film), and
+  stale `running` ghosts from a prior crash are rescued the same way. Verified
+  live: a restart re-queued 119 jobs in order. +12 tests.
+- **Structured logging** (`162f140`, [worker/logging_config.py](worker/logging_config.py)).
+  The worker had no application logging — only raw uvicorn stdout. Now one
+  readable format to console **and** a rotating file (`data/logs/worker.log`,
+  5 MB × 3), a startup banner (version/GPU/engines/media/schedule), a request
+  middleware (mutations/errors at INFO/WARN, routine polling at DEBUG, slow
+  requests always surfaced), and full job lifecycle (queued/started/per-10 %
+  progress/completed with counts + duration/paused/cancelled/failed). Default
+  level **DEBUG**; `CLEANMEDIA_LOG_LEVEL` / `CLEANMEDIA_LOG_FILE` override.
+- **Timezone-aware analysis schedule** (`162f140`,
+  [worker/schedule.py](worker/schedule.py)). The window was evaluated against the
+  worker box's clock — wrong when the worker runs in a UTC container. `Schedule`
+  now carries an IANA tz captured from the admin's browser and is evaluated in
+  that zone via `zoneinfo` (empty tz falls back to worker-local). Added `tzdata`
+  (Windows ships no IANA database). +4 tests.
+- **Hidden service console window** (`496e14b`,
+  [scripts/install-service.ps1](scripts/install-service.ps1)). An `-AtLogon`
+  (interactive) task pops a blank console window (blank because output is
+  redirected to the log). The launcher `.cmd` is now wrapped in a `wscript` `.vbs`
+  that runs it hidden (`window style 0`, `wait=true` so Task Scheduler still
+  tracks the process for restart-on-failure). Takes effect on a full re-register.
+- **`/api/segments` quieted + negative-lookup cache** (`c28ab03`,
+  [worker/main.py](worker/main.py)). The plugin polls `/api/segments` for every
+  item a client plays; for an unanalyzed film there is no timeline, and reaching
+  that verdict fingerprinted the media — a **24 MB NAS read per poll**, ~1/sec
+  during playback, flooding the log with WARNINGs. Now the expected 404 on a
+  polling endpoint logs at DEBUG (a >3 s one still surfaces), and a short-TTL
+  cache keyed by the request path short-circuits the miss before touching the
+  NAS (cleared on `/api/reindex`, dropped on a hit). +4 tests.
+- **Test suite isolated from the production DB** (`bd5d4e3`,
+  [tests/conftest.py](tests/conftest.py)). Importing `worker.main` instantiates a
+  live `Store`/`JobQueue`, so running the suite while the real worker was up
+  opened `data/cleanmedia.db` and its recovery reset the running job. `Store` now
+  honors `CLEANMEDIA_DB`, and a conftest points the suite at a throwaway DB (and
+  empties `CLEANMEDIA_LOG_FILE`) before anything imports the app. Verified: a full
+  run leaves the live DB's job count unchanged.
+- **Review page — see the cut, preview the skip, exact-ms display** (`f51050f`,
+  `9d91651`, [worker/review.py](worker/review.py)). A **cut-marker strip** over
+  the preview video highlights the flagged span (the part cut/muted/blurred) with
+  a playhead, so it's clear exactly what a finding covers; a new **"Preview
+  skip"** button plays the run-up then jumps over the span the way Jellyfin skips
+  a `Commercial` segment, flashing the strip as it cuts. Separately, the card face
+  now shows times to the **millisecond** (`H:MM:SS.mmm`) instead of rounding to
+  tenths — an edited timing *was* saved exactly (verified end-to-end in a
+  browser), but the rounded card display made it look otherwise.
 
 ### Audition selection on the waveform + delete a finding (2026-08-10, worker)
 
@@ -608,8 +682,15 @@ its box (`[ ]` → `[x]`), and move the **← NEXT** marker on.
   `timingModel` option but needs a ~1.5 GB model download. Awaiting a call on
   whether to install it. Subtitle-mistimed lines can't be fixed by any ASR.
 - **GPU throughput** — the 4 GB card caps the visual pass at partial-GPU
-  speed. A card with ≥6 GB (or offloading Ollama to one) would fit the 4B
-  model fully and also allow a more accurate 8B.
+  speed. `ollama ps` shows `qwen3-vl:4b-instruct` running **~48 %/52 % CPU/GPU**
+  — the 3.6 GB model can't fully fit 4 GB alongside the Windows desktop — which
+  measures at **~12 s/sample, ~24 h per film**, i.e. weeks for the visual queue.
+  The CPU half is the critical path, so closing other apps frees VRAM/CPU but
+  doesn't materially speed it up (ollama caps the GPU split on a 4 GB card). The
+  real fix is a card with ≥6 GB, or offloading Ollama to one (via the engine's
+  `host` option / `OLLAMA_HOST_URL`), which would fit the 4B model fully and
+  allow a more accurate 8B. Left as the user's call (currently accepted as a
+  background grind).
 
 ## Known limits
 

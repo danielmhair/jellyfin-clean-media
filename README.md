@@ -6,6 +6,8 @@ media library, with an administrator review step before anything changes.
 **Originals are never modified.** Everything runs on your hardware — no cloud
 APIs, no telemetry, no uploads.
 
+For a full capability catalog, see [docs/FEATURES.md](docs/FEATURES.md).
+
 ---
 
 ## Contents
@@ -306,7 +308,7 @@ per movie anyway; the sidecars make it worth doing.
 A file joins a movie when its name starts with that movie's name and a
 dot, so `.cleanmedia.json` and `.eng.srt` travel with the video. Where two
 films could claim a file the longer name wins, which is what keeps
-*Iron Man 2 (2010)*'s sidecars away from *Iron Man (2008)*.
+*Some Film 2 (2012)*'s sidecars away from *Some Film (2008)*.
 
 Nothing is deleted or overwritten, and files are moved rather than copied,
 so on one volume a 1200 film library takes seconds. Every move is logged
@@ -417,6 +419,16 @@ how the film frames it. Those are surfaced as questions, not verdicts.
 Each finding carries a `reasoning` string with the offending word and its
 surrounding dialogue, or the model's description of what it saw, so you can
 usually judge without opening the film.
+
+**Seeing exactly what gets cut.** Every preview draws a marker strip over the
+video highlighting the flagged span — the part that will be cut, muted or
+blurred — with a playhead, so it's clear what a finding covers rather than just
+playing the scene. A **Preview skip** button plays the run-up and then *jumps
+over* the span the way Jellyfin skips it during playback, so you can watch the
+skip, not just the scene. For fine timing there's a waveform (audio) or
+filmstrip (visual) editor with draggable handles, ±25 ms / ±1 s nudges, typed
+`H:MM:SS.mmm` times, and a looped muted/voice-removed preview — to place a mute
+on the exact word by eye and ear.
 
 ---
 
@@ -573,7 +585,13 @@ with the advertised rate puts every shot boundary at 0.8× its real time, and
 an early render ended its video 25 minutes before its audio — while the file
 duration looked exactly right. Always measure the real rate
 (`worker/shots.py::true_fps`), and when verifying a cut, compare the last
-video and audio timestamps rather than trusting duration.
+video and audio timestamps rather than trusting duration. Shot detection has
+the same lie: PySceneDetect times shots in the container's frame space, so on
+a telecined rip its timeline runs short of the real runtime (5–20 %). Rather
+than fail such films, `detect_shots` **rescales** its whole timeline onto the
+reliable ffprobe duration — the shot positions are right, only the
+seconds-per-frame is wrong, uniformly — so the film is covered in full. A
+decode that genuinely stopped short (needs a >1.5× stretch) still fails.
 
 **Discs carry several subtitle tracks and most are useless.** One disc had three
 English tracks: two with 12 packets (forced signage) and one with 1,333 (the
