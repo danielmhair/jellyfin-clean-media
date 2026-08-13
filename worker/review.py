@@ -997,8 +997,15 @@ function parseTime(str) {{
 // scrollable window spans the finding ±PAD s, so a mute can be dragged onto
 // the exact word by eye (and ear, via Preview muted) and saved to the sidecar.
 // Visual findings (scene detections) get a filmstrip to place by eye; audio
-// findings (spoken words) get a waveform to place by eye and ear.
-function isVisual(s) {{ return s.engine === 'vlm' || s.engine === 'pureframe'; }}
+// findings (spoken words) get a waveform to place by eye and ear. Check the
+// category as well as the engine: a duplicated or merged finding carries the
+// 'manual' engine but keeps its scene category, so keying off the engine alone
+// wrongly opened a waveform for a copied visual finding. Categories mirror
+// worker/policy.py.
+const VISUAL_CATS = ['nudity', 'sexual_activity', 'intense_kissing', 'suggestive'];
+function isVisual(s) {{
+  return s.engine === 'vlm' || s.engine === 'pureframe' || VISUAL_CATS.includes(s.category);
+}}
 
 function toggleTiming(cell, s, box) {{
   if (box.dataset.open === '1') {{
