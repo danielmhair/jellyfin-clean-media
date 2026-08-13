@@ -648,6 +648,19 @@ PAGE = """<!doctype html>
  .play{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
         background:rgba(0,0,0,.35);color:#fff;font-size:15px;font-weight:600}}
  .play span{{background:rgba(0,0,0,.72);padding:9px 16px;border-radius:99px}}
+ /* preview cut-marker: a strip over the top of the video showing the flagged
+    span (the part acted on) and a playhead, so it is clear what is cut. */
+ .cliptl{{position:absolute;left:0;right:0;top:0;height:18px;z-index:2;
+          background:rgba(0,0,0,.5);pointer-events:none;font-size:11px}}
+ .cliptl .cutband{{position:absolute;top:0;bottom:0;background:rgba(248,81,73,.4);
+                   border-left:2px solid #f85149;border-right:2px solid #f85149}}
+ .cliptl.skip .cutband{{border-color:#ffb877;background:repeating-linear-gradient(
+     45deg,rgba(255,184,119,.5) 0 6px,rgba(255,184,119,.15) 6px 12px)}}
+ .cliptl.flash .cutband{{background:rgba(255,255,255,.75);transition:background .1s}}
+ .cliptl .ph{{position:absolute;top:0;bottom:0;width:2px;background:#fff;
+              box-shadow:0 0 3px #000}}
+ .cliptl .cutlbl{{position:absolute;left:6px;top:2px;color:#ffd0cb;font-weight:600;
+                  text-shadow:0 1px 2px #000;white-space:nowrap}}
  .hint{{color:#8b949e;font-size:11px;padding:0 12px 8px}}
  .meta{{padding:10px 12px;font-size:13px;line-height:1.55}}
  .cat{{color:#ff8f6b;font-weight:600}} .act{{color:#7ee787}}
@@ -794,21 +807,64 @@ function timing(s) {{
 // The muted word, from the [word] the subtitle engine prefixes.
 function word(s) {{ const m = /^\\[([^\\]]+)\\]/.exec(s.reasoning||''); return m ? m[1] : null; }}
 
-function playClip(box, s, mute, voice, padOverride) {{
+function playClip(box, s, mute, voice, padOverride, skip) {{
   box.innerHTML = '<div class=play><span>'
     + (voice ? 'separating voice&hellip; (a few seconds)' : 'loading clip&hellip;')
     + '</span></div>';
   const tight = document.getElementById('tight').checked;
   // padOverride lets an audition play just the selected span, not padded ±PAD.
   const pad = padOverride != null ? padOverride : (tight ? 2 : PAD);
+  // Where the flagged span sits inside the padded clip (seconds from clip start).
+  const clipStart = Math.max(0, s.startMs / 1000 - pad);
+  const cutStart = s.startMs / 1000 - clipStart;
+  const cutEnd = s.endMs / 1000 - clipStart;
+  // Mark the cut only on full previews, not the tiny waveform auditions.
+  const showBar = padOverride == null;
+
   const v = document.createElement('video');
   v.controls = true; v.autoplay = true; v.preload = 'auto';
   v.src = `/api/clip?path=${{encodeURIComponent(MEDIA)}}`
         + `&startMs=${{s.startMs}}&endMs=${{s.endMs}}&pad=${{pad}}`
         + (mute ? '&mute=true' : '') + (voice ? '&voice=true' : '');
-  // The clip is padded, so jump to where the flagged part actually begins.
-  v.onloadedmetadata = () => {{ box.innerHTML = ''; box.appendChild(v);
-                                v.currentTime = Math.min(pad, v.duration / 3); }};
+
+  // A strip over the top of the video marks the flagged span — the part being
+  // cut, muted or blurred — with a playhead, so it is clear exactly what the
+  // finding covers. In skip mode the strip is hatched and playback jumps the
+  // span, the way Jellyfin skips the scene during playback.
+  let tl, band, ph;
+  if (showBar) {{
+    tl = document.createElement('div');
+    tl.className = 'cliptl' + (skip ? ' skip' : '');
+    tl.innerHTML = '<div class=cutband></div><div class=ph></div><div class=cutlbl></div>';
+    band = tl.querySelector('.cutband'); ph = tl.querySelector('.ph');
+    tl.querySelector('.cutlbl').textContent =
+      (skip ? 'skips ' : 'flagged ') + fmt(s.startMs) + ' - ' + fmt(s.endMs);
+  }}
+
+  v.onloadedmetadata = () => {{
+    box.innerHTML = ''; box.appendChild(v);
+    const dur = v.duration || (cutEnd - cutStart + 2 * pad);
+    if (showBar) {{
+      box.appendChild(tl);
+      band.style.left = (100 * cutStart / dur) + '%';
+      band.style.width = (100 * Math.max(0.3, cutEnd - cutStart) / dur) + '%';
+      // Start just before the flagged part so its onset — and, in skip mode,
+      // the jump over it — is visible rather than already past.
+      v.currentTime = Math.max(0, cutStart - (skip ? 3 : 2));
+    }} else {{
+      v.currentTime = Math.min(pad, v.duration / 3);
+    }}
+  }};
+  v.ontimeupdate = () => {{
+    if (!showBar) return;
+    const dur = v.duration || 1;
+    ph.style.left = (100 * Math.min(v.currentTime, dur) / dur) + '%';
+    if (skip && v.currentTime >= cutStart && v.currentTime < cutEnd - 0.05) {{
+      v.currentTime = cutEnd;                 // jump the cut, as playback will
+      tl.classList.add('flash');
+      setTimeout(() => {{ if (tl) tl.classList.remove('flash'); }}, 500);
+    }}
+  }};
   v.onerror = () => box.innerHTML = '<div class=play><span>clip failed</span></div>';
 }}
 
@@ -833,6 +889,7 @@ function card(s) {{
     </div>
     <div class=clipbtns>
       <button class=play-plain>&#9654; Play scene</button>
+      <button class=play-skip title="Play the scene as it will play once this span is skipped">&#9197; Preview skip</button>
       ${{canMute ? '<button class=play-muted>&#9654; Play muted</button>' : ''}}
       ${{canVoice ? '<button class=play-voice>&#9654; Play voice-removed</button>' : ''}}
       <button class=edit-timing>&#9998; Timing</button>
@@ -857,6 +914,7 @@ function card(s) {{
   const shot = el.querySelector('.shot');
   shot.onclick = () => playClip(shot, s, false);
   el.querySelector('.play-plain').onclick = () => playClip(shot, s, false);
+  el.querySelector('.play-skip').onclick = () => playClip(shot, s, false, false, null, true);
   const pm = el.querySelector('.play-muted');
   if (pm) pm.onclick = () => playClip(shot, s, true, false);
   const pv = el.querySelector('.play-voice');
