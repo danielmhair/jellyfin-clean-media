@@ -9,8 +9,16 @@
     "imageUrl": "",
     "versions": [
       {
+        "version": "0.2.5.0",
+        "changelog": "Player buttons, hardened. Adds a second in-player button, 'Review this film', that opens the worker's review page for whatever is playing. The flag button's placement is now robust: it re-adds itself on a short interval and targets the main control bar, so it can no longer quietly vanish when Jellyfin re-renders the controls. Admin-only, browser (Jellyfin Web) only. Builds on 0.2.4.0's flag-a-moment button.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.5.0.zip",
+        "checksum": "611e5d6d49c2160ad0c48570febe5d2f",
+        "timestamp": "2026-08-14T23:46:45"
+      },
+      {
         "version": "0.2.4.0",
-        "changelog": "Flag a moment during playback. A new flag button on the Jellyfin video player captures a short window around the current time (now +/- 1.5s, configurable) as an unapproved finding, so you can mark a bad word or scene while watching instead of hunting for it later in the review page. It appears in the review page as a manual finding to confirm, retime or classify — nothing acts during playback. Admin-only. The button is added by injecting a small script into the web client on startup; if the web directory is read-only the plugin log explains the one-line manual step. Also folds the old separate settings page into the tabbed Studio dashboard.",
+        "changelog": "Flag a moment during playback. A new flag button on the Jellyfin video player captures a short window around the current time (now +/- 1.5s, configurable) as an unapproved finding, so you can mark a bad word or scene while watching instead of hunting for it later in the review page. It appears in the review page as a manual finding to confirm, retime or classify \u2014 nothing acts during playback. Admin-only. The button is added by injecting a small script into the web client on startup; if the web directory is read-only the plugin log explains the one-line manual step. Also folds the old separate settings page into the tabbed Studio dashboard.",
         "targetAbi": "10.11.0.0",
         "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.4.0.zip",
         "checksum": "684b98dc5bb9c8e61a5e1eb1a15d42b7",

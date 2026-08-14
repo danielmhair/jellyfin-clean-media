@@ -573,6 +573,32 @@ public class CleanMediaController : ControllerBase
         });
     }
 
+    /// <summary>The worker's review page URL for one film, for the player button.</summary>
+    /// <remarks>
+    /// Resolving item id to path and reading the worker URL both have to happen
+    /// on the server, so the player's "review this film" button asks here rather
+    /// than assembling the URL itself. Elevation-required, like every write on
+    /// this controller — the button is only shown to administrators anyway.
+    /// </remarks>
+    [HttpGet("ReviewUrl")]
+    public ActionResult<object> ReviewUrl([FromQuery] string itemId)
+    {
+        var path = PathFor(itemId);
+        if (path is null)
+        {
+            return NotFound();
+        }
+
+        var workerUrl = (Plugin.Instance?.Configuration.WorkerUrl ?? string.Empty).TrimEnd('/');
+        if (workerUrl.Length == 0)
+        {
+            return Ok(new { url = (string?)null });
+        }
+
+        var url = workerUrl + "/api/review?path=" + Uri.EscapeDataString(path);
+        return Ok(new { url });
+    }
+
     /// <summary>Ask the worker for its health, from the server.</summary>
     [HttpGet("TestConnection")]
     public async Task<ActionResult<object>> TestConnection(CancellationToken cancellationToken)

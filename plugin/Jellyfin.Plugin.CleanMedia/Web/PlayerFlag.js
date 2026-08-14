@@ -1,15 +1,20 @@
-// Clean Media — "flag this moment" button in the Jellyfin video player.
+// Clean Media — in-player buttons.
 //
-// Injected into the web client's index.html by WebInjectionService. Adds a
-// flag button to the playback control bar. One press captures a short window
-// around the current playback time as a hand-added (unapproved) finding, which
-// then shows up in the Clean Media review page to confirm, retime or classify.
+// Injected into the web client's index.html by WebInjectionService. Adds two
+// buttons to the video player control bar (administrators only):
 //
-// Everything here uses only the public window.ApiClient, so it survives web
-// client upgrades: current time comes from the <video> element (accurate,
-// local), the item id from this device's active session, and the POST reuses
-// ApiClient's own auth. The button is only added for administrators, because
-// creating a finding requires elevation on the worker-facing controller.
+//   * Flag this moment — captures a short window around the current playback
+//     time as a hand-added (unapproved) `manual` finding, which then shows up
+//     in the review page to confirm, retime or classify.
+//   * Review this film — opens the worker's review page for what is playing.
+//
+// Everything uses only the public window.ApiClient, so it survives web client
+// upgrades: current time comes from the <video> element (accurate, local), the
+// item id from this device's active session, and calls reuse ApiClient's auth.
+//
+// The control bar is re-rendered several times a second while playing, which
+// wipes anything added to it, so injection is idempotent and repeats on a short
+// interval — the buttons cannot quietly vanish on a re-render.
 (function () {
     'use strict';
 
@@ -37,36 +42,41 @@
                     if (u && u.Policy && u.Policy.IsAdministrator) { watch(); }
                 });
             })
-            .catch(function () { /* non-admin or transient — no button */ });
+            .catch(function () { /* non-admin or transient — no buttons */ });
     }
 
-    // The OSD is rebuilt every time playback (re)starts, so re-inject on any
-    // DOM change. tryInject is idempotent per control bar.
+    // The OSD control bar is rebuilt constantly during playback, so re-add the
+    // buttons on an interval (cheap, idempotent) and also on any DOM change for
+    // a snappy first appearance.
     function watch() {
         new MutationObserver(tryInject).observe(document.body, { childList: true, subtree: true });
+        setInterval(tryInject, 1000);
         tryInject();
     }
 
     function tryInject() {
-        var bars = document.querySelectorAll('.videoOsdBottom');
-        for (var i = 0; i < bars.length; i++) {
-            var bar = bars[i];
-            if (bar.querySelector('.btnCleanMediaFlag')) { continue; }
-            (bar.querySelector('.buttons') || bar).appendChild(makeButton());
-        }
+        var bar = document.querySelector('.videoOsdBottom-maincontrols')
+            || document.querySelector('.videoOsdBottom');
+        if (!bar || bar.querySelector('.btnCleanMediaFlag')) { return; }
+
+        // Land in the right-hand control cluster (subtitles/settings/fullscreen).
+        var groups = bar.querySelectorAll('.buttons');
+        var group = groups.length ? groups[groups.length - 1] : bar;
+        group.appendChild(makeButton('flag', 'Flag this moment for Clean Media review', 'btnCleanMediaFlag', onFlag));
+        group.appendChild(makeButton('rate_review', 'Open the Clean Media review page for this film', 'btnCleanMediaReview', onReview));
     }
 
-    function makeButton() {
+    function makeButton(icon, title, cls, handler) {
         var btn = document.createElement('button');
         btn.setAttribute('is', 'paper-icon-button-light');
-        btn.className = 'btnCleanMediaFlag autoSize paper-icon-button-light';
-        btn.title = 'Flag this moment for Clean Media review';
-        var icon = document.createElement('span');
-        icon.className = 'material-icons';
-        icon.setAttribute('aria-hidden', 'true');
-        icon.textContent = 'flag';
-        btn.appendChild(icon);
-        btn.addEventListener('click', onFlag);
+        btn.className = cls + ' autoSize paper-icon-button-light';
+        btn.title = title;
+        var span = document.createElement('span');
+        span.className = 'material-icons';
+        span.setAttribute('aria-hidden', 'true');
+        span.textContent = icon;
+        btn.appendChild(span);
+        btn.addEventListener('click', handler);
         return btn;
     }
 
@@ -100,6 +110,26 @@
             .then(function () { toast('Flagged ' + fmt(ms) + ' — review to confirm'); })
             .catch(function (e) { toast('Flag failed: ' + (e && e.message ? e.message : 'error')); })
             .then(function () { busy = false; });
+    }
+
+    function onReview() {
+        // Open the tab synchronously so popup blockers allow it, then point it
+        // at the review URL once the server resolves the item to a worker URL.
+        var win = window.open('', '_blank');
+        currentItemId()
+            .then(function (itemId) {
+                if (!itemId) { throw new Error('could not identify the playing item'); }
+                var ac = api();
+                return ac.ajax({ type: 'GET', url: ac.getUrl('CleanMedia/ReviewUrl', { itemId: itemId }), dataType: 'json' });
+            })
+            .then(function (res) {
+                if (!res || !res.url) { throw new Error('worker URL not set in Clean Media settings'); }
+                if (win) { win.location = res.url; } else { window.location = res.url; }
+            })
+            .catch(function (e) {
+                if (win) { win.close(); }
+                toast('Review failed: ' + (e && e.message ? e.message : 'error'));
+            });
     }
 
     // The active session for this device carries the now-playing item id — a
