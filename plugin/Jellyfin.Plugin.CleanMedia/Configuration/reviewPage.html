@@ -2,960 +2,955 @@
 <html lang="en">
 <head>
     <meta charset="utf-8" />
-    <title>Clean Media Review</title>
+    <title>Clean Media</title>
 </head>
 <body>
 <div id="CleanMediaReviewPage" data-role="page" class="page type-interior pluginConfigurationPage">
     <div data-role="content">
         <div class="content-primary">
+            <div class="cmRoot">
 
-            <!-- Libraries -->
-            <div id="CmLibraryView">
-                <h2 style="margin-bottom:.2em;">Clean Media Review</h2>
-                <p class="fieldDescription" style="margin-top:0;">
-                    Nothing is skipped during playback until it is approved here.
-                </p>
-                <!-- Jellyfin's plugin "Settings" button always opens the
-                     main-menu page (this one), never the config page, so give
-                     the settings a reachable link from here. -->
-                <button is="emby-button" type="button" id="CmOpenSettings"
-                        class="raised emby-button" style="margin-bottom:1em;">
-                    <span>&#9881; Worker settings</span>
-                </button>
-                <div id="CmLibraryPicker"></div>
-            </div>
-
-            <!-- One library's videos -->
-            <div id="CmItemsView" style="display:none;">
-                <button is="emby-button" type="button" class="raised emby-button cmBack">
-                    <span>&larr; All libraries</span>
-                </button>
-                <h2 id="CmLibraryName" style="display:inline-block;margin:0 0 0 1em;"></h2>
-
-                <div style="margin:1em 0;display:flex;gap:.6em;flex-wrap:wrap;align-items:center;">
-                    <select is="emby-select" id="CmFilter" style="max-width:220px;">
-                        <option value="all">All videos</option>
-                        <option value="pending">Needs review</option>
-                        <option value="unanalyzed">Not analyzed</option>
-                        <option value="done">Fully reviewed</option>
-                    </select>
-                    <select is="emby-select" id="CmEngine" style="max-width:220px;">
-                        <option value="subtitles">Profanity (subtitles) — fast</option>
-                        <option value="whisper">Profanity (whisper) — slower</option>
-                        <option value="vlm">Visual scenes (VLM) — hours</option>
-                    </select>
-                    <button is="emby-button" type="button" id="CmQueueVisible"
-                            class="raised emby-button"><span>Queue shown videos</span></button>
-                    <button is="emby-button" type="button" id="CmCancelAll"
-                            class="raised emby-button" style="display:none;"><span>Cancel all analysis</span></button>
-                    <span id="CmQueueResult" class="fieldDescription"></span>
+                <div class="phead">
+                    <h1>Clean Media</h1>
+                    <div class="status" id="CmHeadStatus">
+                        <span><span class="dot-live" id="CmLiveDot"></span><span id="CmLiveText">Checking worker…</span></span>
+                        <span id="CmGpuStat" style="display:none;"><span class="k">GPU</span> <span id="CmGpuName"></span></span>
+                    </div>
                 </div>
 
-                <div id="CmItems"></div>
-            </div>
-
-            <!-- One film: a launcher. Analyze it, render a clean copy, or open
-                 the worker review page — which is where each finding is set to
-                 mute / blur / skip and approved. This page shows no per-finding
-                 list of its own on purpose. -->
-            <div id="CmFilmView" style="display:none;">
-                <button is="emby-button" type="button" class="raised emby-button cmBackToItems">
-                    <span>&larr; Back</span>
-                </button>
-                <h2 id="CmFilmName" style="display:inline-block;margin:0 0 0 1em;"></h2>
-                <span id="CmFilmProgress" class="fieldDescription" style="margin-left:1em;"></span>
-
-                <div style="margin:1em 0;display:flex;gap:1.2em;flex-wrap:wrap;align-items:center;">
-                    <span class="fieldDescription" style="margin:0;">Analyze for:</span>
-                    <label class="emby-checkbox-label">
-                        <input type="checkbox" is="emby-checkbox" class="cmEngine" value="subtitles" checked />
-                        <span>Profanity (subtitles) — fast</span>
-                    </label>
-                    <label class="emby-checkbox-label">
-                        <input type="checkbox" is="emby-checkbox" class="cmEngine" value="whisper" />
-                        <span>Profanity (whisper) — slower</span>
-                    </label>
-                    <label class="emby-checkbox-label">
-                        <input type="checkbox" is="emby-checkbox" class="cmEngine" value="vlm" />
-                        <span>Visual scenes — hours</span>
-                    </label>
-                    <button is="emby-button" type="button" id="CmAnalyzeFilm"
-                            class="raised button-submit emby-button"><span>Analyze this film</span></button>
-                    <button is="emby-button" type="button" id="CmAnalyzeEverything"
-                            class="raised emby-button"><span>Analyze everything</span></button>
-                    <span id="CmAnalyzeResult" class="fieldDescription"></span>
+                <div class="tabbar" id="CmTabs">
+                    <button class="on" data-t="settings">Settings</button>
+                    <button data-t="queue">Queue</button>
                 </div>
 
-                <!-- Live progress for any analysis/render pass on this film. -->
-                <div id="CmFilmJobs" class="cmFilmJobs"></div>
+                <!-- ===================== SETTINGS ===================== -->
+                <div id="tab-settings" class="tabpanel">
+                    <div class="setwrap">
+                        <div class="setgrid two">
+                            <!-- worker connection -->
+                            <div class="scard">
+                                <h3>Worker connection</h3>
+                                <p class="cdesc">The Clean Media worker does the analysis and rendering.
+                                    Jellyfin reaches it over your LAN or Tailscale.</p>
+                                <div class="connpill" id="CmConnPill"><span class="dot-live"></span>Checking…</div>
+                                <div class="field">
+                                    <label for="CmWorkerUrl">Worker URL</label>
+                                    <input class="cminput" id="CmWorkerUrl" type="url"
+                                           placeholder="http://192.168.x.x:8765" />
+                                    <p class="help">Base URL reachable from this Jellyfin server.</p>
+                                </div>
+                                <div class="field">
+                                    <label for="CmTimeout">Timeout (seconds)</label>
+                                    <input class="cminput" id="CmTimeout" type="number" min="1" max="120"
+                                           style="max-width:130px;" />
+                                </div>
+                                <button class="cmbtn mini" id="CmTestConn" style="margin-top:15px;">Test connection</button>
+                                <span id="CmTestResult" class="help" style="margin-left:.6em;"></span>
+                            </div>
 
-                <div style="margin:1em 0;display:flex;gap:.6em;flex-wrap:wrap;align-items:center;">
-                    <button is="emby-button" type="button" id="CmOpenReview"
-                            class="raised emby-button" style="display:none;"><span>&#8599; Review findings (mute / blur / skip)</span></button>
-                    <button is="emby-button" type="button" id="CmRender"
-                            class="raised button-submit emby-button"><span>Render clean copy</span></button>
-                    <span id="CmRenderNote" class="fieldDescription" style="margin:0;"></span>
-                    <span id="CmRenderResult" class="fieldDescription" style="margin:0;"></span>
+                            <!-- playback -->
+                            <div class="scard">
+                                <h3>Playback</h3>
+                                <p class="cdesc">How approved findings affect what plays in Jellyfin.</p>
+                                <div class="setrow first">
+                                    <div class="switch" id="CmProvideSkips"><div class="knob"></div></div>
+                                    <div class="txt"><div class="lab">Skip approved scenes during playback</div>
+                                        <p class="help">Reported to Jellyfin as Commercial segments. Set each client's
+                                            Commercial action to “Skip” or “Ask to skip”.</p></div>
+                                </div>
+                                <div class="setrow">
+                                    <div class="switch" id="CmApprovedOnly"><div class="knob"></div></div>
+                                    <div class="txt"><div class="lab">Only use approved findings</div>
+                                        <p class="help">Strongly recommended. With this off, unreviewed AI guesses are
+                                            skipped during playback.</p></div>
+                                </div>
+                                <p class="help" style="border-top:1px solid var(--cm-line);padding-top:12px;margin-top:13px;">
+                                    Jellyfin can only <b>skip</b> during playback. Muting profanity and blurring need a
+                                    rendered clean copy from the worker — no client supports them live.</p>
+                            </div>
+                        </div>
+
+                        <!-- schedule -->
+                        <div class="scard" style="margin-top:16px;">
+                            <div class="schead">
+                                <div>
+                                    <h3>Analysis schedule</h3>
+                                    <p class="cdesc" style="margin-bottom:0;">Choose when library analysis may use the GPU.
+                                        Rendering a clean copy is never delayed.</p>
+                                </div>
+                                <div class="modeseg" id="CmModeSeg" style="margin-left:auto;">
+                                    <button data-m="always">Always on</button>
+                                    <button class="on" data-m="sched">Scheduled hours</button>
+                                </div>
+                            </div>
+
+                            <div id="CmAlwaysNote" class="help" style="margin-top:14px;display:none;">
+                                Analysis runs whenever it's queued — no time restriction.</div>
+
+                            <div id="CmSchedBody">
+                                <div style="display:flex;align-items:center;gap:10px;margin:14px 0 12px;flex-wrap:wrap;">
+                                    <span class="help" style="margin:0;" id="CmSchedNote">Set the allowed hours for each day.
+                                        A window whose end is earlier than its start runs overnight.</span>
+                                    <button class="linkbtn" id="CmApplyAll" style="margin-left:auto;">Copy Monday to every day</button>
+                                </div>
+                                <div class="week" id="CmWeek"></div>
+                                <p class="help" style="margin-top:13px;">The long visual pass checkpoints and resumes
+                                    across the overnight boundary, so a window that spans midnight is fine.</p>
+                            </div>
+                        </div>
+
+                        <div class="savebar">
+                            <span class="dot-live" id="CmSaveDot" style="background:var(--cm-muted);box-shadow:none;"></span>
+                            <span class="help" style="margin:0;" id="CmSaveState">All changes saved</span>
+                            <div class="grow"></div>
+                            <button class="cmbtn mini ghost" id="CmDiscard">Discard</button>
+                            <button class="cmbtn primary" id="CmSaveSettings">Save settings</button>
+                        </div>
+                    </div>
                 </div>
-            </div>
 
-            <div id="CmMessage" class="fieldDescription" style="margin-top:1em;"></div>
+                <!-- ===================== QUEUE ===================== -->
+                <div id="tab-queue" class="tabpanel" hidden>
+                    <div class="lede">One worker, one GPU — the top job runs, the rest wait their turn.
+                        Drag to reorder what runs next; a running job is never interrupted.</div>
+
+                    <div class="work">
+                        <!-- LEFT: controls -->
+                        <div class="leftcol">
+                            <div class="filters">
+                                <span class="flabel">Show</span>
+                                <span id="CmChips" style="display:contents;"></span>
+                                <span class="spacer"></span>
+                                <button class="link" id="CmShowAll">Show all</button>
+                            </div>
+
+                            <div class="addcard">
+                                <div class="addhead"><span class="t">Add to queue</span>
+                                    <span class="s" id="CmAddHint">— pick a pass, open a collection, click a film</span></div>
+                                <div class="seg" id="CmEngineSeg"></div>
+                                <input class="search2" id="CmFilmSearch" placeholder="Search films…" />
+                                <div class="addnav" id="CmAddNav"></div>
+                                <div class="cblabel" id="CmAddLabel">Collections</div>
+                                <div class="collist" id="CmAddList"></div>
+                            </div>
+                        </div>
+
+                        <!-- RIGHT: queue -->
+                        <div class="rightcol">
+                            <h2>Running now <span class="count" id="CmCActive">0</span></h2>
+                            <div class="rows" id="CmActive"></div>
+
+                            <h2>Up next <span class="count" id="CmCQueued">0</span>
+                                <span class="note">— drag ⠿ to reorder</span></h2>
+                            <div class="rows" id="CmQueued"></div>
+
+                            <div class="toolbar">
+                                <button class="cmbtn danger" id="CmCancelAll">Cancel all</button>
+                                <button class="cmbtn ghost" id="CmPause">Pause queue</button>
+                                <span id="CmQueueMsg" class="help" style="margin:0;"></span>
+                            </div>
+
+                            <h2>Recent <span class="count" id="CmCRecent">0</span></h2>
+                            <div class="rows recent" id="CmRecent"></div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
         </div>
     </div>
 
 <style>
-    .cmGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:1em;}
-    .cmCard{background:#202020;border-radius:6px;overflow:hidden;cursor:pointer;
-            border:1px solid transparent;}
-    .cmCard:hover{border-color:#00a4dc;}
-    .cmCard img{width:100%;aspect-ratio:2/3;object-fit:cover;display:block;background:#111;}
-    .cmCard .cmName{padding:.5em .6em .2em;font-size:13px;}
-    .cmCard .cmState{padding:0 .6em .6em;font-size:12px;opacity:.85;}
-    .cmPending{color:#e3b341;} .cmDone{color:#3fb950;} .cmNone{opacity:.55;}
-    .cmRunning{color:#00a4dc;} .cmFail{color:#f85149;}
+.cmRoot{
+  --cm-panel:#141619; --cm-panel-2:#191c21; --cm-card:#1b1e24;
+  --cm-line:#262a31; --cm-line-2:#31363f;
+  --cm-ink:#eceef1; --cm-ink-2:#aab0b8; --cm-muted:#767d87;
+  --cm-accent:#4aa8ff; --cm-accent-ink:#04121f;
+  --cm-shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.28);
+  --cm-radius:14px;
+  --t-subtitles:#e0b344; --t-whisper:#f0885a; --t-vlm:#b585ff; --t-render:#37c6cf;
+  color:var(--cm-ink);
+  font:14.5px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+}
+.cmRoot *{box-sizing:border-box;}
+.cmRoot .phead{display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:6px;}
+.cmRoot .phead h1{font-size:23px;font-weight:750;letter-spacing:-.01em;margin:0;}
+.cmRoot .phead .status{margin-left:auto;font-size:12.5px;color:var(--cm-muted);display:flex;gap:16px;align-items:center;}
+.cmRoot .phead .status .k{color:var(--cm-ink-2);font-weight:600;}
+.cmRoot .dot-live{width:8px;height:8px;border-radius:50%;background:#3fb950;display:inline-block;
+  box-shadow:0 0 0 3px rgba(63,185,80,.15);margin-right:6px;vertical-align:middle;}
+.cmRoot .dot-live.off{background:#f85149;box-shadow:0 0 0 3px rgba(248,81,73,.15);}
+.cmRoot .lede{color:var(--cm-ink-2);margin:2px 0 20px;font-size:13.5px;}
 
-    .cmCardActions{padding:0 .6em .6em;display:flex;gap:.4em;min-height:1.4em;}
-    .cmCardBtn{font-size:11px;padding:.25em .7em;border:none;border-radius:4px;
-               cursor:pointer;background:#333;color:#ddd;}
-    .cmCardBtn.cmAnalyze{background:#1f6feb;color:#fff;}
-    .cmCardBtn.cmCancel{background:#6e2b2b;color:#fff;}
-    .cmCardBtn:hover{filter:brightness(1.15);}
-    .cmCardBtn:disabled{opacity:.5;cursor:default;filter:none;}
+.cmRoot h2{font-size:11.5px;font-weight:700;text-transform:uppercase;letter-spacing:.09em;
+  color:var(--cm-muted);margin:24px 0 10px;display:flex;align-items:center;gap:8px;}
+.cmRoot h2:first-child{margin-top:0;}
+.cmRoot h2 .count{color:var(--cm-ink-2);background:var(--cm-panel-2);border:1px solid var(--cm-line);
+  border-radius:999px;padding:1px 8px;font-size:11px;font-weight:600;letter-spacing:0;}
+.cmRoot h2 .note{font-weight:600;letter-spacing:0;text-transform:none;color:var(--cm-muted);font-size:11px;}
 
-    .cmFilmJobs{margin:.6em 0;}
-    .cmJobLine{font-size:13px;margin:.35em 0;color:#00a4dc;}
-    .cmJobLine.cmQueued{color:#e3b341;}
-    .cmBar{height:6px;background:#333;border-radius:3px;overflow:hidden;
-           margin-top:.25em;max-width:420px;}
-    .cmBarFill{height:100%;background:#00a4dc;transition:width .3s;}
-    .cmState .cmJobLine{margin:.2em 0;font-size:12px;}
+.cmRoot .cmbtn{font:inherit;cursor:pointer;border:1px solid var(--cm-line-2);background:var(--cm-panel-2);
+  color:var(--cm-ink);border-radius:9px;padding:8px 13px;font-size:13px;font-weight:600;transition:.13s filter;}
+.cmRoot .cmbtn:hover{filter:brightness(1.15);}
+.cmRoot .cmbtn:disabled{opacity:.4;cursor:default;filter:none;}
+.cmRoot .cmbtn.danger{color:#ffb4b0;border-color:rgba(248,113,105,.3);background:rgba(248,113,105,.07);}
+.cmRoot .cmbtn.ghost{background:transparent;}
+.cmRoot .cmbtn.mini{padding:5px 9px;font-size:12px;border-radius:8px;}
+.cmRoot .cmbtn.primary{background:var(--cm-accent);color:var(--cm-accent-ink);border:none;font-weight:700;padding:10px 18px;}
+
+/* tabs */
+.cmRoot .tabbar{display:flex;gap:2px;border-bottom:1px solid var(--cm-line);margin:8px 0 20px;}
+.cmRoot .tabbar button{background:none;border:none;border-bottom:2px solid transparent;border-radius:0;
+  padding:10px 16px;color:var(--cm-ink-2);font-size:14.5px;font-weight:650;cursor:pointer;}
+.cmRoot .tabbar button.on{color:var(--cm-ink);border-bottom-color:var(--cm-accent);}
+.cmRoot .tabpanel[hidden]{display:none;}
+
+/* queue layout */
+.cmRoot .work{display:grid;grid-template-columns:1fr;gap:22px;align-items:stretch;}
+@media(min-width:1080px){ .cmRoot .work{grid-template-columns:390px 1fr;} }
+.cmRoot .leftcol{display:flex;flex-direction:column;gap:14px;min-width:0;}
+.cmRoot .rightcol{min-width:0;}
+
+.cmRoot .filters{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  background:var(--cm-panel);border:1px solid var(--cm-line);border-radius:var(--cm-radius);
+  padding:12px 14px;box-shadow:var(--cm-shadow);}
+.cmRoot .filters .flabel{font-size:12px;color:var(--cm-muted);font-weight:600;margin-right:2px;}
+.cmRoot .chip{display:inline-flex;align-items:center;gap:8px;padding:7px 12px 7px 10px;border-radius:999px;
+  border:1px solid var(--cm-line-2);background:var(--cm-panel-2);color:var(--cm-ink);font-size:12.5px;
+  font-weight:600;cursor:pointer;user-select:none;}
+.cmRoot .chip .dot{width:10px;height:10px;border-radius:50%;box-shadow:0 0 0 3px rgba(255,255,255,.04);}
+.cmRoot .chip .n{color:var(--cm-muted);font-variant-numeric:tabular-nums;}
+.cmRoot .chip.off{opacity:.4;filter:grayscale(.7);}
+.cmRoot .filters .spacer{flex:1;}
+.cmRoot .filters .link{background:none;border:none;color:var(--cm-accent);font-weight:600;font-size:12.5px;cursor:pointer;}
+
+.cmRoot .addcard{background:var(--cm-panel);border:1px solid var(--cm-line);border-radius:var(--cm-radius);
+  padding:14px 16px;box-shadow:var(--cm-shadow);display:flex;flex-direction:column;flex:1;min-height:360px;}
+.cmRoot .addhead{display:flex;align-items:center;gap:10px;margin-bottom:11px;flex-wrap:wrap;}
+.cmRoot .addhead .t{font-size:13px;font-weight:700;}
+.cmRoot .addhead .s{font-size:12px;color:var(--cm-muted);}
+.cmRoot .seg{display:flex;gap:6px;flex-wrap:wrap;}
+.cmRoot .seg .opt{display:inline-flex;align-items:center;gap:7px;padding:6px 11px;border-radius:9px;
+  border:1px solid var(--cm-line-2);background:var(--cm-panel-2);font-size:12px;font-weight:600;cursor:pointer;}
+.cmRoot .seg .opt .dot{width:9px;height:9px;border-radius:50%;}
+.cmRoot .seg .opt.sel{border-color:currentColor;background:rgba(255,255,255,.04);}
+.cmRoot .search2{margin:13px 0 2px;background:var(--cm-panel-2);border:1px solid var(--cm-line);border-radius:9px;
+  padding:9px 12px;color:var(--cm-ink);font-size:12.5px;width:100%;}
+.cmRoot .cblabel{font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--cm-muted);
+  margin:14px 2px 8px;font-weight:700;}
+.cmRoot .collist{display:flex;flex-direction:column;gap:8px;overflow:auto;flex:1;min-height:120px;}
+.cmRoot .crow{display:flex;align-items:center;gap:11px;padding:9px 12px 9px 9px;border-radius:11px;
+  border:1px solid var(--cm-line);background:var(--cm-card);cursor:pointer;}
+.cmRoot .crow:hover{border-color:var(--cm-line-2);}
+.cmRoot .crow .th{width:40px;height:40px;border-radius:9px;display:grid;place-items:center;font-size:19px;
+  flex:0 0 auto;overflow:hidden;background:#222;}
+.cmRoot .crow .th img{width:100%;height:100%;object-fit:cover;}
+.cmRoot .crow .cn{font-size:13.5px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px;}
+.cmRoot .crow .cc{font-size:11.5px;color:var(--cm-muted);}
+.cmRoot .crow .go{margin-left:auto;color:var(--cm-muted);font-size:18px;}
+.cmRoot .crow.added{border-color:#3fb950;}
+.cmRoot .addnav{display:flex;align-items:center;gap:10px;margin-top:12px;}
+.cmRoot .addnav:empty{display:none;}
+.cmRoot .addnav .crumb{font-size:13px;font-weight:700;}
+.cmRoot .addnav .crumb .muted{color:var(--cm-muted);font-weight:600;}
+
+/* rows */
+.cmRoot .rows{display:flex;flex-direction:column;gap:8px;}
+.cmRoot .row{position:relative;display:flex;align-items:center;gap:12px;background:var(--cm-card);
+  border:1px solid var(--cm-line);border-radius:12px;padding:12px 14px 12px 0;
+  box-shadow:0 1px 1px rgba(0,0,0,.25);overflow:hidden;}
+.cmRoot .row.dragging{opacity:.4;}
+.cmRoot .row.drop-before{box-shadow:inset 0 3px 0 var(--cm-accent);}
+.cmRoot .row.drop-after{box-shadow:inset 0 -3px 0 var(--cm-accent);}
+.cmRoot .row .stripe{width:4px;align-self:stretch;border-radius:0 4px 4px 0;flex:0 0 auto;}
+.cmRoot .grip{flex:0 0 auto;width:26px;display:flex;justify-content:center;color:var(--cm-muted);cursor:grab;touch-action:none;}
+.cmRoot .grip.dim{opacity:.22;cursor:default;}
+.cmRoot .glyph{flex:0 0 auto;width:38px;height:38px;border-radius:10px;display:grid;place-items:center;font-size:18px;}
+.cmRoot .info{flex:1 1 auto;min-width:0;}
+.cmRoot .name{font-weight:650;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.cmRoot .sub{font-size:12.5px;color:var(--cm-muted);margin-top:2px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.cmRoot .type-tag{font-size:11.5px;font-weight:700;padding:2px 8px;border-radius:999px;}
+.cmRoot .bar{height:6px;background:#0e1013;border-radius:999px;overflow:hidden;margin-top:9px;max-width:520px;}
+.cmRoot .barfill{height:100%;border-radius:999px;transition:width .3s ease;}
+.cmRoot .pos{flex:0 0 auto;font-size:12px;font-weight:700;color:var(--cm-muted);width:26px;text-align:center;
+  font-variant-numeric:tabular-nums;}
+.cmRoot .acts{flex:0 0 auto;display:flex;gap:6px;align-items:center;padding-right:2px;}
+.cmRoot .iconbtn{width:32px;height:32px;padding:0;display:grid;place-items:center;font-size:15px;border-radius:9px;
+  border:1px solid var(--cm-line-2);background:var(--cm-panel-2);color:var(--cm-ink);cursor:pointer;}
+.cmRoot .iconbtn.danger{color:#ffb4b0;border-color:rgba(248,113,105,.3);background:rgba(248,113,105,.07);}
+.cmRoot .iconbtn.ghost{background:transparent;}
+.cmRoot .badge{font-size:11px;font-weight:700;padding:3px 9px;border-radius:999px;letter-spacing:.02em;}
+.cmRoot .b-running,.cmRoot .b-rendering{background:rgba(74,168,255,.16);color:#8cc6ff;}
+.cmRoot .b-completed,.cmRoot .b-rendered{background:rgba(63,185,80,.16);color:#7ee787;}
+.cmRoot .b-failed,.cmRoot .b-cancelled{background:rgba(248,113,105,.16);color:#ffb4b0;}
+.cmRoot .recent .name{font-weight:600;color:var(--cm-ink-2);}
+.cmRoot .toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;align-items:center;}
+.cmRoot .empty{color:var(--cm-muted);font-size:13px;padding:16px;border:1px dashed var(--cm-line-2);
+  border-radius:12px;text-align:center;}
+
+/* settings */
+.cmRoot .setwrap{max-width:1060px;}
+.cmRoot .setgrid{display:grid;grid-template-columns:1fr;gap:16px;}
+@media(min-width:900px){ .cmRoot .setgrid.two{grid-template-columns:1fr 1fr;} }
+.cmRoot .scard{background:var(--cm-panel);border:1px solid var(--cm-line);border-radius:var(--cm-radius);
+  padding:17px 19px;box-shadow:var(--cm-shadow);}
+.cmRoot .scard h3{margin:0;font-size:15.5px;font-weight:700;}
+.cmRoot .scard .cdesc{font-size:12.5px;color:var(--cm-muted);margin:3px 0 15px;}
+.cmRoot .connpill{display:inline-flex;align-items:center;gap:9px;padding:8px 13px;border-radius:10px;
+  background:rgba(118,125,135,.12);border:1px solid var(--cm-line-2);color:var(--cm-ink-2);font-size:12.5px;font-weight:600;}
+.cmRoot .connpill.ok{background:rgba(63,185,80,.1);border-color:rgba(63,185,80,.28);color:#9be6a6;}
+.cmRoot .connpill.bad{background:rgba(248,113,105,.1);border-color:rgba(248,113,105,.28);color:#ffb4b0;}
+.cmRoot .field{margin-top:14px;}
+.cmRoot .field label{display:block;font-size:12px;color:var(--cm-ink-2);font-weight:600;margin-bottom:6px;}
+.cmRoot .cminput{width:100%;background:var(--cm-panel-2);border:1px solid var(--cm-line);border-radius:9px;
+  padding:10px 12px;color:var(--cm-ink);font-size:13.5px;}
+.cmRoot .help{font-size:12px;color:var(--cm-muted);margin:6px 0 0;}
+.cmRoot .switch{position:relative;width:42px;height:24px;border-radius:999px;background:#2c3138;
+  border:1px solid var(--cm-line-2);flex:0 0 auto;cursor:pointer;transition:.15s background;}
+.cmRoot .switch.on{background:var(--cm-accent);border-color:transparent;}
+.cmRoot .switch .knob{position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;
+  background:#fff;transition:.15s left;}
+.cmRoot .switch.on .knob{left:20px;}
+.cmRoot .setrow{display:flex;align-items:flex-start;gap:14px;padding:13px 0;border-top:1px solid var(--cm-line);}
+.cmRoot .setrow.first{border-top:none;padding-top:2px;}
+.cmRoot .setrow .txt{flex:1;min-width:0;}
+.cmRoot .setrow .lab{font-weight:650;font-size:14px;}
+.cmRoot .schead{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
+.cmRoot .modeseg{display:inline-flex;background:var(--cm-panel-2);border:1px solid var(--cm-line-2);border-radius:10px;padding:3px;}
+.cmRoot .modeseg button{background:none;border:none;border-radius:8px;padding:7px 14px;font-size:12.5px;
+  font-weight:650;color:var(--cm-ink-2);cursor:pointer;}
+.cmRoot .modeseg button.on{background:var(--cm-accent);color:var(--cm-accent-ink);}
+.cmRoot .linkbtn{background:none;border:none;color:var(--cm-accent);font-weight:600;font-size:12px;cursor:pointer;padding:0;}
+.cmRoot .week{display:flex;flex-direction:column;gap:7px;margin-top:2px;}
+.cmRoot .ruler,.cmRoot .dayrow{display:grid;grid-template-columns:44px 42px 1fr minmax(214px,auto);align-items:center;gap:12px;}
+.cmRoot .ruler .rt{grid-column:3;display:flex;justify-content:space-between;font-size:10.5px;color:var(--cm-muted);}
+.cmRoot .dayrow.off{opacity:.45;}
+.cmRoot .dayrow .dn{font-size:13px;font-weight:600;color:var(--cm-ink-2);}
+.cmRoot .track{position:relative;height:26px;border-radius:8px;background:#0e1013;border:1px solid var(--cm-line);overflow:hidden;}
+.cmRoot .track .tick{position:absolute;top:0;bottom:0;width:1px;background:var(--cm-line);}
+.cmRoot .band{position:absolute;top:0;bottom:0;background:linear-gradient(180deg,#5fb0ff,#3d86e0);opacity:.9;}
+.cmRoot .ctl{display:flex;gap:8px;align-items:center;justify-content:flex-end;}
+.cmRoot .timesel{background:var(--cm-panel-2);border:1px solid var(--cm-line);border-radius:8px;color:var(--cm-ink);
+  font-size:12.5px;padding:6px 8px;font-variant-numeric:tabular-nums;cursor:pointer;}
+.cmRoot .timesel:disabled{opacity:.5;cursor:default;}
+.cmRoot .to{color:var(--cm-muted);font-size:12px;}
+.cmRoot .savebar{position:sticky;bottom:16px;margin-top:18px;display:flex;align-items:center;gap:12px;
+  background:rgba(20,22,25,.94);backdrop-filter:blur(8px);border:1px solid var(--cm-line-2);
+  border-radius:12px;padding:12px 16px;box-shadow:var(--cm-shadow);}
+.cmRoot .savebar .grow{flex:1;}
 </style>
 
 <script type="text/javascript">
-    (function () {
-        var page = document.querySelector('#CleanMediaReviewPage');
-        var views = {
-            library: page.querySelector('#CmLibraryView'),
-            items: page.querySelector('#CmItemsView'),
-            film: page.querySelector('#CmFilmView')
-        };
-        var message = page.querySelector('#CmMessage');
+(function () {
+    var pluginId = '6f1d0a2e-6c2b-4a1f-9a6d-1c5b2f8e4d31';
+    var page = document.querySelector('#CleanMediaReviewPage');
 
-        var state = {
-            items: [], statuses: {}, film: null, segments: [], poll: null,
-            filmStatus: null, workerUrl: ''
-        };
+    // ---- type / engine system -------------------------------------------
+    var TYPES = {
+        subtitles: { label: 'Profanity · subtitles', tag: 'Subtitles', color: '#e0b344', glyph: '💬', kind: 'analyze', engine: 'subtitles' },
+        whisper:   { label: 'Profanity · whisper',   tag: 'Whisper',   color: '#f0885a', glyph: '🎙', kind: 'analyze', engine: 'whisper' },
+        vlm:       { label: 'Visual scenes',         tag: 'Visual',    color: '#b585ff', glyph: '👁', kind: 'analyze', engine: 'vlm' },
+        render:    { label: 'Render clean copy',     tag: 'Render',    color: '#37c6cf', glyph: '🎬', kind: 'render', engine: 'render' }
+    };
+    var ORDER = ['subtitles', 'whisper', 'vlm', 'render'];
+    function typeFor(engine) { return TYPES[engine] ? engine : 'render'; }
 
-        // -- helpers ---------------------------------------------------------
+    var state = {
+        jobs: [], workerUrl: '', paused: false, poll: null,
+        hidden: {},                 // type -> true when its rows are toggled off
+        addEngine: 'subtitles',     // selected pass type in Add to queue
+        addView: null,              // null = collections; else a collection {id,name}
+        collections: [], films: [], searchTerm: '', dirty: false
+    };
 
-        function show(name) {
-            Object.keys(views).forEach(function (k) {
-                views[k].style.display = k === name ? '' : 'none';
-            });
-            if (name !== 'film') { stopRenderPoll(); stopFilmPoll(); }
-            if (name !== 'items') { stopPolling(); }
-            message.textContent = '';
-        }
-
-        function escapeHtml(s) {
-            return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
-                return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
-            });
-        }
-
-        function imageUrl(item) {
-            if (!item.ImageTags || !item.ImageTags.Primary) { return ''; }
-            return ApiClient.getImageUrl(item.Id, {
-                type: 'Primary', maxWidth: 300, tag: item.ImageTags.Primary
-            });
-        }
-
-        var ENGINE_LABELS = {
-            subtitles: 'Profanity (subtitles)',
-            whisper: 'Profanity (whisper)',
-            vlm: 'Visual scenes',
-            render: 'Rendering'
-        };
-        function engineLabel(e) { return ENGINE_LABELS[e] || e || 'analysis'; }
-
-        function bar(pct) {
-            pct = Math.max(0, Math.min(100, Math.round(pct)));
-            return '<div class="cmBar"><div class="cmBarFill" style="width:'
-                + pct + '%"></div></div>';
-        }
-
-        // The active analysis/render passes for one film, as jobs[] (with the
-        // one-job `job` as a fallback for an older worker).
-        function activeJobs(s) {
-            var jobs = (s && s.jobs) || (s && s.job ? [s.job] : []);
-            return jobs.filter(function (j) {
-                return j.status === 'running' || j.status === 'rendering'
-                    || j.status === 'queued';
-            });
-        }
-
-        // Engines an "analyze everything" would still run for a film: the
-        // profanity slot (subtitles) plus the visual slot (vlm), minus any
-        // already done or in flight. Either profanity engine (subtitles or
-        // whisper) satisfies the profanity slot, so a film already run with
-        // whisper is not re-run with subtitles.
-        var EVERYTHING = ['subtitles', 'vlm'];
-        function neededEngines(s) {
-            s = s || {};
-            var done = {};
-            (s.enginesDone || []).forEach(function (e) { done[e] = true; });
-            var inflight = {};
-            activeJobs(s).forEach(function (j) { if (j.engine) { inflight[j.engine] = true; } });
-            var need = [];
-            var profanity = done.subtitles || done.whisper
-                || inflight.subtitles || inflight.whisper;
-            if (!profanity) { need.push('subtitles'); }
-            if (!done.vlm && !inflight.vlm) { need.push('vlm'); }
-            return need;
-        }
-
-        // ETA from the rate of progress across polls, smoothed. The worker only
-        // reports a fraction, so we estimate the remaining time client-side —
-        // which also means it works without waiting for a worker restart. Needs
-        // a couple of ticks of movement before it can say anything.
-        var etaState = {};  // jobId -> { t, p, rate }
-        function etaFor(job) {
-            if (!job || (job.status !== 'running' && job.status !== 'rendering')) { return ''; }
-            var now = Date.now();
-            var p = job.progress || 0;
-            var st = etaState[job.id];
-            if (st && p > st.p && now > st.t) {
-                var inst = (p - st.p) / ((now - st.t) / 1000);  // fraction per second
-                st.rate = st.rate ? st.rate * 0.7 + inst * 0.3 : inst;
-            }
-            if (!st) { st = etaState[job.id] = { rate: 0 }; }
-            st.t = now; st.p = p;
-            if (!st.rate || p >= 1) { return ''; }
-            var secs = (1 - p) / st.rate;
-            return isFinite(secs) && secs > 0 ? fmtEta(secs) : '';
-        }
-
-        function fmtEta(secs) {
-            secs = Math.round(secs);
-            if (secs < 60) { return '~' + secs + 's left'; }
-            var m = Math.round(secs / 60);
-            if (m < 60) { return '~' + m + 'm left'; }
-            var h = Math.floor(m / 60);
-            m = m % 60;
-            return '~' + h + 'h ' + (m ? m + 'm ' : '') + 'left';
-        }
-
-        function api(method, path, query, body) {
-            var options = {
-                type: method,
-                url: ApiClient.getUrl('CleanMedia/' + path, query || {}),
-                dataType: 'json'
-            };
-            if (body !== undefined) {
-                options.data = JSON.stringify(body);
-                options.contentType = 'application/json';
-            }
-            return ApiClient.ajax(options);
-        }
-
-        // -- libraries -------------------------------------------------------
-
-        function loadLibraries() {
-            return ApiClient.getJSON(ApiClient.getUrl('Library/MediaFolders')).then(function (res) {
-                var libs = (res.Items || []).filter(function (l) {
-                    return l.CollectionType === 'movies' || l.CollectionType === 'tvshows'
-                        || !l.CollectionType;
-                });
-                var picker = page.querySelector('#CmLibraryPicker');
-                picker.innerHTML = '<div class="cmGrid">' + libs.map(function (l) {
-                    return '<div class="cmCard" data-id="' + l.Id + '" data-name="'
-                        + escapeHtml(l.Name) + '">'
-                        + '<img src="' + imageUrl(l) + '" loading="lazy" />'
-                        + '<div class="cmName">' + escapeHtml(l.Name) + '</div></div>';
-                }).join('') + '</div>';
-
-                picker.querySelectorAll('.cmCard').forEach(function (card) {
-                    card.addEventListener('click', function () {
-                        openLibrary(card.getAttribute('data-id'), card.getAttribute('data-name'));
-                    });
-                });
-            });
-        }
-
-        // -- one library -----------------------------------------------------
-
-        function openLibrary(parentId, name) {
-            show('items');
-            page.querySelector('#CmLibraryName').textContent = name;
-            page.querySelector('#CmItems').innerHTML =
-                '<p class="fieldDescription">Loading&hellip;</p>';
-
-            ApiClient.getJSON(ApiClient.getUrl('Items', {
-                ParentId: parentId,
-                IncludeItemTypes: 'Movie,Episode',
-                Recursive: true,
-                Fields: 'Path',
-                SortBy: 'SortName',
-                Limit: 500
-            })).then(function (res) {
-                state.items = res.Items || [];
-                state.statuses = {};
-                if (!state.items.length) {
-                    page.querySelector('#CmItems').innerHTML =
-                        '<p class="fieldDescription">No videos here.</p>';
-                    return;
-                }
-                renderItems();
-                loadStatus();
-            });
-        }
-
-        function visibleItems() {
-            var filter = page.querySelector('#CmFilter').value;
-            return state.items.filter(function (item) {
-                var s = state.statuses[item.Id];
-                if (filter === 'all' || !s) { return filter === 'all'; }
-                if (filter === 'pending') { return s.analyzed && s.pending > 0; }
-                if (filter === 'unanalyzed') { return !s.analyzed; }
-                if (filter === 'done') { return s.analyzed && s.pending === 0; }
-                return true;
-            });
-        }
-
-        function renderItems() {
-            var items = visibleItems();
-            page.querySelector('#CmItems').innerHTML = items.length
-                ? '<div class="cmGrid">' + items.map(function (i) {
-                    return '<div class="cmCard" data-id="' + i.Id + '">'
-                        + '<img src="' + imageUrl(i) + '" loading="lazy" />'
-                        + '<div class="cmName">' + escapeHtml(i.Name) + '</div>'
-                        + '<div class="cmState cmNone" id="cmState-' + i.Id + '">'
-                        + stateText(state.statuses[i.Id]).text + '</div>'
-                        + '<div class="cmCardActions" id="cmActions-' + i.Id + '"></div></div>';
-                }).join('') + '</div>'
-                : '<p class="fieldDescription">Nothing matches that filter.</p>';
-
-            page.querySelectorAll('#CmItems .cmCard').forEach(function (card) {
-                var id = card.getAttribute('data-id');
-                card.addEventListener('click', function () { openFilm(id); });
-                var s = state.statuses[id];
-                if (s) { applyState(page.querySelector('#cmState-' + id), s); cardActions(id, s); }
-            });
-        }
-
-        // Per-card actions on the grid: Cancel while a pass is in flight, or
-        // Analyze (for everything still outstanding) otherwise. The buttons sit
-        // over the card, so stop the click from also opening the film view.
-        function cardActions(id, s) {
-            var el = page.querySelector('#cmActions-' + id);
-            if (!el) { return; }
-            var active = activeJobs(s || {});
-            if (active.length) {
-                el.innerHTML = '<button type="button" class="cmCardBtn cmCancel">Cancel</button>';
-                el.querySelector('button').addEventListener('click', function (ev) {
-                    ev.stopPropagation();
-                    cancelFilm(id);
-                });
-                return;
-            }
-            var need = neededEngines(s);
-            if (!need.length) { el.innerHTML = ''; return; }  // nothing left to run
-            var label = need.length === EVERYTHING.length ? 'Analyze all' : 'Analyze';
-            el.innerHTML = '<button type="button" class="cmCardBtn cmAnalyze">'
-                + label + '</button>';
-            el.querySelector('button').addEventListener('click', function (ev) {
-                ev.stopPropagation();
-                analyzeEverything(id);
-            });
-        }
-
-        // One-action "analyze for everything": queue every engine a film still
-        // needs (profanity + visual) in one click, from the grid card.
-        function analyzeEverything(id) {
-            var item = state.items.filter(function (i) { return i.Id === id; })[0];
-            if (!item) { return; }
-            var engines = neededEngines(state.statuses[id]);
-            if (!engines.length) { engines = EVERYTHING.slice(); }
-            var out = page.querySelector('#CmQueueResult');
-            var run = function () {
-                out.textContent = 'Queuing ' + item.Name + '…';
-                // One job per engine; the worker runs them in order.
-                Promise.all(engines.map(function (engine) {
-                    return api('POST', 'Analyze', {}, { itemIds: [id], engine: engine });
-                })).then(function (results) {
-                    var queued = 0;
-                    results.forEach(function (res) {
-                        (res.queued || []).forEach(function (q) { if (q.jobId) { queued++; } });
-                    });
-                    out.textContent = queued
-                        ? 'Queued ' + item.Name + ' (' + engines.join(' + ') + ').'
-                        : 'Could not queue — the worker could not find this file.';
-                    loadStatus();
-                }).catch(function (err) { out.textContent = 'Could not queue: ' + err; });
-            };
-            // The visual pass is GPU-heavy and takes hours; guard it.
-            if (engines.indexOf('vlm') !== -1) {
-                confirmThen('Analyze "' + item.Name + '" for everything (profanity + visual)? '
-                    + 'The visual pass is GPU-heavy and can take hours.', run);
-            } else { run(); }
-        }
-
-        // Cancel just this film's in-flight passes (each active job), from the
-        // grid card — the bulk "Cancel all" stops the whole library instead.
-        function cancelFilm(id) {
-            var jobs = activeJobs(state.statuses[id] || {});
-            if (!jobs.length) { return; }
-            var item = state.items.filter(function (i) { return i.Id === id; })[0];
-            var out = page.querySelector('#CmQueueResult');
-            out.textContent = 'Cancelling ' + (item ? item.Name : '') + '…';
-            Promise.all(jobs.map(function (j) {
-                return api('DELETE', 'Jobs/' + encodeURIComponent(j.id), {});
-            })).then(function () {
-                out.textContent = 'Cancelled ' + (item ? item.Name : 'analysis') + '.';
-                loadStatus();
-            }).catch(function (err) { out.textContent = 'Could not cancel: ' + err; });
-        }
-
-        function stateText(s) {
-            if (!s) { return { cls: 'cmNone', text: 'checking&hellip;' }; }
-            var active = activeJobs(s);
-            if (active.length) {
-                // One line per pass, each with its own percent — so a running
-                // visual pass and a queued profanity pass both show, rather
-                // than one hiding behind the other.
-                var lines = active.map(function (j) {
-                    if (j.status === 'queued') {
-                        return '<div class="cmJobLine cmQueued">'
-                            + escapeHtml(engineLabel(j.engine)) + ' — queued</div>';
-                    }
-                    var pct = Math.round((j.progress || 0) * 100);
-                    var eta = etaFor(j);
-                    return '<div class="cmJobLine">' + escapeHtml(engineLabel(j.engine))
-                        + ' ' + pct + '%'
-                        + (eta ? ' · ' + eta : '')
-                        + (j.stage ? ' — ' + escapeHtml(j.stage) : '')
-                        + bar(pct) + '</div>';
-                });
-                return { cls: 'cmRunning', text: lines.join('') };
-            }
-            if (s.job && s.job.status === 'failed') {
-                return { cls: 'cmFail', text: 'analysis failed' };
-            }
-            if (!s.analyzed) { return { cls: 'cmNone', text: 'not analyzed' }; }
-            if (s.pending > 0) {
-                return { cls: 'cmPending', text: s.pending + ' of ' + s.total + ' to review' };
-            }
-            return {
-                cls: 'cmDone',
-                text: 'reviewed — ' + s.approved + ' approved, ' + s.rejected + ' ignored'
-            };
-        }
-
-        function applyState(el, s) {
-            if (!el) { return; }
-            var d = stateText(s);
-            el.className = 'cmState ' + d.cls;
-            el.innerHTML = d.text;
-        }
-
-        function loadStatus() {
-            var ids = state.items.map(function (i) { return i.Id; });
-            return api('POST', 'Status', {}, { itemIds: ids }).then(function (res) {
-                if (res.unreachable) {
-                    message.textContent = 'Could not reach the worker. Check the Worker URL '
-                        + 'on the Clean Media settings page.';
-                    // Leaving the cards on "checking…" reads as "still working";
-                    // say plainly that the worker is down instead.
-                    state.items.forEach(function (i) {
-                        var el = page.querySelector('#cmState-' + i.Id);
-                        if (el) { el.className = 'cmState cmFail'; el.innerHTML = 'worker unreachable'; }
-                        var act = page.querySelector('#cmActions-' + i.Id);
-                        if (act) { act.innerHTML = ''; }  // no jobs known — no buttons
-                    });
-                    return;
-                }
-                (res.items || []).forEach(function (s) {
-                    state.statuses[s.itemId] = s;
-                    applyState(page.querySelector('#cmState-' + s.itemId), s);
-                    cardActions(s.itemId, s);
-                });
-                schedulePoll();
-            }).catch(function (err) {
-                message.textContent = 'Could not load review status: ' + err;
-            });
-        }
-
-        // Only poll while something is actually moving, so an idle dashboard
-        // is not calling the worker every few seconds forever.
-        function schedulePoll() {
-            stopPolling();
-            var busy = Object.keys(state.statuses).some(function (id) {
-                return activeJobs(state.statuses[id]).length > 0;
-            });
-            // Only offer "Cancel all" while something is actually queued/running.
-            var cancelBtn = page.querySelector('#CmCancelAll');
-            if (cancelBtn) { cancelBtn.style.display = busy ? '' : 'none'; }
-            if (busy && views.items.style.display !== 'none') {
-                state.poll = setTimeout(loadStatus, 5000);
-            }
-        }
-
-        function stopPolling() {
-            if (state.poll) { clearTimeout(state.poll); state.poll = null; }
-        }
-
-        // -- one film --------------------------------------------------------
-
-        function openFilm(itemId) {
-            var item = state.items.filter(function (i) { return i.Id === itemId; })[0];
-            if (!item) { return; }
-            stopFilmPoll();
-            stopRenderPoll();
-            state.film = item;
-            state.filmStatus = null;
-            show('film');
-            page.querySelector('#CmFilmName').textContent = item.Name;
-            page.querySelector('#CmAnalyzeResult').textContent = '';
-            page.querySelector('#CmRenderResult').textContent = '';
-            page.querySelector('#CmFilmJobs').innerHTML = '';
-
-            // This page is a launcher only — the per-finding review (mute/blur/
-            // skip, timing) lives on the worker review page. We still fetch the
-            // findings to drive the summary count, the render button state, and
-            // which engines are already done.
-            loadFindings();
-            pollFilmProgress(itemId, false);
-        }
-
-        function stopFilmPoll() {
-            if (state.filmPoll) { clearTimeout(state.filmPoll); state.filmPoll = null; }
-        }
-
-        function stopRenderPoll() {
-            if (state.renderPoll) { clearTimeout(state.renderPoll); state.renderPoll = null; }
-        }
-
-        // Draw one line per in-flight pass on the open film — each with its own
-        // engine label and percent — into the film-view progress area.
-        function renderFilmJobs(jobs) {
-            var el = page.querySelector('#CmFilmJobs');
-            if (!el) { return; }
-            var active = activeJobs({ jobs: jobs });
-            el.innerHTML = active.map(function (j) {
-                if (j.status === 'queued') {
-                    return '<div class="cmJobLine cmQueued">'
-                        + escapeHtml(engineLabel(j.engine)) + ' — queued</div>';
-                }
-                var pct = Math.round((j.progress || 0) * 100);
-                var eta = etaFor(j);
-                return '<div class="cmJobLine">' + escapeHtml(engineLabel(j.engine))
-                    + ' ' + pct + '%' + (eta ? ' · ' + eta : '')
-                    + (j.stage ? ' — ' + escapeHtml(j.stage) : '')
-                    + bar(pct) + '</div>';
-            }).join('');
-        }
-
-        // Disable analysis choices that are pointless: an engine already
-        // running/queued for this film, or one that has already finished. Keeps
-        // the reviewer from re-queuing a pass they've already done.
-        function updateEngineControls() {
-            var s = state.filmStatus || {};
-            var inflight = {};
-            activeJobs(s).forEach(function (j) { if (j.engine) { inflight[j.engine] = j.status; } });
-            var done = {};
-            (s.enginesDone || []).forEach(function (e) { done[e] = true; });
-            // Also treat an engine that already produced findings as done, so
-            // this works even before the worker reports enginesDone.
-            (state.segments || []).forEach(function (seg) {
-                if (seg.engine && seg.engine !== 'manual') { done[seg.engine] = true; }
-            });
-
-            page.querySelectorAll('.cmEngine').forEach(function (cb) {
-                var span = cb.parentNode.querySelector('span');
-                if (span && !span.getAttribute('data-base')) {
-                    span.setAttribute('data-base', span.textContent);
-                }
-                var base = span ? span.getAttribute('data-base') : '';
-                var suffix = '', blocked = false;
-                if (inflight[cb.value]) {
-                    suffix = inflight[cb.value] === 'queued' ? ' — queued' : ' — running';
-                    blocked = true;
-                } else if (done[cb.value]) {
-                    suffix = ' — done';
-                    blocked = true;
-                }
-                cb.disabled = blocked;
-                if (blocked) { cb.checked = false; }
-                if (span) { span.textContent = base + suffix; }
-                if (cb.parentNode) { cb.parentNode.style.opacity = blocked ? '.55' : ''; }
-            });
-            refreshAnalyzeButton();
-        }
-
-        // Analyze is enabled only when at least one still-available engine is
-        // ticked — so it can't be clicked with nothing selected, or with only
-        // already-done/running engines.
-        function refreshAnalyzeButton() {
-            var anyChecked = Array.prototype.slice
-                .call(page.querySelectorAll('.cmEngine'))
-                .some(function (cb) { return !cb.disabled && cb.checked; });
-            var btn = page.querySelector('#CmAnalyzeFilm');
-            if (btn) { btn.disabled = !anyChecked; }
-        }
-
-        // Poll the open film's analysis/render progress, showing each pass and
-        // loading the findings the moment the last one finishes — no trip back
-        // to the grid. `wasActive` means a pass was running last tick, so its
-        // disappearance is a completion worth reloading findings for.
-        function pollFilmProgress(filmId, wasActive) {
-            if (!state.film || state.film.Id !== filmId) { return; }
-            api('POST', 'Status', {}, { itemIds: [filmId] }).then(function (res) {
-                if (!state.film || state.film.Id !== filmId) { return; }  // navigated away
-                var out = page.querySelector('#CmAnalyzeResult');
-                if (res.unreachable) {
-                    out.textContent = 'Worker unreachable — check the Worker URL.';
-                    return;
-                }
-                var s = (res.items || [])[0] || {};
-                state.filmStatus = s;
-                var jobs = s.jobs || (s.job ? [s.job] : []);
-                var active = activeJobs(s);
-                renderFilmJobs(jobs);
-                updateEngineControls();
-                if (active.length) {
-                    out.textContent = '';  // the per-pass lines say it better
-                    state.filmPoll = setTimeout(function () {
-                        pollFilmProgress(filmId, true);
-                    }, 3000);
-                    return;
-                }
-                var failed = jobs.filter(function (j) { return j.status === 'failed'; })[0];
-                out.textContent = failed ? 'Analysis failed.' : '';
-                if (wasActive) { loadFindings(); }  // a pass just finished
-            }).catch(function () {
-                state.filmPoll = setTimeout(function () {
-                    pollFilmProgress(filmId, wasActive);
-                }, 5000);
-            });
-        }
-
-        function confirmThen(text, onOk) {
-            if (window.require) {
-                window.require(['confirm'], function (confirm) {
-                    confirm({ title: 'Confirm', text: text, confirmText: 'Yes', cancelText: 'Cancel' })
-                        .then(onOk, function () { /* cancelled */ });
-                });
-            } else if (window.confirm(text)) { onOk(); }
-        }
-
-        // Fetch the film's findings to drive the summary count, the render
-        // button, and engine-done state. The findings themselves are reviewed
-        // on the worker review page, not listed here.
-        function loadFindings() {
-            return api('GET', 'Findings', { itemId: state.film.Id }).then(function (res) {
-                if (res.unreachable) {
-                    state.segments = [];
-                    message.textContent = 'Could not reach the worker — check the Worker URL '
-                        + 'on the Clean Media settings page.';
-                } else {
-                    state.segments = res.segments || [];
-                }
-                updateProgress();
-            }).catch(function (err) {
-                message.textContent = 'Could not load findings: ' + err;
-            });
-        }
-
-        function updateProgress() {
-            var decided = state.segments.filter(function (s) {
-                return s.approved !== null && s.approved !== undefined;
-            }).length;
-            page.querySelector('#CmFilmProgress').textContent = state.segments.length
-                ? decided + ' of ' + state.segments.length + ' decided'
-                : '';
-            // The worker review page only exists once the film is analyzed.
-            var hasFindings = state.segments.length > 0;
-            var review = page.querySelector('#CmOpenReview');
-            if (review) {
-                review.style.display = (hasFindings && state.workerUrl && state.film) ? '' : 'none';
-            }
-            updateRenderNote();
-            updateEngineControls();
-        }
-
-        // What a "Render clean copy" would act on, kept in step with the
-        // approvals. Only mutes and blurs need a render; skips already work
-        // live, so with nothing muted/blurred approved the button is disabled.
-        function updateRenderNote() {
-            var counts = { mute: 0, blur: 0, skip: 0 };
-            state.segments.forEach(function (s) {
-                if (s.approved === true && counts[s.recommendedAction] !== undefined) {
-                    counts[s.recommendedAction]++;
-                }
-            });
-            var note = page.querySelector('#CmRenderNote');
-            var btn = page.querySelector('#CmRender');
-            if (!note || !btn) { return; }
-            // Skips need no render — Jellyfin applies them live. Only mutes and
-            // blurs require a clean copy, so the button gates on those.
-            if (!(counts.mute || counts.blur)) {
-                btn.disabled = true;
-                note.textContent = counts.skip
-                    ? 'Nothing to render: your ' + counts.skip + ' approved skip'
-                        + (counts.skip === 1 ? '' : 's') + ' already work live during playback. '
-                        + 'A clean copy is only needed to mute or blur.'
-                    : 'A clean copy is only needed for mutes and blurs (skips work live). '
-                        + 'Set findings to mute/blur and approve them on the review page.';
-                return;
-            }
-            btn.disabled = false;
-            var parts = [];
-            if (counts.mute) { parts.push(counts.mute + ' mute' + (counts.mute === 1 ? '' : 's')); }
-            if (counts.blur) { parts.push(counts.blur + ' blur' + (counts.blur === 1 ? '' : 's')); }
-            if (counts.skip) { parts.push(counts.skip + ' skip' + (counts.skip === 1 ? '' : 's')); }
-            note.textContent = 'Writes a new file applying ' + parts.join(', ')
-                + '. Needed because Jellyfin can’t mute or blur live (skips it can). '
-                + 'The original is untouched.';
-        }
-
-        page.querySelector('#CmOpenReview').addEventListener('click', function () {
-            if (!state.workerUrl || !state.film) { return; }
-            // The worker resolves a film by file name, so its own mount path
-            // works. Opens the worker's standalone review page in a new tab
-            // (a full navigation, so not subject to the browser's CORS rules).
-            var path = state.film.Path || state.film.Name;
-            window.open(state.workerUrl + '/api/review?path=' + encodeURIComponent(path), '_blank');
+    // ---- generic helpers -------------------------------------------------
+    function api(method, path, query, body) {
+        var options = { type: method, url: ApiClient.getUrl('CleanMedia/' + path, query || {}), dataType: 'json' };
+        if (body !== undefined) { options.data = JSON.stringify(body); options.contentType = 'application/json'; }
+        return ApiClient.ajax(options);
+    }
+    function esc(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
         });
+    }
+    function hex(c, a) { var n = parseInt(c.slice(1), 16); return 'rgba(' + (n >> 16 & 255) + ',' + (n >> 8 & 255) + ',' + (n & 255) + ',' + a + ')'; }
+    function baseName(p) { return String(p || '').split(/[\\/]/).pop(); }
+    function gripSVG() {
+        return '<svg width="12" height="18" viewBox="0 0 12 18"><g fill="currentColor">'
+            + [3, 9, 15].map(function (y) { return '<circle cx="3" cy="' + y + '" r="1.6"/><circle cx="9" cy="' + y + '" r="1.6"/>'; }).join('')
+            + '</g></svg>';
+    }
+    function typeTag(t) { var d = TYPES[t]; return '<span class="type-tag" style="background:' + hex(d.color, .16) + ';color:' + d.color + '">' + d.tag + '</span>'; }
 
-        page.querySelector('#CmAnalyzeFilm').addEventListener('click', function () {
-            if (!state.film) { return; }
-            var film = state.film;
-            var engines = Array.prototype.slice
-                .call(page.querySelectorAll('.cmEngine'))
-                .filter(function (c) { return c.checked; })
-                .map(function (c) { return c.value; });
-            var out = page.querySelector('#CmAnalyzeResult');
-            if (!engines.length) { out.textContent = 'Pick at least one analysis type.'; return; }
-            var run = function () {
-                out.textContent = 'Queuing…';
-                // One job per selected engine — the worker runs them in order.
-                Promise.all(engines.map(function (engine) {
-                    return api('POST', 'Analyze', {}, { itemIds: [film.Id], engine: engine });
-                })).then(function (results) {
-                    var queued = 0;
-                    results.forEach(function (res) {
-                        (res.queued || []).forEach(function (q) { if (q.jobId) { queued++; } });
-                    });
-                    if (!queued) {
-                        out.textContent = 'Could not queue — the worker could not find this file '
-                            + 'under its media roots.';
-                        return;
-                    }
-                    stopFilmPoll();
-                    pollFilmProgress(film.Id, true);
-                }).catch(function (err) { out.textContent = 'Could not queue: ' + err; });
-            };
-            // The visual pass is GPU-heavy and takes hours; guard that one.
-            if (engines.indexOf('vlm') !== -1) {
-                confirmThen('Visual analysis of "' + film.Name + '" can take hours and is '
-                    + 'GPU-heavy. Start the selected analyses now?', run);
+    // ---- job classification (one GPU: one active job at a time) ----------
+    function isRenderingActive(j) {
+        return j.status === 'rendering' && ((j.progress || 0) > 0 || (j.stage && j.stage.indexOf('queued') === -1));
+    }
+    function isActive(j) { return j.status === 'running' || isRenderingActive(j); }
+    function isPending(j) { return j.status === 'queued' || (j.status === 'rendering' && !isRenderingActive(j)); }
+    function isTerminal(j) { return ['completed', 'failed', 'cancelled', 'rendered'].indexOf(j.status) !== -1; }
+    function byPos(a, b) {
+        var pa = a.queuePosition == null ? Infinity : a.queuePosition;
+        var pb = b.queuePosition == null ? Infinity : b.queuePosition;
+        if (pa !== pb) { return pa - pb; }
+        return String(a.createdAt || '').localeCompare(String(b.createdAt || ''));
+    }
+    function visible(j) { return !state.hidden[typeFor(j.engine)]; }
+
+    // ---- ETA (client-side, smoothed) -------------------------------------
+    var etaState = {};
+    function etaFor(job) {
+        if (!job || !isActive(job)) { return ''; }
+        var now = Date.now(), p = job.progress || 0, st = etaState[job.id];
+        if (st && p > st.p && now > st.t) {
+            var inst = (p - st.p) / ((now - st.t) / 1000);
+            st.rate = st.rate ? st.rate * 0.7 + inst * 0.3 : inst;
+        }
+        if (!st) { st = etaState[job.id] = { rate: 0 }; }
+        st.t = now; st.p = p;
+        if (!st.rate || p >= 1) { return ''; }
+        var secs = (1 - p) / st.rate;
+        return isFinite(secs) && secs > 0 ? fmtEta(secs) : '';
+    }
+    function fmtEta(secs) {
+        secs = Math.round(secs);
+        if (secs < 60) { return '~' + secs + 's left'; }
+        var m = Math.round(secs / 60);
+        if (m < 60) { return '~' + m + 'm left'; }
+        var h = Math.floor(m / 60); m = m % 60;
+        return '~' + h + 'h ' + (m ? m + 'm ' : '') + 'left';
+    }
+
+    // ======================================================================
+    //  QUEUE
+    // ======================================================================
+    function loadJobs() {
+        return api('GET', 'Jobs', {}).then(function (res) {
+            if (res.unreachable) {
+                page.querySelector('#CmQueueMsg').textContent = 'Worker unreachable — check the Worker URL on the Settings tab.';
+                state.jobs = [];
+                renderQueue();
+                return;
+            }
+            page.querySelector('#CmQueueMsg').textContent = '';
+            state.jobs = res.jobs || [];
+            renderQueue();
+            schedulePoll();
+        }).catch(function (err) {
+            page.querySelector('#CmQueueMsg').textContent = 'Could not load the queue: ' + err;
+        });
+    }
+
+    function classify() {
+        var jobs = state.jobs.filter(visible);
+        var pending = jobs.filter(isPending).sort(byPos);
+        var running = jobs.filter(function (j) { return j.status === 'running'; });
+        var active, upnext;
+        if (running.length) {
+            active = running; upnext = pending;
+        } else {
+            var renderingActive = jobs.filter(isRenderingActive);
+            if (renderingActive.length) {
+                active = renderingActive; upnext = pending;
+            } else if (pending.length && !state.paused) {
+                active = [pending[0]]; upnext = pending.slice(1);
             } else {
-                run();
+                active = []; upnext = pending;
             }
-        });
-
-        // One click that queues every outstanding engine (profanity + visual):
-        // tick the still-available engines and run the same Analyze flow, so an
-        // already-done or running engine is left alone rather than re-queued.
-        page.querySelector('#CmAnalyzeEverything').addEventListener('click', function () {
-            if (!state.film) { return; }
-            var want = { subtitles: true, vlm: true };
-            page.querySelectorAll('.cmEngine').forEach(function (cb) {
-                cb.checked = !cb.disabled && !!want[cb.value];
-            });
-            refreshAnalyzeButton();
-            var btn = page.querySelector('#CmAnalyzeFilm');
-            if (btn.disabled) {
-                page.querySelector('#CmAnalyzeResult').textContent =
-                    'Already analyzed for everything.';
-                return;
-            }
-            btn.click();
-        });
-
-        // -- render a clean copy ---------------------------------------------
-
-        page.querySelector('#CmRender').addEventListener('click', function () {
-            if (!state.film) { return; }
-            var film = state.film;
-            var out = page.querySelector('#CmRenderResult');
-            confirmThen(
-                'Render a clean copy of "' + film.Name + '"? It writes a new file in a '
-                + '"cleaned" folder beside the original, applying every approved mute, blur '
-                + 'and skip. A mute-only copy is quick; an approved blur or skip re-encodes '
-                + 'the video and takes longer. The original file is never modified.',
-                function () {
-                    stopRenderPoll();
-                    out.textContent = 'Starting render…';
-                    api('POST', 'Render', {}, { itemId: film.Id }).then(function (res) {
-                        if (!state.film || state.film.Id !== film.Id) { return; }  // navigated away
-                        if (res.unreachable) {
-                            out.textContent = 'Worker unreachable — check the Worker URL.';
-                            return;
-                        }
-                        if (res.error) { out.textContent = res.error; return; }
-                        if (!res.jobId) { out.textContent = 'Could not start the render.'; return; }
-                        pollRender(res.jobId, film.Id);
-                    }).catch(function (err) {
-                        out.textContent = 'Could not start the render: ' + err;
-                    });
-                });
-        });
-
-        // Poll one render job to completion, showing progress and, when done,
-        // where the clean copy was written. Bails if the reviewer navigates away.
-        function pollRender(jobId, filmId) {
-            var out = page.querySelector('#CmRenderResult');
-            api('GET', 'RenderStatus', { jobId: jobId }).then(function (res) {
-                if (!state.film || state.film.Id !== filmId) { return; }
-                if (res.unreachable) {
-                    out.textContent = 'Worker unreachable during render — check the Worker URL.';
-                    return;
-                }
-                if (res.status === 'rendered') {
-                    out.textContent = 'Clean copy written'
-                        + (res.renderedPath ? ' → ' + res.renderedPath : '') + '.';
-                    return;
-                }
-                if (res.status === 'failed') {
-                    var why = res.error ? String(res.error).split('\n')[0] : '';
-                    out.textContent = 'Render failed' + (why ? ': ' + why : '') + '.';
-                    return;
-                }
-                if (res.status === 'cancelled') { out.textContent = 'Render cancelled.'; return; }
-                var pct = Math.round((res.progress || 0) * 100);
-                out.textContent = 'Rendering ' + pct + '%'
-                    + (res.stage ? ' — ' + res.stage : '');
-                state.renderPoll = setTimeout(function () { pollRender(jobId, filmId); }, 2000);
-            }).catch(function () {
-                state.renderPoll = setTimeout(function () { pollRender(jobId, filmId); }, 4000);
-            });
         }
-
-        // -- queueing --------------------------------------------------------
-
-        function doQueue(items, engine) {
-            var out = page.querySelector('#CmQueueResult');
-            out.textContent = 'Queueing ' + items.length + '…';
-
-            api('POST', 'Analyze', {}, {
-                itemIds: items.map(function (i) { return i.Id; }),
-                engine: engine
-            }).then(function (res) {
-                var queued = (res.queued || []).filter(function (q) { return q.jobId; });
-                out.textContent = 'Queued ' + queued.length + ' of ' + items.length + '.';
-                loadStatus();
-            }).catch(function (err) {
-                out.textContent = 'Could not queue: ' + err;
-            });
-        }
-
-        page.querySelector('#CmQueueVisible').addEventListener('click', function () {
-            var items = visibleItems();
-            if (!items.length) { return; }
-            var engine = page.querySelector('#CmEngine').value;
-            var engineSel = page.querySelector('#CmEngine');
-            var engineLabel = engineSel.options[engineSel.selectedIndex].text;
-            // Guard the batch: one click here can queue a whole library for
-            // hours of analysis, so confirm the count and engine first.
-            var text = 'Queue ' + items.length + ' video' + (items.length === 1 ? '' : 's')
-                + ' for analysis (' + engineLabel + ')? Analysis runs on the worker and can '
-                + 'take a while and use significant CPU/GPU.';
-            if (window.require) {
-                window.require(['confirm'], function (confirm) {
-                    confirm({
-                        title: 'Queue analysis',
-                        text: text,
-                        confirmText: 'Queue ' + items.length,
-                        cancelText: 'Cancel'
-                    }).then(function () { doQueue(items, engine); }, function () { /* cancelled */ });
-                });
-            } else if (window.confirm(text)) {
-                doQueue(items, engine);
-            }
+        var recent = jobs.filter(isTerminal).sort(function (a, b) {
+            return String(b.createdAt || '').localeCompare(String(a.createdAt || ''));
         });
+        return { active: active, upnext: upnext, recent: recent };
+    }
 
-        page.querySelector('#CmCancelAll').addEventListener('click', function () {
-            var out = page.querySelector('#CmQueueResult');
-            var run = function () {
-                out.textContent = 'Cancelling…';
-                api('POST', 'Jobs/CancelAll', {}).then(function (res) {
-                    if (res.unreachable) {
-                        out.textContent = 'Could not reach the worker.';
-                        return;
-                    }
-                    out.textContent = 'Cancelled ' + (res.cancelled || 0) + ' job(s).';
-                    loadStatus();
-                }).catch(function (err) { out.textContent = 'Could not cancel: ' + err; });
+    function rowActive(j) {
+        var t = TYPES[typeFor(j.engine)];
+        var pct = Math.round((j.progress || 0) * 100), eta = etaFor(j);
+        return '<div class="row"><div class="stripe" style="background:' + t.color + '"></div>'
+            + '<div class="grip dim">' + gripSVG() + '</div>'
+            + '<div class="glyph" style="background:' + hex(t.color, .15) + '">' + t.glyph + '</div>'
+            + '<div class="info"><div class="name">' + esc(baseName(j.mediaPath)) + '</div>'
+            + '<div class="sub">' + typeTag(typeFor(j.engine)) + '<span>' + pct + '%</span>'
+            + (j.stage ? '<span>· ' + esc(j.stage) + '</span>' : '')
+            + (eta ? '<span>· ' + esc(eta) + '</span>' : '') + '</div>'
+            + '<div class="bar"><div class="barfill" style="width:' + pct + '%;background:' + t.color + '"></div></div></div>'
+            + '<span class="badge b-' + j.status + '">' + j.status + '</span>'
+            + '<div class="acts"><button class="iconbtn danger" title="Cancel" data-cancel="' + j.id + '">✕</button></div></div>';
+    }
+    function rowQueued(j, i) {
+        var t = TYPES[typeFor(j.engine)];
+        var sub = j.stage && j.stage.indexOf('waiting') !== -1 ? 'waiting for scheduled hours'
+            : (j.status === 'rendering' ? 'queued · render' : 'queued');
+        return '<div class="row" data-id="' + j.id + '">'
+            + '<div class="stripe" style="background:' + t.color + '"></div>'
+            + '<div class="grip" data-grip="' + j.id + '" title="Drag to reorder">' + gripSVG() + '</div>'
+            + '<span class="pos">' + (i + 1) + '</span>'
+            + '<div class="glyph" style="background:' + hex(t.color, .15) + '">' + t.glyph + '</div>'
+            + '<div class="info"><div class="name">' + esc(baseName(j.mediaPath)) + '</div>'
+            + '<div class="sub">' + typeTag(typeFor(j.engine)) + '<span>' + esc(sub) + '</span></div></div>'
+            + '<div class="acts"><button class="iconbtn danger" title="Delete" data-cancel="' + j.id + '">✕</button></div></div>';
+    }
+    function rowRecent(j) {
+        var t = TYPES[typeFor(j.engine)];
+        var can = j.status === 'failed' || j.status === 'cancelled';
+        var extra = '';
+        if (j.error) { extra = '<span style="color:#ffb4b0">· ' + esc(String(j.error).split('\n')[0]) + '</span>'; }
+        else if (j.status === 'rendered') { extra = '<span>· clean copy written</span>'; }
+        else if (j.status === 'completed') { extra = '<span>· done</span>'; }
+        var acts = '';
+        if (can) { acts += '<button class="cmbtn mini" data-requeue="' + j.id + '">↻ Requeue</button>'; }
+        if (j.status === 'completed' && state.workerUrl) { acts += '<button class="cmbtn mini" data-review="' + esc(j.mediaPath) + '">Review</button>'; }
+        acts += '<button class="iconbtn ghost" title="Remove" data-remove="' + j.id + '">✕</button>';
+        return '<div class="row"><div class="stripe" style="background:' + t.color + '"></div>'
+            + '<div class="glyph" style="background:' + hex(t.color, .1) + ';opacity:.8">' + t.glyph + '</div>'
+            + '<div class="info"><div class="name">' + esc(baseName(j.mediaPath)) + '</div>'
+            + '<div class="sub">' + typeTag(typeFor(j.engine)) + extra + '</div></div>'
+            + '<span class="badge b-' + j.status + '">' + j.status + '</span>'
+            + '<div class="acts">' + acts + '</div></div>';
+    }
+
+    function renderChips() {
+        var counts = {}; ORDER.forEach(function (e) { counts[e] = 0; });
+        state.jobs.forEach(function (j) { counts[typeFor(j.engine)]++; });
+        page.querySelector('#CmChips').innerHTML = ORDER.map(function (e) {
+            var t = TYPES[e];
+            return '<span class="chip ' + (state.hidden[e] ? 'off' : '') + '" data-eng="' + e + '">'
+                + '<span class="dot" style="background:' + t.color + '"></span>' + t.tag
+                + '<span class="n">' + counts[e] + '</span></span>';
+        }).join('');
+        page.querySelectorAll('#CmChips .chip').forEach(function (c) {
+            c.onclick = function () { var e = c.getAttribute('data-eng'); state.hidden[e] = !state.hidden[e]; renderQueue(); };
+        });
+    }
+
+    function renderQueue() {
+        var g = classify();
+        var A = page.querySelector('#CmActive'), Q = page.querySelector('#CmQueued'), R = page.querySelector('#CmRecent');
+        A.innerHTML = g.active.length ? g.active.map(rowActive).join('') : '<div class="empty">Idle — nothing running</div>';
+        Q.innerHTML = g.upnext.length ? g.upnext.map(rowQueued).join('') : '<div class="empty">Queue is empty</div>';
+        R.innerHTML = g.recent.length ? g.recent.map(rowRecent).join('') : '<div class="empty">Nothing finished yet</div>';
+        page.querySelector('#CmCActive').textContent = g.active.length;
+        page.querySelector('#CmCQueued').textContent = g.upnext.length;
+        page.querySelector('#CmCRecent').textContent = g.recent.length;
+        wireRowButtons();
+        wireDrag();
+        renderChips();
+        var pauseBtn = page.querySelector('#CmPause');
+        pauseBtn.textContent = state.paused ? 'Resume queue' : 'Pause queue';
+        pauseBtn.classList.toggle('primary', state.paused);
+    }
+
+    function wireRowButtons() {
+        page.querySelectorAll('#tab-queue [data-cancel]').forEach(function (b) {
+            b.onclick = function () { api('DELETE', 'Jobs/' + encodeURIComponent(b.getAttribute('data-cancel')), {}).then(loadJobs); };
+        });
+        page.querySelectorAll('#tab-queue [data-remove]').forEach(function (b) {
+            b.onclick = function () { api('DELETE', 'Jobs/' + encodeURIComponent(b.getAttribute('data-remove')), {}).then(loadJobs); };
+        });
+        page.querySelectorAll('#tab-queue [data-requeue]').forEach(function (b) {
+            b.onclick = function () {
+                api('POST', 'Jobs/' + encodeURIComponent(b.getAttribute('data-requeue')) + '/Requeue', {}).then(function (res) {
+                    if (res && res.error) { page.querySelector('#CmQueueMsg').textContent = res.error; }
+                    loadJobs();
+                });
             };
-            var text = 'Cancel all queued and running analysis jobs?';
-            if (window.require) {
-                window.require(['confirm'], function (confirm) {
-                    confirm({
-                        title: 'Cancel analysis',
-                        text: text,
-                        confirmText: 'Cancel all',
-                        cancelText: 'Keep running'
-                    }).then(run, function () { /* kept running */ });
-                });
-            } else if (window.confirm(text)) {
-                run();
+        });
+        page.querySelectorAll('#tab-queue [data-review]').forEach(function (b) {
+            b.onclick = function () {
+                if (!state.workerUrl) { return; }
+                window.open(state.workerUrl + '/api/review?path=' + encodeURIComponent(b.getAttribute('data-review')), '_blank');
+            };
+        });
+    }
+
+    // ---- drag to reorder -------------------------------------------------
+    var dragId = null;
+    function wireDrag() {
+        page.querySelectorAll('#CmQueued .row').forEach(function (row) {
+            var id = row.getAttribute('data-id');
+            var grip = row.querySelector('[data-grip]');
+            if (grip) {
+                grip.addEventListener('mousedown', function () { row.setAttribute('draggable', 'true'); });
+                row.addEventListener('mouseup', function () { row.setAttribute('draggable', 'false'); });
             }
-        });
-
-        page.querySelector('#CmFilter').addEventListener('change', renderItems);
-
-        // Ticking/unticking an engine re-evaluates whether Analyze is allowed.
-        page.querySelectorAll('.cmEngine').forEach(function (cb) {
-            cb.addEventListener('change', refreshAnalyzeButton);
-        });
-
-        page.querySelector('#CmOpenSettings').addEventListener('click', function () {
-            // The config page is registered under the plugin name. Navigate to
-            // it directly: in Jellyfin 10.11 the plugin's own "Settings" button
-            // always opens this main-menu page instead (findBestConfigurationPage
-            // prefers the EnableInMainMenu page), so this is the way to reach it.
-            Dashboard.navigate('configurationpage?name=Clean Media');
-        });
-
-        page.querySelectorAll('.cmBack').forEach(function (b) {
-            b.addEventListener('click', function () { show('library'); });
-        });
-        page.querySelectorAll('.cmBackToItems').forEach(function (b) {
-            b.addEventListener('click', function () {
-                stopFilmPoll();
-                show('items');
-                // Counts changed while reviewing; refresh rather than lie.
-                loadStatus();
+            row.addEventListener('dragstart', function (e) { dragId = id; row.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; });
+            row.addEventListener('dragend', function () { dragId = null; row.setAttribute('draggable', 'false'); clearDrop(); });
+            row.addEventListener('dragover', function (e) {
+                e.preventDefault(); if (dragId === id) { return; }
+                var r = row.getBoundingClientRect(), after = e.clientY > r.top + r.height / 2;
+                clearDrop(); row.classList.add(after ? 'drop-after' : 'drop-before');
+            });
+            row.addEventListener('drop', function (e) {
+                e.preventDefault(); if (!dragId || dragId === id) { return; }
+                var after = row.classList.contains('drop-after');
+                var order = classify().upnext.map(function (j) { return j.id; }).filter(function (x) { return x !== dragId; });
+                var idx = order.indexOf(id) + (after ? 1 : 0);
+                order.splice(idx, 0, dragId);
+                clearDrop();
+                api('POST', 'Jobs/Reorder', {}, { ids: order }).then(function (res) {
+                    if (res && res.jobs) { state.jobs = res.jobs; renderQueue(); }
+                    else { loadJobs(); }
+                });
             });
         });
+    }
+    function clearDrop() { page.querySelectorAll('.drop-before,.drop-after').forEach(function (r) { r.classList.remove('drop-before', 'drop-after'); }); }
 
-        function refresh() {
-            show('library');
-            // The worker URL powers the "Worker review page" link; if it can't
-            // be read the button simply stays hidden.
-            api('GET', 'Config').then(function (res) {
-                state.workerUrl = (res && res.workerUrl) || '';
-            }).catch(function () { state.workerUrl = ''; });
-            loadLibraries().then(function () { Dashboard.hideLoadingMsg(); });
+    // ---- polling ---------------------------------------------------------
+    function schedulePoll() {
+        stopPoll();
+        var busy = state.jobs.some(function (j) { return isActive(j) || isPending(j); });
+        if (busy && page.querySelector('#tab-queue').hidden === false) {
+            state.poll = setTimeout(loadJobs, 3000);
         }
+    }
+    function stopPoll() { if (state.poll) { clearTimeout(state.poll); state.poll = null; } }
 
-        // pageshow for return visits, immediate for the first render, where
-        // the event has usually already fired by the time this runs.
-        page.addEventListener('pageshow', refresh);
-        page.addEventListener('pagehide', stopPolling);
-        refresh();
-    })();
+    // ---- add to queue ----------------------------------------------------
+    function imageUrl(item) {
+        if (!item.ImageTags || !item.ImageTags.Primary) { return ''; }
+        return ApiClient.getImageUrl(item.Id, { type: 'Primary', maxWidth: 90, tag: item.ImageTags.Primary });
+    }
+    function renderSeg() {
+        page.querySelector('#CmEngineSeg').innerHTML = ORDER.map(function (e) {
+            var t = TYPES[e];
+            return '<span class="opt ' + (state.addEngine === e ? 'sel' : '') + '" data-eng="' + e + '" style="color:'
+                + (state.addEngine === e ? t.color : 'var(--cm-ink)') + '"><span class="dot" style="background:' + t.color + '"></span>'
+                + t.label + '</span>';
+        }).join('');
+        page.querySelectorAll('#CmEngineSeg .opt').forEach(function (o) {
+            o.onclick = function () { state.addEngine = o.getAttribute('data-eng'); renderSeg(); };
+        });
+    }
+    function loadCollections() {
+        return ApiClient.getJSON(ApiClient.getUrl('Library/MediaFolders')).then(function (res) {
+            state.collections = (res.Items || []).filter(function (l) {
+                return l.CollectionType === 'movies' || l.CollectionType === 'tvshows' || !l.CollectionType;
+            });
+            renderAdd();
+        });
+    }
+    function collectionRow(c) {
+        var img = imageUrl(c);
+        var th = img ? '<img src="' + img + '" loading="lazy" />' : '🗂';
+        return '<div class="crow" data-col="' + c.Id + '" data-name="' + esc(c.Name) + '">'
+            + '<div class="th">' + th + '</div>'
+            + '<div><div class="cn">' + esc(c.Name) + '</div><div class="cc">Collection</div></div>'
+            + '<span class="go">›</span></div>';
+    }
+    function filmRow(item) {
+        var img = imageUrl(item);
+        var th = img ? '<img src="' + img + '" loading="lazy" />' : '🎞';
+        return '<div class="crow" data-film="' + item.Id + '" data-name="' + esc(item.Name) + '">'
+            + '<div class="th">' + th + '</div>'
+            + '<div><div class="cn">' + esc(item.Name) + '</div>'
+            + '<div class="cc">' + (item.ProductionYear || 'Film') + '</div></div>'
+            + '<span class="go">＋</span></div>';
+    }
+    function renderAdd() {
+        var nav = page.querySelector('#CmAddNav'), list = page.querySelector('#CmAddList');
+        var hint = page.querySelector('#CmAddHint'), label = page.querySelector('#CmAddLabel');
+        if (state.searchTerm) {
+            nav.innerHTML = ''; label.textContent = 'Search results';
+            hint.textContent = '— click a film to queue it';
+            list.innerHTML = state.films.length ? state.films.map(filmRow).join('')
+                : '<div class="empty">No films match “' + esc(state.searchTerm) + '”.</div>';
+        } else if (state.addView === null) {
+            nav.innerHTML = ''; label.textContent = 'Collections';
+            hint.textContent = '— pick a pass, open a collection, click a film';
+            list.innerHTML = state.collections.length ? state.collections.map(collectionRow).join('')
+                : '<div class="empty">No libraries found.</div>';
+        } else {
+            label.textContent = state.addView.name;
+            hint.textContent = '— click a film to queue it';
+            nav.innerHTML = '<button class="cmbtn mini ghost" id="CmAddBack">← Collections</button>'
+                + '<span class="crumb">' + esc(state.addView.name) + '</span>';
+            list.innerHTML = state.films.length ? state.films.map(filmRow).join('')
+                : '<div class="empty">No videos here.</div>';
+            var back = page.querySelector('#CmAddBack');
+            if (back) { back.onclick = function () { state.addView = null; state.films = []; renderAdd(); }; }
+        }
+        wireAddClicks();
+    }
+    function wireAddClicks() {
+        page.querySelectorAll('#CmAddList [data-col]').forEach(function (el) {
+            el.onclick = function () { openCollection(el.getAttribute('data-col'), el.getAttribute('data-name')); };
+        });
+        page.querySelectorAll('#CmAddList [data-film]').forEach(function (el) {
+            el.onclick = function () { queueFilm(el, el.getAttribute('data-film'), el.getAttribute('data-name')); };
+        });
+    }
+    function openCollection(parentId, name) {
+        state.addView = { id: parentId, name: name }; state.films = [];
+        page.querySelector('#CmAddList').innerHTML = '<div class="empty">Loading…</div>';
+        page.querySelector('#CmAddLabel').textContent = name;
+        ApiClient.getJSON(ApiClient.getUrl('Items', {
+            ParentId: parentId, IncludeItemTypes: 'Movie,Episode', Recursive: true,
+            Fields: 'ProductionYear', SortBy: 'SortName', Limit: 500
+        })).then(function (res) { state.films = res.Items || []; renderAdd(); });
+    }
+    var searchTimer = null;
+    function runSearch(term) {
+        state.searchTerm = term;
+        if (!term) { state.films = []; renderAdd(); return; }
+        ApiClient.getJSON(ApiClient.getUrl('Items', {
+            SearchTerm: term, IncludeItemTypes: 'Movie,Episode', Recursive: true,
+            Fields: 'ProductionYear', SortBy: 'SortName', Limit: 60
+        })).then(function (res) { if (state.searchTerm === term) { state.films = res.Items || []; renderAdd(); } });
+    }
+    function queueFilm(el, itemId, name) {
+        var t = TYPES[state.addEngine];
+        var done = function (ok, msg) {
+            var out = page.querySelector('#CmQueueMsg');
+            if (ok) { el.classList.add('added'); setTimeout(function () { el.classList.remove('added'); }, 700); out.textContent = 'Queued ' + name + ' (' + t.tag + ').'; }
+            else { out.textContent = msg || ('Could not queue ' + name + '.'); }
+            loadJobs();
+        };
+        if (t.kind === 'render') {
+            api('POST', 'Render', {}, { itemId: itemId }).then(function (res) {
+                if (res.unreachable) { done(false, 'Worker unreachable.'); }
+                else if (res.error) { done(false, res.error); }
+                else if (res.jobId) { done(true); }
+                else { done(false); }
+            }).catch(function (err) { done(false, 'Could not queue: ' + err); });
+        } else {
+            api('POST', 'Analyze', {}, { itemIds: [itemId], engine: t.engine }).then(function (res) {
+                var queued = (res.queued || []).filter(function (q) { return q.jobId; });
+                done(queued.length > 0, queued.length ? null : 'The worker could not find that file under its media roots.');
+            }).catch(function (err) { done(false, 'Could not queue: ' + err); });
+        }
+    }
+
+    // ======================================================================
+    //  SETTINGS
+    // ======================================================================
+    function browserTz() { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) { return ''; } }
+    function pad(n) { return (n < 10 ? '0' : '') + n; }
+    function to12(mins) { var h = Math.floor(mins / 60), m = mins % 60, p = h < 12 ? 'AM' : 'PM', h12 = h % 12 === 0 ? 12 : h % 12; return h12 + ':' + pad(m) + ' ' + p; }
+    function opts(sel) { var s = ''; for (var t = 0; t < 1440; t += 15) { s += '<option value="' + t + '"' + (t === sel ? ' selected' : '') + '>' + to12(t) + '</option>'; } return s; }
+    function bands(s, e) {
+        var pc = function (x) { return x / 1440 * 100; };
+        if (s === e) { return [[0, 100]]; }
+        if (s < e) { return [[pc(s), pc(e - s)]]; }
+        return [[pc(s), pc(1440 - s)], [0, pc(e)]];
+    }
+    function paint(tr, s, e) {
+        var ticks = [6, 12, 18].map(function (h) { return '<div class="tick" style="left:' + (h / 24 * 100) + '%"></div>'; }).join('');
+        var b = bands(s, e).map(function (x) { return '<div class="band" style="left:' + x[0] + '%;width:' + x[1] + '%"></div>'; }).join('');
+        tr.innerHTML = ticks + b;
+    }
+    var DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    function buildWeek() {
+        var wk = page.querySelector('#CmWeek');
+        wk.innerHTML = '<div class="ruler"><div class="rt"><span>12 AM</span><span>6 AM</span><span>12 PM</span><span>6 PM</span><span>12 AM</span></div></div>'
+            + DAYS.map(function (d, i) {
+                return '<div class="dayrow" data-i="' + i + '"><span class="dn">' + d + '</span>'
+                    + '<div class="switch on"><div class="knob"></div></div>'
+                    + '<div class="track"></div>'
+                    + '<div class="ctl"><select class="timesel start">' + opts(1320) + '</select>'
+                    + '<span class="to">to</span><select class="timesel end">' + opts(360) + '</select></div></div>';
+            }).join('');
+        wk.querySelectorAll('.dayrow').forEach(function (row) {
+            rowUpdate(row);
+            row.querySelectorAll('select').forEach(function (sel) { sel.onchange = function () { rowUpdate(row); markDirty(); }; });
+            var sw = row.querySelector('.switch');
+            sw.onclick = function () {
+                sw.classList.toggle('on'); var off = !sw.classList.contains('on');
+                row.classList.toggle('off', off);
+                row.querySelectorAll('select').forEach(function (s) { s.disabled = off; });
+                markDirty();
+            };
+        });
+        page.querySelector('#CmApplyAll').onclick = function () {
+            var first = wk.querySelector('.dayrow');
+            var s = first.querySelector('.start').value, e = first.querySelector('.end').value;
+            wk.querySelectorAll('.dayrow').forEach(function (row) {
+                row.querySelector('.start').value = s; row.querySelector('.end').value = e; rowUpdate(row);
+            });
+            markDirty();
+        };
+    }
+    function rowUpdate(row) { paint(row.querySelector('.track'), +row.querySelector('.start').value, +row.querySelector('.end').value); }
+
+    function setMode(sched) {
+        page.querySelectorAll('#CmModeSeg button').forEach(function (b) { b.classList.toggle('on', (b.dataset.m === 'sched') === sched); });
+        page.querySelector('#CmSchedBody').style.display = sched ? '' : 'none';
+        page.querySelector('#CmAlwaysNote').style.display = sched ? 'none' : '';
+    }
+
+    function fillSchedule(view) {
+        var sched = (view && view.schedule) || { enabled: false, days: [] };
+        setMode(!!sched.enabled);
+        var days = sched.days || [];
+        page.querySelectorAll('#CmWeek .dayrow').forEach(function (row, i) {
+            var d = days[i] || { enabled: false, start: 1320, end: 360 };
+            var sw = row.querySelector('.switch');
+            sw.classList.toggle('on', !!d.enabled);
+            row.classList.toggle('off', !d.enabled);
+            var start = row.querySelector('.start'), end = row.querySelector('.end');
+            start.value = d.start || 0; end.value = d.end || 0;
+            start.disabled = end.disabled = !d.enabled;
+            rowUpdate(row);
+        });
+    }
+    function readSchedule() {
+        var enabled = page.querySelector('#CmModeSeg button.on').dataset.m === 'sched';
+        var days = [];
+        page.querySelectorAll('#CmWeek .dayrow').forEach(function (row) {
+            days.push({
+                enabled: row.querySelector('.switch').classList.contains('on'),
+                start: +row.querySelector('.start').value,
+                end: +row.querySelector('.end').value
+            });
+        });
+        return { enabled: enabled, days: days, tz: browserTz() };
+    }
+
+    function loadSettings() {
+        return ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+            page.querySelector('#CmWorkerUrl').value = config.WorkerUrl || '';
+            page.querySelector('#CmTimeout').value = config.TimeoutSeconds || 15;
+            page.querySelector('#CmProvideSkips').classList.toggle('on', !!config.ProvideSkips);
+            page.querySelector('#CmApprovedOnly').classList.toggle('on', !!config.ApprovedOnly);
+        }).then(function () {
+            return api('GET', 'Schedule', {}).then(function (view) {
+                if (view && view.unreachable) { setMode(true); return; }
+                fillSchedule(view);
+            }).catch(function () { /* leave defaults */ });
+        }).then(clearDirty);
+    }
+
+    function saveSettings() {
+        var out = page.querySelector('#CmSaveState');
+        out.textContent = 'Saving…';
+        ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+            config.WorkerUrl = page.querySelector('#CmWorkerUrl').value;
+            config.TimeoutSeconds = parseInt(page.querySelector('#CmTimeout').value, 10) || 15;
+            config.ProvideSkips = page.querySelector('#CmProvideSkips').classList.contains('on');
+            config.ApprovedOnly = page.querySelector('#CmApprovedOnly').classList.contains('on');
+            return ApiClient.updatePluginConfiguration(pluginId, config);
+        }).then(function () {
+            return api('POST', 'Schedule', {}, readSchedule());
+        }).then(function () {
+            clearDirty();
+            testConnection(true);
+        }).catch(function (err) { out.textContent = 'Could not save: ' + err; });
+    }
+
+    function testConnection(silent) {
+        var pill = page.querySelector('#CmConnPill'), result = page.querySelector('#CmTestResult');
+        if (!silent) { result.textContent = 'Testing…'; }
+        // Save the URL/timeout first so the server-side test uses what's typed.
+        ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+            config.WorkerUrl = page.querySelector('#CmWorkerUrl').value;
+            config.TimeoutSeconds = parseInt(page.querySelector('#CmTimeout').value, 10) || 15;
+            return ApiClient.updatePluginConfiguration(pluginId, config);
+        }).then(function () {
+            return ApiClient.getJSON(ApiClient.getUrl('CleanMedia/TestConnection'));
+        }).then(function (res) {
+            if (res.ok) {
+                state.paused = !!res.paused;
+                pill.className = 'connpill ok';
+                pill.innerHTML = '<span class="dot-live"></span>Connected · v' + esc(res.version)
+                    + ' · ' + esc(res.gpu) + (res.paused ? ' · queue paused' : (res.queueSize ? ' · ' + res.queueSize + ' queued' : ' · queue idle'));
+                setLive(true, 'Worker online', res.gpu);
+                if (!silent) { result.textContent = ''; }
+            } else {
+                pill.className = 'connpill bad';
+                pill.innerHTML = '<span class="dot-live off"></span>Not reachable';
+                setLive(false, 'Worker unreachable');
+                if (!silent) { result.textContent = res.message || ''; }
+            }
+        }).catch(function (err) {
+            pill.className = 'connpill bad';
+            pill.innerHTML = '<span class="dot-live off"></span>Test failed';
+            if (!silent) { result.textContent = 'Test failed: ' + err; }
+        });
+    }
+
+    function setLive(ok, text, gpu) {
+        page.querySelector('#CmLiveDot').className = 'dot-live' + (ok ? '' : ' off');
+        page.querySelector('#CmLiveText').textContent = text;
+        var gpuStat = page.querySelector('#CmGpuStat');
+        if (ok && gpu && gpu !== 'none') {
+            gpuStat.style.display = ''; page.querySelector('#CmGpuName').textContent = gpu;
+        } else { gpuStat.style.display = 'none'; }
+    }
+
+    // ---- dirty tracking --------------------------------------------------
+    function markDirty() {
+        state.dirty = true;
+        page.querySelector('#CmSaveState').textContent = 'Unsaved changes';
+        page.querySelector('#CmSaveDot').style.background = 'var(--cm-accent)';
+    }
+    function clearDirty() {
+        state.dirty = false;
+        page.querySelector('#CmSaveState').textContent = 'All changes saved';
+        page.querySelector('#CmSaveDot').style.background = 'var(--cm-muted)';
+    }
+
+    // ======================================================================
+    //  WIRING
+    // ======================================================================
+    page.querySelectorAll('#CmTabs button').forEach(function (b) {
+        b.onclick = function () {
+            page.querySelectorAll('#CmTabs button').forEach(function (x) { x.classList.toggle('on', x === b); });
+            var queue = b.dataset.t === 'queue';
+            page.querySelector('#tab-queue').hidden = !queue;
+            page.querySelector('#tab-settings').hidden = queue;
+            if (queue) { loadJobs(); } else { stopPoll(); }
+        };
+    });
+
+    // settings toggles + inputs
+    page.querySelector('#CmProvideSkips').onclick = function () { this.classList.toggle('on'); markDirty(); };
+    page.querySelector('#CmApprovedOnly').onclick = function () { this.classList.toggle('on'); markDirty(); };
+    page.querySelector('#CmWorkerUrl').addEventListener('input', markDirty);
+    page.querySelector('#CmTimeout').addEventListener('input', markDirty);
+    page.querySelectorAll('#CmModeSeg button').forEach(function (b) {
+        b.onclick = function () { setMode(b.dataset.m === 'sched'); markDirty(); };
+    });
+    page.querySelector('#CmSaveSettings').onclick = saveSettings;
+    page.querySelector('#CmDiscard').onclick = function () { loadSettings(); };
+    page.querySelector('#CmTestConn').onclick = function () { testConnection(false); };
+
+    // queue controls
+    page.querySelector('#CmShowAll').onclick = function () { state.hidden = {}; renderQueue(); };
+    page.querySelector('#CmCancelAll').onclick = function () {
+        api('POST', 'Jobs/CancelAll', {}).then(function (res) {
+            if (res && res.cancelled != null) { page.querySelector('#CmQueueMsg').textContent = 'Cancelled ' + res.cancelled + ' job(s).'; }
+            loadJobs();
+        });
+    };
+    page.querySelector('#CmPause').onclick = function () {
+        api('POST', 'Jobs/Pause', {}, { paused: !state.paused }).then(function (res) {
+            if (res && res.paused != null) { state.paused = !!res.paused; }
+            renderQueue();
+        });
+    };
+    page.querySelector('#CmFilmSearch').addEventListener('input', function () {
+        var term = this.value.trim();
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(function () { runSearch(term); }, 250);
+    });
+
+    // ---- entry -----------------------------------------------------------
+    function refresh() {
+        api('GET', 'Config').then(function (res) { state.workerUrl = (res && res.workerUrl) || ''; }).catch(function () { state.workerUrl = ''; });
+        renderSeg();
+        loadCollections().catch(function () { /* libraries optional */ });
+        loadSettings();
+        testConnection(true);
+        Dashboard.hideLoadingMsg();
+    }
+
+    buildWeek();
+    page.addEventListener('pageshow', refresh);
+    page.addEventListener('pagehide', stopPoll);
+    refresh();
+})();
 </script>
 </div>
 </body>

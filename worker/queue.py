@@ -216,7 +216,32 @@ class JobQueue:
                 if job is not None:
                     self._running_id = job.id
                     return job
+                self._announce_schedule_hold()
                 self._cond.wait(timeout=self._poll_s)
+
+    def _announce_schedule_hold(self) -> None:
+        """Mark queued analysis jobs as waiting when the window is what holds them.
+
+        Selection is schedule-aware, so a held analysis job is never claimed and
+        the old ``_await_schedule`` no longer runs to set its stage. Restore that
+        signal here: while the window is shut (and the queue isn't paused), any
+        queued job's stage reads "waiting for scheduled hours". Written only on
+        the transition, so it is not a per-poll write.
+        """
+        if self._paused or self._analysis_allowed():
+            return
+        for job in self.store.list_jobs():
+            if (
+                job.status == JobStatus.queued
+                and job.id not in self._cancelled
+                and job.stage != "waiting for scheduled hours"
+            ):
+                job.stage = "waiting for scheduled hours"
+                self.store.save_job(job)
+                log.info(
+                    "job %s waiting for scheduled hours (%s on %s)",
+                    job.id, job.engine, _name(job),
+                )
 
     def _signal(self) -> None:
         """Wake the worker to re-evaluate what to run (after any queue change)."""

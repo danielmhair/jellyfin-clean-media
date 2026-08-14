@@ -49,6 +49,12 @@ public class WorkerJob
 
     /// <summary>Where a completed render wrote the clean copy, if any.</summary>
     [JsonPropertyName("renderedPath")] public string? RenderedPath { get; set; }
+
+    /// <summary>Queue order (lower = sooner); null once terminal or unset.</summary>
+    [JsonPropertyName("queuePosition")] public int? QueuePosition { get; set; }
+
+    /// <summary>When the job was submitted, so the queue can order Recent by recency.</summary>
+    [JsonPropertyName("createdAt")] public string? CreatedAt { get; set; }
 }
 
 /// <summary>The worker's standard timeline response.</summary>
@@ -94,6 +100,9 @@ public class WorkerHealth
     [JsonPropertyName("queueSize")] public int QueueSize { get; set; }
 
     [JsonPropertyName("gpu")] public GpuInfo? Gpu { get; set; }
+
+    /// <summary>Whether the queue is paused (holding the start of the next job).</summary>
+    [JsonPropertyName("paused")] public bool Paused { get; set; }
 
     [JsonPropertyName("engines")]
     public Dictionary<string, object> Engines { get; set; } = new();
@@ -484,6 +493,93 @@ public class WorkerClient
                 .ReadFromJsonAsync<CancelAllResult>(cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
             return result?.Cancelled ?? 0;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            _logger.LogWarning(ex, "Clean Media worker unreachable at {Url}", Config.WorkerUrl);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Reorder the queued jobs, front-first, by id. Returns the worker's updated
+    /// job list (the UI re-renders from truth), or null if unreachable.
+    /// </summary>
+    public async Task<List<WorkerJob>?> ReorderJobsAsync(
+        IEnumerable<string> ids, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var client = NewClient();
+            using var response = await client
+                .PostAsJsonAsync($"{Base}/api/jobs/reorder", new { ids }, cancellationToken)
+                .ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+            return await response.Content
+                .ReadFromJsonAsync<List<WorkerJob>>(cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            _logger.LogWarning(ex, "Clean Media worker unreachable at {Url}", Config.WorkerUrl);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Requeue a failed or cancelled job. Returns the HTTP status the worker gave
+    /// (so the caller can map 404/400) and the job on success; status 0 means the
+    /// worker was unreachable.
+    /// </summary>
+    public async Task<(int Status, WorkerJob? Job)> RequeueJobAsync(
+        string jobId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var client = NewClient();
+            using var response = await client
+                .PostAsync(
+                    $"{Base}/api/jobs/{Uri.EscapeDataString(jobId)}/requeue",
+                    null,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                return ((int)response.StatusCode, null);
+            }
+
+            var job = await response.Content
+                .ReadFromJsonAsync<WorkerJob>(cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            return ((int)response.StatusCode, job);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            _logger.LogWarning(ex, "Clean Media worker unreachable at {Url}", Config.WorkerUrl);
+            return (0, null);
+        }
+    }
+
+    /// <summary>Pause or resume the queue. Returns the resulting paused state, or null if unreachable.</summary>
+    public async Task<bool?> SetPausedAsync(bool paused, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var client = NewClient();
+            using var response = await client
+                .PostAsJsonAsync($"{Base}/api/jobs/pause", new { paused }, cancellationToken)
+                .ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+            var body = await response.Content
+                .ReadFromJsonAsync<Dictionary<string, JsonElement>>(cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            if (body is not null && body.TryGetValue("paused", out var value)
+                && (value.ValueKind == JsonValueKind.True || value.ValueKind == JsonValueKind.False))
+            {
+                return value.GetBoolean();
+            }
+
+            return paused;
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {

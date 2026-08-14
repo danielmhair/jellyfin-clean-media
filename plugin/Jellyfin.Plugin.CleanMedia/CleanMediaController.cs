@@ -67,6 +67,18 @@ public class RenderRequest
     public string? ItemId { get; set; }
 }
 
+/// <summary>A new front-first order for the queued jobs, by id.</summary>
+public class ReorderRequest
+{
+    public List<string>? Ids { get; set; }
+}
+
+/// <summary>Pause or resume the whole queue.</summary>
+public class PauseRequest
+{
+    public bool Paused { get; set; }
+}
+
 [ApiController]
 [Authorize(Policy = "RequiresElevation")]
 [Route("CleanMedia")]
@@ -421,6 +433,63 @@ public class CleanMediaController : ControllerBase
         return Ok(new { cancelled });
     }
 
+    /// <summary>Reorder the queued jobs, front-first, by id.</summary>
+    [HttpPost("Jobs/Reorder")]
+    public async Task<ActionResult<object>> ReorderJobs(
+        [FromBody] ReorderRequest request,
+        CancellationToken cancellationToken)
+    {
+        var jobs = await _worker
+            .ReorderJobsAsync(request.Ids ?? new List<string>(), cancellationToken)
+            .ConfigureAwait(false);
+        if (jobs is null)
+        {
+            return Ok(new { unreachable = true });
+        }
+
+        return Ok(new { jobs });
+    }
+
+    /// <summary>Retry a failed or cancelled job from the back of the queue.</summary>
+    [HttpPost("Jobs/{jobId}/Requeue")]
+    public async Task<ActionResult<object>> RequeueJob(
+        string jobId,
+        CancellationToken cancellationToken)
+    {
+        var (status, job) = await _worker.RequeueJobAsync(jobId, cancellationToken).ConfigureAwait(false);
+        if (status == 0)
+        {
+            return Ok(new { unreachable = true });
+        }
+
+        if (status == 404)
+        {
+            return Ok(new { error = "That job no longer exists." });
+        }
+
+        if (status == 400)
+        {
+            return Ok(new { error = "Only a failed or cancelled job can be requeued." });
+        }
+
+        return Ok(new { jobId = job?.Id, status = job?.Status });
+    }
+
+    /// <summary>Pause or resume the whole queue (never preempts a running job).</summary>
+    [HttpPost("Jobs/Pause")]
+    public async Task<ActionResult<object>> PauseQueue(
+        [FromBody] PauseRequest request,
+        CancellationToken cancellationToken)
+    {
+        var paused = await _worker.SetPausedAsync(request.Paused, cancellationToken).ConfigureAwait(false);
+        if (paused is null)
+        {
+            return Ok(new { unreachable = true });
+        }
+
+        return Ok(new { paused });
+    }
+
     /// <summary>The worker's analysis schedule, for the settings page to edit.</summary>
     /// <remarks>
     /// The schedule lives on the worker (the machine that enforces it), so the
@@ -492,6 +561,7 @@ public class CleanMediaController : ControllerBase
             version = health.Version,
             engines = health.Engines.Keys,
             queueSize = health.QueueSize,
+            paused = health.Paused,
             gpu = health.Gpu is null || !health.Gpu.Available ? "none" : health.Gpu.Name,
         });
     }
