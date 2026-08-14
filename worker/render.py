@@ -13,6 +13,7 @@ track, so subtitles are dropped when a skip is present.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -196,7 +197,11 @@ def render(
         )
 
         audio_sr, audio_ch = DEFAULT_SR, DEFAULT_CH
-        audio_path = Path(tempfile.mkstemp(suffix=".pcm")[1])
+        # mkstemp returns an OPEN fd; close it or Windows keeps the file locked,
+        # so ffmpeg can't write it and the unlink in the finally throws WinError 32.
+        _fd, _name = tempfile.mkstemp(suffix=".pcm")
+        os.close(_fd)
+        audio_path = Path(_name)
         # Scale the separation pass into the first 90% so the bar keeps moving;
         # FFmpeg's own progress (skips only) takes it the rest of the way.
         render_voice_removed_pcm(

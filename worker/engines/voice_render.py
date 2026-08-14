@@ -205,9 +205,14 @@ def voice_removed_wav(
     review clip can mux over the video. Returns None if extraction fails.
     """
     separate = separate or separate_vocals
+    import os
     import tempfile
 
-    raw = Path(tempfile.mkstemp(suffix=".pcm")[1])
+    # mkstemp returns an OPEN fd; close it or Windows keeps the file locked and
+    # the raw.unlink() below throws WinError 32 (the whole preview then fails).
+    fd, raw_name = tempfile.mkstemp(suffix=".pcm")
+    os.close(fd)
+    raw = Path(raw_name)
     try:
         if not _extract_pcm(media, raw, sr, ch, start_s=start_s, dur_s=dur_s):
             return None

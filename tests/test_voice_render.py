@@ -85,6 +85,36 @@ def test_render_voice_removed_pcm_splices_only_the_span(tmp_path, monkeypatch):
     assert np.array_equal(result[hi:], samples[hi:])
 
 
+def test_voice_removed_wav_extracts_and_cleans_up_its_temp(tmp_path):
+    """Regression: the review preview path. mkstemp returns an OPEN fd; leaving it
+    open left the .pcm temp locked on Windows, so voice_removed_wav crashed at
+    raw.unlink() (WinError 32) — voice-only mute "not working at all." The other
+    tests mock the ffmpeg extract, which is exactly how the leak slipped through;
+    this one uses the REAL extract (real mkstemp + unlink) with a fast fake
+    separator, so it catches the file-handle lifecycle without Demucs.
+    """
+    import subprocess
+    import wave
+
+    from worker.engines.voice_render import voice_removed_wav
+
+    media = tmp_path / "clip.mkv"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+         "-i", "testsrc=size=320x240:rate=24:duration=4",
+         "-f", "lavfi", "-i", "sine=frequency=300:duration=4",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(media)],
+        check=True,
+    )
+    out_wav = tmp_path / "voiced.wav"
+    result = voice_removed_wav(
+        media, 1.0, 2.0, 1.2, 1.6, out_wav, separate=_all_is_vocal
+    )
+    assert result is not None and out_wav.is_file()  # did not throw on cleanup
+    with wave.open(str(out_wav)) as w:
+        assert w.getnframes() > 0  # a real voice-removed WAV came out
+
+
 def test_voice_action_feeds_second_audio_input():
     cmd, n_blur, n_mute = build_command(
         Path("in.mkv"), _tl(_seg(1, 1000, 2000, "voice")), Path("out.mkv"),
