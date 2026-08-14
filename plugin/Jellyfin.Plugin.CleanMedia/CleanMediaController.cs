@@ -538,6 +538,41 @@ public class CleanMediaController : ControllerBase
         return Ok(new { workerUrl });
     }
 
+    /// <summary>The player flag script, injected into the web client.</summary>
+    /// <remarks>
+    /// Anonymous because the web client loads it for every user; it is inert
+    /// static text and only reveals the button to administrators. Creating a
+    /// finding still requires elevation on <see cref="CreateSegment"/>.
+    /// </remarks>
+    [AllowAnonymous]
+    [HttpGet("PlayerScript.js")]
+    [Produces("application/javascript")]
+    public ActionResult PlayerScript()
+    {
+        var asm = typeof(CleanMediaController).Assembly;
+        var stream = asm.GetManifestResourceStream(
+            "Jellyfin.Plugin.CleanMedia.Web.PlayerFlag.js");
+        if (stream is null)
+        {
+            return NotFound();
+        }
+
+        return File(stream, "application/javascript");
+    }
+
+    /// <summary>Settings the player script reads before showing its button.</summary>
+    [AllowAnonymous]
+    [HttpGet("PlayerConfig")]
+    public ActionResult<object> PlayerConfig()
+    {
+        var config = Plugin.Instance?.Configuration;
+        return Ok(new
+        {
+            enabled = config?.FlagButtonEnabled ?? true,
+            padMs = config?.FlagPadMs ?? 1500,
+        });
+    }
+
     /// <summary>Ask the worker for its health, from the server.</summary>
     [HttpGet("TestConnection")]
     public async Task<ActionResult<object>> TestConnection(CancellationToken cancellationToken)
