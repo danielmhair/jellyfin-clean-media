@@ -39,18 +39,15 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     /// <inheritdoc />
     public IEnumerable<PluginPageInfo> GetPages()
     {
-        yield return new PluginPageInfo
-        {
-            Name = Name,
-            EmbeddedResourcePath = $"{GetType().Namespace}.Configuration.configPage.html",
-        };
-
-        // A second page, so review lives in the dashboard rather than on a
-        // separate worker URL. Approving here is what makes Jellyfin skip.
+        // One page for everything: a tabbed dashboard with Settings and Queue,
+        // so configuration and work management live in the same place — no
+        // separate config page. It is the plugin's main-menu page and, in
+        // Jellyfin 10.11, also what the plugin's own "Settings" button opens
+        // (findBestConfigurationPage prefers the EnableInMainMenu page).
         yield return new PluginPageInfo
         {
             Name = "CleanMediaReview",
-            DisplayName = "Clean Media Review",
+            DisplayName = "Clean Media",
             EmbeddedResourcePath = $"{GetType().Namespace}.Configuration.reviewPage.html",
             EnableInMainMenu = true,
             MenuIcon = "content_cut",
