@@ -542,12 +542,73 @@
         pauseBtn.classList.toggle('primary', state.paused);
     }
 
+    // A small self-contained confirm dialog, so a mis-click on an X can't
+    // silently drop a job. Returns a Promise<boolean>.
+    function cmConfirm(opts) {
+        return new Promise(function (resolve) {
+            var ov = document.createElement('div');
+            ov.style.cssText = 'position:fixed;inset:0;z-index:200000;display:flex;align-items:center;'
+                + 'justify-content:center;background:rgba(0,0,0,.55)';
+            var box = document.createElement('div');
+            box.style.cssText = 'background:#1c1f26;color:#e8eaed;max-width:420px;width:90%;border-radius:10px;'
+                + 'padding:22px 22px 18px;box-shadow:0 10px 40px rgba(0,0,0,.5);font-size:15px;line-height:1.45';
+            var title = document.createElement('div');
+            title.style.cssText = 'font-weight:600;font-size:17px;margin-bottom:8px';
+            title.textContent = opts.title || 'Are you sure?';
+            var msg = document.createElement('div');
+            msg.style.cssText = 'margin-bottom:18px;opacity:.9';
+            msg.textContent = opts.message || '';
+            var btns = document.createElement('div');
+            btns.style.cssText = 'display:flex;justify-content:flex-end;gap:10px';
+            var keep = document.createElement('button');
+            keep.className = 'cmbtn';
+            keep.textContent = opts.cancelText || 'Keep it';
+            var ok = document.createElement('button');
+            ok.className = 'cmbtn danger';
+            ok.textContent = opts.confirmText || 'Remove';
+            btns.appendChild(keep); btns.appendChild(ok);
+            box.appendChild(title); box.appendChild(msg); box.appendChild(btns);
+            ov.appendChild(box); document.body.appendChild(ov);
+            function close(v) { if (ov.parentNode) { ov.parentNode.removeChild(ov); } resolve(v); }
+            keep.onclick = function () { close(false); };
+            ok.onclick = function () { close(true); };
+            ov.onclick = function (e) { if (e.target === ov) { close(false); } };
+            document.addEventListener('keydown', function esc(e) {
+                if (e.key === 'Escape') { document.removeEventListener('keydown', esc); close(false); }
+            });
+            ok.focus();
+        });
+    }
+
     function wireRowButtons() {
         page.querySelectorAll('#tab-queue [data-cancel]').forEach(function (b) {
-            b.onclick = function () { api('DELETE', 'Jobs/' + encodeURIComponent(b.getAttribute('data-cancel')), {}).then(loadJobs); };
+            b.onclick = function () {
+                var id = b.getAttribute('data-cancel');
+                var job = (state.jobs || []).find(function (j) { return j.id === id; });
+                var running = job && job.status === 'running';
+                cmConfirm({
+                    title: running ? 'Cancel this analysis?' : 'Remove this queued job?',
+                    message: running
+                        ? 'The pass is running. Progress since its last checkpoint will be lost.'
+                        : 'It will be taken out of the queue. You can re-queue it later.',
+                    confirmText: running ? 'Cancel analysis' : 'Remove'
+                }).then(function (yes) {
+                    if (yes) { api('DELETE', 'Jobs/' + encodeURIComponent(id), {}).then(loadJobs); }
+                });
+            };
         });
         page.querySelectorAll('#tab-queue [data-remove]').forEach(function (b) {
-            b.onclick = function () { api('DELETE', 'Jobs/' + encodeURIComponent(b.getAttribute('data-remove')), {}).then(loadJobs); };
+            b.onclick = function () {
+                var id = b.getAttribute('data-remove');
+                cmConfirm({
+                    title: 'Remove from the list?',
+                    message: 'This only clears the finished job from this list. The film’s analysis '
+                        + 'and your review decisions are kept.',
+                    confirmText: 'Remove'
+                }).then(function (yes) {
+                    if (yes) { api('DELETE', 'Jobs/' + encodeURIComponent(id), {}).then(loadJobs); }
+                });
+            };
         });
         page.querySelectorAll('#tab-queue [data-requeue]').forEach(function (b) {
             b.onclick = function () {
@@ -919,9 +980,16 @@
     // queue controls
     page.querySelector('#CmShowAll').onclick = function () { state.hidden = {}; renderQueue(); };
     page.querySelector('#CmCancelAll').onclick = function () {
-        api('POST', 'Jobs/CancelAll', {}).then(function (res) {
-            if (res && res.cancelled != null) { page.querySelector('#CmQueueMsg').textContent = 'Cancelled ' + res.cancelled + ' job(s).'; }
-            loadJobs();
+        cmConfirm({
+            title: 'Cancel everything?',
+            message: 'All queued and running jobs will be cancelled. Finished jobs and their analyses are kept.',
+            confirmText: 'Cancel all'
+        }).then(function (yes) {
+            if (!yes) { return; }
+            api('POST', 'Jobs/CancelAll', {}).then(function (res) {
+                if (res && res.cancelled != null) { page.querySelector('#CmQueueMsg').textContent = 'Cancelled ' + res.cancelled + ' job(s).'; }
+                loadJobs();
+            });
         });
     };
     page.querySelector('#CmPause').onclick = function () {

@@ -9,6 +9,14 @@
     "imageUrl": "",
     "versions": [
       {
+        "version": "0.2.6.0",
+        "changelog": "Confirm before removing a job. The X buttons in the queue (cancel a running pass, drop a queued job, remove a finished one) and 'Cancel all' now ask first, so a mis-click can't silently drop a job. The Remove dialog makes clear it only clears the list entry — the film's analysis and your review decisions are kept. Builds on 0.2.5.0's player buttons.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.6.0.zip",
+        "checksum": "0cdc20590df965761824c876205ed424",
+        "timestamp": "2026-08-14T23:58:53"
+      },
+      {
         "version": "0.2.5.0",
         "changelog": "Player buttons, hardened. Adds a second in-player button, 'Review this film', that opens the worker's review page for whatever is playing. The flag button's placement is now robust: it re-adds itself on a short interval and targets the main control bar, so it can no longer quietly vanish when Jellyfin re-renders the controls. Admin-only, browser (Jellyfin Web) only. Builds on 0.2.4.0's flag-a-moment button.",
         "targetAbi": "10.11.0.0",
