@@ -8,13 +8,15 @@ from __future__ import annotations
 import logging
 import os
 import platform
+import subprocess
 import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
 from . import __version__
 from .logging_config import configure_logging, get_logger, tame_uvicorn_loggers
@@ -32,7 +34,9 @@ from .models import (
     JobCreate,
     JobStatus,
     MediaStatus,
+    PauseRequest,
     RenderRequest,
+    ReorderRequest,
     Segment,
     SegmentCreate,
     SegmentMerge,
@@ -48,15 +52,19 @@ from .review import (
     build_clip,
     build_filmstrip,
     build_peaks,
+    build_preview_clip,
+    build_scrub_audio,
     create_segment,
     delete_segment,
     grab_thumbnail,
     load_timeline,
     merge_into_one,
     render_page,
+    media_runtime_ms,
     resolve_media,
     set_approvals,
     sidecar_exists,
+    stream_command,
     update_segment,
     warm_media_index,
 )
@@ -197,6 +205,7 @@ def health() -> dict:
         "gpu": _gpu_info(),
         "engines": {name: eng.health() for name, eng in ENGINES.items()},
         "queueSize": jobs.queue_size(),
+        "paused": jobs.is_paused(),
     }
 
 
@@ -262,6 +271,23 @@ def list_jobs() -> list[Job]:
 def cancel_all_jobs() -> dict:
     """Stop the whole batch: cancel every queued or running job at once."""
     return {"cancelled": jobs.cancel_all()}
+
+
+@app.post("/api/jobs/reorder", response_model=list[Job])
+def reorder_jobs(req: ReorderRequest) -> list[Job]:
+    """Set the run order of the queued jobs, front-first, by id.
+
+    Only queued/rendering jobs are repositioned; the running job and terminal
+    jobs are left where they are, so a running pass is never interrupted. The
+    updated job list is returned so the UI re-renders from stored truth.
+    """
+    return jobs.reorder(req.ids)
+
+
+@app.post("/api/jobs/pause")
+def pause_queue(req: PauseRequest) -> dict:
+    """Hold or release the start of the next job (never preempts a running one)."""
+    return {"paused": jobs.set_paused(req.paused), "queueSize": jobs.queue_size()}
 
 
 @app.get("/api/jobs/{job_id}", response_model=Job)
@@ -352,6 +378,115 @@ def clip(
     return FileResponse(built, media_type="video/mp4")
 
 
+def _parse_spans(text: str) -> list[tuple[int, int]]:
+    """Parse "a-b,a-b" ms spans from a query param; skip anything malformed."""
+    spans: list[tuple[int, int]] = []
+    for part in text.split(",") if text else []:
+        a, _, b = part.partition("-")
+        try:
+            spans.append((int(a), int(b)))
+        except ValueError:
+            continue
+    return spans
+
+
+@app.get("/api/preview_clip")
+def preview_clip(
+    path: str, startMs: int, endMs: int, cut: str = "", mute: str = "", blur: str = ""
+) -> FileResponse:
+    """A cleaned preview of a window [startMs, endMs]: the ``cut`` spans are
+    removed (their footage never transcoded), the ``mute`` spans silenced, and the
+    ``blur`` spans blurred, so the review page can play the window as the viewer
+    will experience it — with every applicable decision applied, not just one
+    finding. Spans are comma-separated absolute-ms ``a-b`` pairs.
+    """
+    media = resolve_media(path)
+    if media is None:
+        raise HTTPException(404, f"media not found: {path}")
+    built = build_preview_clip(
+        media, startMs, endMs, _parse_spans(cut), _parse_spans(mute), _parse_spans(blur)
+    )
+    if built is None:
+        raise HTTPException(500, "could not build preview clip")
+    return FileResponse(built, media_type="video/mp4")
+
+
+@app.get("/api/stream")
+async def stream(
+    request: Request, path: str, startMs: int = 0, cut: str = "", mute: str = "", blur: str = ""
+) -> StreamingResponse:
+    """Whole-film continuous playback (Phase 2): a live, browser-playable stream
+    of the film from ``startMs`` to the end, transcoded on the fly to fragmented
+    MP4 — so the reviewer can hold play and watch the film run across scenes, not
+    just per-scene clips.
+
+    With no ``cut``/``mute`` it is the original audio/picture (Normal; the page
+    mutes the element for Muted). With them (Cleaned) the approved skips are cut
+    out and mutes silenced **live over the whole remaining film** — the
+    verify-the-invariant preview at film scale. Spans are comma-separated
+    absolute-ms ``a-b`` pairs, as for ``/api/preview_clip``.
+
+    Seeking is the page's job: it reloads this endpoint from a new ``startMs``.
+    Each stream owns one ffmpeg process, killed when the client disconnects (the
+    page swaps ``src``) so a re-seek never leaves a transcode running.
+    """
+    media = resolve_media(path)
+    if media is None:
+        raise HTTPException(404, f"media not found: {path}")
+    timeline = load_timeline(media)
+    runtime = media_runtime_ms(media, timeline) if timeline else startMs + 3_600_000
+    if startMs >= runtime:
+        raise HTTPException(416, "start past end of film")
+    cmd = stream_command(
+        media, startMs, runtime, _parse_spans(cut), _parse_spans(mute), _parse_spans(blur)
+    )
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+
+    async def pump():
+        # Async so a client disconnect (the page swaps src to re-seek) runs the
+        # finally promptly and kills ffmpeg — an orphaned transcode would steal
+        # the GPU the analysis passes need. The disconnect check at the top of
+        # the loop breaks us out at most one read after the client goes away.
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                chunk = await run_in_threadpool(proc.stdout.read, 64 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
+            await run_in_threadpool(proc.wait)
+
+    # No-store: the stream is live and offset-specific; caching it would break the
+    # page's startMs→film-time mapping on a re-seek.
+    return StreamingResponse(
+        pump(), media_type="video/mp4", headers={"Cache-Control": "no-store"}
+    )
+
+
+@app.get("/api/scrub_audio")
+def scrub_audio(path: str, startMs: int, endMs: int) -> FileResponse:
+    """A compact mono WAV of [startMs, endMs] for the page's live scrub-audio —
+    decoded once with WebAudio, then grains are played at the drag position so a
+    reviewer hears the film as they scrub to find an edit point."""
+    media = resolve_media(path)
+    if media is None:
+        raise HTTPException(404, f"media not found: {path}")
+    built = build_scrub_audio(media, startMs, endMs)
+    if built is None:
+        raise HTTPException(500, "could not extract scrub audio")
+    return FileResponse(
+        built, media_type="audio/wav", headers={"Cache-Control": "max-age=3600"}
+    )
+
+
 @app.get("/api/peaks")
 def peaks(path: str, startMs: int, endMs: int, pad: float = CLIP_PAD_S) -> dict:
     """Waveform peaks for the ±pad window around a finding, for the timing editor."""
@@ -438,6 +573,8 @@ def approve_segment(segment_id: int, path: str, patch: SegmentPatch) -> Timeline
         changes["action"] = patch.recommendedAction
     if "reasoning" in sent:
         changes["reasoning"] = patch.reasoning or ""
+    if "category" in sent and patch.category is not None:
+        changes["category"] = patch.category
 
     if update_segment(media, segment_id, **changes) is None:
         raise HTTPException(404, f"segment {segment_id} not found for {media}")
@@ -640,6 +777,17 @@ def reindex() -> dict:
     with _segments_neg_lock:
         _segments_neg_cache.clear()
     return {"status": "ok"}
+
+
+@app.post("/api/jobs/{job_id}/requeue", response_model=Job)
+def requeue_job(job_id: str) -> Job:
+    """Retry a failed or cancelled job from the back of the queue."""
+    try:
+        return jobs.requeue(job_id)
+    except KeyError:
+        raise HTTPException(404, f"job {job_id} not found")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
 
 @app.post("/api/jobs/{job_id}/render", response_model=Job, status_code=202)

@@ -8,6 +8,7 @@ from worker.review import (
     set_approval,
     set_approvals,
     sidecar_for,
+    update_segment,
 )
 
 
@@ -92,33 +93,52 @@ def test_page_embeds_segments_and_escapes_path(tmp_path):
     media, timeline = _film(tmp_path)
     html = render_page(media, timeline)
     assert "nudity" in html and "profanity" in html
-    # Windows paths are backslash-heavy; they must survive into JS intact
-    assert json.dumps(str(media))[1:-1].split("\\\\")[-1] in html.replace("\\\\", "\\\\")
-    assert "2 finding(s)" in html
+    # The media path is embedded as a JS string literal (the MEDIA const the
+    # page uses for every API call); backslash-heavy Windows paths must survive.
+    assert json.dumps(str(media)) in html
+    # Every finding's data is embedded for the client-side Studio model.
+    assert '"category": "nudity"' in html
 
 
-def test_page_has_review_controls(tmp_path):
-    """The muted-clip preview, filter toggle and timing badge are present."""
+def test_page_is_the_studio_workspace(tmp_path):
+    """The Studio page leads with discreet mode and the cut/leave language."""
     media, timeline = _film(tmp_path)
     html = render_page(media, timeline)
-    assert "Play muted" in html  # verify a profanity mute lands on the word
-    assert "Play flagged part only" in html
-    assert "Undecided" in html  # focus filter
-    assert "exact timing" in html or "timing" in html
+    assert "Discreet mode" in html  # picture hidden by default (a parent reviews)
+    assert "Hold to reveal" in html  # the escape hatch
+    assert "Cut it out" in html and "Leave it in" in html  # decision language
+    assert "picture hidden" in html
 
 
-def test_page_has_type_filter_and_bulk_controls(tmp_path):
-    """Reviewers can group by type and settle a whole group at once."""
+def test_page_has_minimap_editor_and_merge(tmp_path):
+    """The full-film minimap, progress bar, editor and merge affordance ship."""
     media, timeline = _film(tmp_path)
     html = render_page(media, timeline)
-    assert "typeFilters" in html  # per-type filter row
-    assert "All types" in html
-    assert "buildTypeFilters" in html
-    # bulk "apply to all shown" actions, wired to the batch endpoint
-    assert 'id=bulk' in html
-    assert "shown:" in html
-    assert "function bulkSet" in html
-    assert "method: 'PATCH'" in html
+    assert "D-ftrack" in html and "D-fbox" in html  # minimap track + viewport box
+    assert "D-progbar" in html and "cut out" in html  # triage progress
+    assert "D-edcard" in html  # the zoomable editor
+    assert "Merge" in html and "D-mergego" in html
+    # Persistence goes through the by-path segment endpoints.
+    assert "/api/segments" in html and "method:'PATCH'" in html.replace(" ", "")
+
+
+def test_editing_category_persists_and_leaves_other_fields_alone(tmp_path):
+    """Story: correct a mis-categorised detection in review, not just its action.
+
+    The Studio page sends `{category: ...}` on the same patch endpoint the
+    timing/reasoning edits use; only the field actually sent may change.
+    """
+    media, _ = _film(tmp_path)
+
+    updated = update_segment(media, 1, category="gore")
+
+    assert updated.category == "gore"
+    reloaded = load_timeline(media).segments[0]
+    assert reloaded.category == "gore"
+    # Re-categorising is neither a decision nor a retime.
+    assert reloaded.approved is None
+    assert (reloaded.startMs, reloaded.endMs) == (1000, 2000)
+    assert reloaded.recommendedAction == "skip"
 
 
 def test_muted_clip_has_its_own_cache_path(tmp_path):
@@ -155,6 +175,137 @@ def test_build_peaks_window_and_localization(tmp_path):
     loud = max(range(len(r["peaks"])), key=lambda i: r["peaks"][i])
     loud_ms = r["winStartMs"] + loud * (1000 // r["perSec"])
     assert 900 <= loud_ms <= 1350  # burst localizes at the finding (1000–1300ms)
+
+
+def test_build_preview_clip_cuts_skips_and_compresses(tmp_path):
+    """A cleaned window preview removes the cut spans (so their footage is never
+    transcoded) — the clip comes out shorter than the window by the cut length."""
+    import subprocess
+
+    from worker.review import build_preview_clip
+
+    media = tmp_path / "clip.mkv"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+         "-i", "testsrc=size=320x240:rate=24:duration=30",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=30",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(media)],
+        check=True,
+    )
+    # window [5s,25s] = 20s; cut [10s,20s] = 10s removed → ~10s cleaned clip
+    out = build_preview_clip(media, 5000, 25000, [(10000, 20000)], [(7000, 8000)])
+    assert out is not None and out.is_file()
+    dur = float(subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", str(out)],
+        capture_output=True, text=True,
+    ).stdout.strip())
+    assert 8.0 < dur < 12.0  # 20s window minus the 10s cut
+
+
+def test_stream_command_normal_is_a_straight_transcode(tmp_path):
+    """Normal/Muted whole-film stream: from the start point to the end, no cuts,
+    fragmented MP4 on stdout so a <video> plays it as it arrives."""
+    from worker.review import stream_command
+
+    cmd = stream_command(tmp_path / "f.mkv", 5000, 605000, [], [])
+    assert "-filter_complex" not in cmd  # nothing to cut → cheapest path
+    assert cmd[cmd.index("-ss") + 1] == "5.000"
+    assert cmd[cmd.index("-t") + 1] == "600.000"  # start→end of a 605s film
+    assert cmd[-2:] == ["-f", "mp4"] or cmd[-1] == "pipe:1"
+    assert "frag_keyframe+empty_moov+default_base_moof" in cmd  # streamable, no faststart
+
+
+def test_stream_command_cleaned_streams_a_playable_compressed_mp4(tmp_path):
+    """The invariant, not the exit code: run the cleaned whole-film stream for
+    real and confirm the piped bytes are a valid MP4 whose duration is the window
+    minus the cut — the skipped footage never reaches the browser."""
+    import subprocess
+
+    from worker.review import stream_command
+
+    media = tmp_path / "clip.mkv"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+         "-i", "testsrc=size=320x240:rate=24:duration=30",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=30",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(media)],
+        check=True,
+    )
+    # stream from 4s to the 30s end (26s), cutting 10s–20s → ~16s of playable film
+    cmd = stream_command(media, 4000, 30000, [(10000, 20000)], [(6000, 7000)])
+    out = tmp_path / "streamed.mp4"
+    with out.open("wb") as fh:
+        subprocess.run(cmd, stdout=fh, stderr=subprocess.DEVNULL, check=True)
+    assert out.stat().st_size > 0
+    dur = float(subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", str(out)],
+        capture_output=True, text=True,
+    ).stdout.strip())
+    assert 14.0 < dur < 18.0  # 26s remaining window minus the 10s cut
+
+
+def test_build_preview_clip_blurs_a_blur_finding(tmp_path):
+    """Cleaned preview applies the render's full-frame gblur to blur spans, so a
+    reviewer sees the blur where the clean copy will have one."""
+    import subprocess
+
+    from worker.review import build_preview_clip
+
+    media = tmp_path / "clip.mkv"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+         "-i", "testsrc=size=320x240:rate=24:duration=20",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=20",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(media)],
+        check=True,
+    )
+    # a window with no cuts/mutes but one blur span → a full-length, playable clip
+    out = build_preview_clip(media, 5000, 15000, [], [], [(8000, 11000)])
+    assert out is not None and out.is_file()
+    dur = float(subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", str(out)],
+        capture_output=True, text=True,
+    ).stdout.strip())
+    assert 9.0 < dur < 11.0  # blur doesn't cut — the whole 10s window survives
+
+
+def test_stream_command_applies_blur_over_the_film(tmp_path):
+    """A blur decision in Cleaned whole-film streaming becomes the render's gblur,
+    even with no cuts (so the straight-transcode path is not taken)."""
+    from worker.review import BLUR_SIGMA, stream_command
+
+    cmd = stream_command(tmp_path / "f.mkv", 0, 60000, [], [], [(10000, 20000)])
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    assert f"gblur=sigma={BLUR_SIGMA}" in fc
+    assert "enable='between(t,10.000,20.000)'" in fc
+
+
+def test_build_scrub_audio_extracts_a_decodable_wav(tmp_path):
+    """Live scrub audio: a compact mono WAV of the window the browser decodes for
+    grain playback. Verify the invariant — a real RIFF/WAVE file of the right
+    length, not just a zero exit code."""
+    import subprocess
+    import wave
+
+    from worker.review import build_scrub_audio
+
+    media = tmp_path / "clip.mkv"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+         "-i", "testsrc=size=320x240:rate=24:duration=20",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=20",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(media)],
+        check=True,
+    )
+    out = build_scrub_audio(media, 4000, 14000)  # a 10s window
+    assert out is not None and out.is_file()
+    with wave.open(str(out)) as w:
+        assert w.getnchannels() == 1  # downmixed to mono
+        secs = w.getnframes() / w.getframerate()
+        assert 9.0 < secs < 11.0  # the 10s window
 
 
 def test_build_filmstrip_returns_jpeg(tmp_path):

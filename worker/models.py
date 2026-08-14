@@ -73,6 +73,11 @@ class Job(BaseModel):
     enginePlanPath: Optional[str] = None
     # Path of the rendered clean copy, once rendering has completed.
     renderedPath: Optional[str] = None
+    #: Persisted queue order (lower = sooner). The worker always runs the
+    #: lowest-position runnable job, so an administrator can reorder what runs
+    #: next and the order survives a reload and a worker restart. Unset on rows
+    #: written before this existed; recovery derives one from ``createdAt``.
+    queuePosition: Optional[int] = None
 
 
 class SegmentPatch(BaseModel):
@@ -85,6 +90,10 @@ class SegmentPatch(BaseModel):
     #: Editable description/note — e.g. correcting the stale shot reference on a
     #: duplicated finding. Only applied when explicitly sent.
     reasoning: Optional[str] = None
+    #: Editable category, so a mis-categorised detection (a shirtless man read as
+    #: nudity) can be corrected in review, not just its action. Only applied when
+    #: explicitly sent.
+    category: Optional[str] = None
 
 
 class BulkApproval(BaseModel):
@@ -168,3 +177,19 @@ class StatusRequest(BaseModel):
     """Ask about a page of the library in one round trip."""
 
     paths: list[str] = Field(default_factory=list)
+
+
+class ReorderRequest(BaseModel):
+    """A new order for the queued jobs, front-first, by job id.
+
+    Only ids that are currently queued/rendering are repositioned; running,
+    terminal and unknown ids are ignored, so a running pass is never preempted.
+    """
+
+    ids: list[str] = Field(default_factory=list)
+
+
+class PauseRequest(BaseModel):
+    """Hold or release the start of the next job (never preempts a running one)."""
+
+    paused: bool = True

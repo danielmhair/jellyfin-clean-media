@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<!--
+  ============================================================================
+  PROTOTYPE — THROWAWAY.  Clean Media queue manager — FINAL-LOOK MOCKUP.
+  Static, non-functional. Shows the shipped appearance inside the Jellyfin
+  dashboard chrome. Interaction was validated in queue_manager_prototype.html.
+  Wide screens: controls (Show + Add to queue) on the left, queue lists on the
+  right; the add picker fills the left column to the bottom. Narrow screens
+  stack to one column. Real posters/collections come from Jellyfin; here they
+  are stand-ins, and film titles are generic per the repo's ground rules.
+  Not production code — captured to a throwaway branch, not main.
+  ============================================================================
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Clean Media — Analysis queue (final look)</title>
+<style>
+  :root{
+    --bg:#0c0d10; --panel:#141619; --panel-2:#191c21; --card:#1b1e24;
+    --line:#262a31; --line-2:#31363f;
+    --ink:#eceef1; --ink-2:#aab0b8; --muted:#767d87;
+    --accent:#4aa8ff; --accent-ink:#04121f;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.28);
+    --radius:14px;
+    --t-subtitles:#e0b344; --t-whisper:#f0885a; --t-vlm:#b585ff; --t-render:#37c6cf;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;background:#000;}
+  body{color:var(--ink);
+       font:14.5px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+       -webkit-font-smoothing:antialiased;}
+
+  .ribbon{background:rgba(224,179,68,.1);color:#e6cf9a;border-bottom:1px solid rgba(224,179,68,.25);
+    font-size:11.5px;letter-spacing:.05em;text-transform:uppercase;font-weight:700;
+    padding:5px 14px;text-align:center;}
+
+  /* ===== faux Jellyfin dashboard shell ===== */
+  .jf{display:grid;grid-template-columns:232px 1fr;min-height:100vh;
+      background:radial-gradient(1200px 600px at 78% -8%, #12161d 0%, transparent 60%), var(--bg);}
+  .jf-side{background:#101215;border-right:1px solid var(--line);padding:14px 10px;}
+  .jf-brand{display:flex;align-items:center;gap:10px;padding:8px 10px 16px;}
+  .jf-brand .logo{width:26px;height:26px;border-radius:7px;
+    background:conic-gradient(from 210deg,#aa5cff,#00a4dc,#aa5cff);}
+  .jf-brand b{font-size:15px;}
+  .jf-group{font-size:10.5px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);
+    padding:14px 12px 6px;}
+  .jf-nav{display:flex;align-items:center;gap:11px;padding:9px 12px;border-radius:9px;
+    color:var(--ink-2);font-size:13.5px;font-weight:600;cursor:default;}
+  .jf-nav .ic{width:18px;text-align:center;opacity:.8;}
+  .jf-nav.active{background:rgba(0,164,220,.14);color:#8fd6f4;}
+
+  .jf-main{display:flex;flex-direction:column;min-width:0;}
+  .jf-top{display:flex;align-items:center;gap:14px;padding:12px 22px;border-bottom:1px solid var(--line);
+    background:rgba(16,18,21,.7);backdrop-filter:blur(6px);position:sticky;top:0;z-index:5;}
+  .jf-top .crumbs{font-size:13.5px;color:var(--ink-2);}
+  .jf-top .crumbs b{color:var(--ink);}
+  .jf-top .grow{flex:1;}
+  .jf-top .search{background:var(--panel-2);border:1px solid var(--line);border-radius:9px;
+    padding:7px 12px;color:var(--muted);font-size:12.5px;width:190px;}
+  .jf-top .avatar{width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,#3a4658,#222933);}
+
+  .page{padding:24px 26px 70px;max-width:1320px;width:100%;}
+
+  .phead{display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:6px;}
+  .phead h1{font-size:23px;font-weight:750;letter-spacing:-.01em;margin:0;}
+  .phead .status{margin-left:auto;font-size:12.5px;color:var(--muted);display:flex;gap:16px;align-items:center;}
+  .phead .status .k{color:var(--ink-2);font-weight:600;}
+  .dot-live{width:8px;height:8px;border-radius:50%;background:#3fb950;display:inline-block;
+    box-shadow:0 0 0 3px rgba(63,185,80,.15);margin-right:6px;vertical-align:middle;}
+  .lede{color:var(--ink-2);margin:2px 0 20px;font-size:13.5px;}
+
+  h2{font-size:11.5px;font-weight:700;text-transform:uppercase;letter-spacing:.09em;
+     color:var(--muted);margin:24px 0 10px;display:flex;align-items:center;gap:8px;}
+  h2 .count{color:var(--ink-2);background:var(--panel-2);border:1px solid var(--line);
+     border-radius:999px;padding:1px 8px;font-size:11px;font-weight:600;letter-spacing:0;}
+  h2 .note{font-weight:600;letter-spacing:0;text-transform:none;color:var(--muted);font-size:11px;}
+
+  button{font:inherit;cursor:default;border:1px solid var(--line-2);background:var(--panel-2);
+    color:var(--ink);border-radius:9px;padding:8px 13px;font-size:13px;font-weight:600;}
+  button.danger{color:#ffb4b0;border-color:rgba(248,113,105,.3);background:rgba(248,113,105,.07);}
+  button.ghost{background:transparent;}
+  button.mini{padding:5px 9px;font-size:12px;border-radius:8px;}
+
+  /* ===== wide layout: controls left, queue right ===== */
+  .work{display:grid;grid-template-columns:1fr;gap:22px;align-items:stretch;}
+  @media(min-width:1080px){ .work{grid-template-columns:390px 1fr;} }
+  .leftcol{display:flex;flex-direction:column;gap:14px;min-width:0;}
+  .rightcol{min-width:0;}
+  .rightcol h2:first-child{margin-top:0;}
+
+  /* filters */
+  .filters{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+    background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:12px 14px;box-shadow:var(--shadow);}
+  .filters .flabel{font-size:12px;color:var(--muted);font-weight:600;margin-right:2px;}
+  .chip{display:inline-flex;align-items:center;gap:8px;padding:7px 12px 7px 10px;border-radius:999px;
+    border:1px solid var(--line-2);background:var(--panel-2);color:var(--ink);font-size:12.5px;font-weight:600;}
+  .chip .dot{width:10px;height:10px;border-radius:50%;box-shadow:0 0 0 3px rgba(255,255,255,.04);}
+  .chip .n{color:var(--muted);font-variant-numeric:tabular-nums;}
+  .chip.off{opacity:.4;filter:grayscale(.7);}
+  .filters .spacer{flex:1;}
+  .filters .link{background:none;border:none;color:var(--accent);font-weight:600;font-size:12.5px;}
+
+  /* add-to-queue fills the left column */
+  .addcard{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:14px 16px;box-shadow:var(--shadow);display:flex;flex-direction:column;flex:1;min-height:340px;}
+  .addhead{display:flex;align-items:center;gap:10px;margin-bottom:11px;}
+  .addhead .t{font-size:13px;font-weight:700;}
+  .addhead .s{font-size:12px;color:var(--muted);}
+  .seg{display:flex;gap:6px;flex-wrap:wrap;}
+  .seg .opt{display:inline-flex;align-items:center;gap:7px;padding:6px 11px;border-radius:9px;
+    border:1px solid var(--line-2);background:var(--panel-2);font-size:12px;font-weight:600;}
+  .seg .opt .dot{width:9px;height:9px;border-radius:50%;}
+  .seg .opt.sel{border-color:currentColor;background:rgba(255,255,255,.04);}
+  .search2{margin:13px 0 2px;background:var(--panel-2);border:1px solid var(--line);border-radius:9px;
+    padding:9px 12px;color:var(--muted);font-size:12.5px;}
+  .cblabel{font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);
+    margin:14px 2px 8px;font-weight:700;}
+  .collist{display:flex;flex-direction:column;gap:8px;overflow:auto;flex:1;}
+  .crow{display:flex;align-items:center;gap:11px;padding:9px 12px 9px 9px;border-radius:11px;
+    border:1px solid var(--line);background:var(--card);}
+  .crow .th{width:40px;height:40px;border-radius:9px;display:grid;place-items:center;font-size:19px;flex:0 0 auto;}
+  .crow .cn{font-size:13.5px;font-weight:650;}
+  .crow .cc{font-size:11.5px;color:var(--muted);}
+  .crow .go{margin-left:auto;color:var(--muted);font-size:18px;}
+
+  /* rows */
+  .rows{display:flex;flex-direction:column;gap:8px;}
+  .row{position:relative;display:flex;align-items:center;gap:12px;background:var(--card);
+    border:1px solid var(--line);border-radius:12px;padding:12px 14px 12px 0;
+    box-shadow:0 1px 1px rgba(0,0,0,.25);overflow:hidden;}
+  .row .stripe{width:4px;align-self:stretch;border-radius:0 4px 4px 0;flex:0 0 auto;}
+  .grip{flex:0 0 auto;width:26px;display:flex;justify-content:center;color:var(--muted);cursor:grab;}
+  .grip.dim{opacity:.22;cursor:default;}
+  .glyph{flex:0 0 auto;width:38px;height:38px;border-radius:10px;display:grid;place-items:center;font-size:18px;}
+  .info{flex:1 1 auto;min-width:0;}
+  .name{font-weight:650;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .sub{font-size:12.5px;color:var(--muted);margin-top:2px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+  .type-tag{font-size:11.5px;font-weight:700;padding:2px 8px;border-radius:999px;}
+  .bar{height:6px;background:#0e1013;border-radius:999px;overflow:hidden;margin-top:9px;max-width:520px;}
+  .barfill{height:100%;border-radius:999px;}
+  .pos{flex:0 0 auto;font-size:12px;font-weight:700;color:var(--muted);width:26px;text-align:center;
+    font-variant-numeric:tabular-nums;}
+  .acts{flex:0 0 auto;display:flex;gap:6px;align-items:center;padding-right:2px;}
+  .iconbtn{width:32px;height:32px;padding:0;display:grid;place-items:center;font-size:15px;border-radius:9px;}
+  .badge{font-size:11px;font-weight:700;padding:3px 9px;border-radius:999px;letter-spacing:.02em;}
+  .b-running{background:rgba(74,168,255,.16);color:#8cc6ff;}
+  .b-completed,.b-rendered{background:rgba(63,185,80,.16);color:#7ee787;}
+  .b-failed{background:rgba(248,113,105,.16);color:#ffb4b0;}
+  .recent .name{font-weight:600;color:var(--ink-2);}
+  .toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;}
+
+  /* ===== tabs (Queue / Settings — same page, no separate settings page) ===== */
+  .tabbar{display:flex;gap:2px;border-bottom:1px solid var(--line);margin:8px 0 20px;}
+  .tabbar button{background:none;border:none;border-bottom:2px solid transparent;border-radius:0;
+    padding:10px 16px;color:var(--ink-2);font-size:14.5px;font-weight:650;cursor:pointer;}
+  .tabbar button.on{color:var(--ink);border-bottom-color:var(--accent);}
+  .tabpanel[hidden]{display:none;}
+
+  /* ===== settings ===== */
+  .setwrap{max-width:1060px;}
+  .setgrid{display:grid;grid-template-columns:1fr;gap:16px;}
+  @media(min-width:900px){ .setgrid.two{grid-template-columns:1fr 1fr;} }
+  .scard{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:17px 19px;box-shadow:var(--shadow);}
+  .scard h3{margin:0;font-size:15.5px;font-weight:700;}
+  .scard .cdesc{font-size:12.5px;color:var(--muted);margin:3px 0 15px;}
+  .connpill{display:inline-flex;align-items:center;gap:9px;padding:8px 13px;border-radius:10px;
+    background:rgba(63,185,80,.1);border:1px solid rgba(63,185,80,.28);color:#9be6a6;
+    font-size:12.5px;font-weight:600;}
+  .field{margin-top:14px;}
+  .field label{display:block;font-size:12px;color:var(--ink-2);font-weight:600;margin-bottom:6px;}
+  .input{width:100%;background:var(--panel-2);border:1px solid var(--line);border-radius:9px;
+    padding:10px 12px;color:var(--ink);font-size:13.5px;}
+  .help{font-size:12px;color:var(--muted);margin:6px 0 0;}
+  .switch{position:relative;width:42px;height:24px;border-radius:999px;background:#2c3138;
+    border:1px solid var(--line-2);flex:0 0 auto;cursor:pointer;transition:.15s background;}
+  .switch.on{background:var(--accent);border-color:transparent;}
+  .switch .knob{position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;
+    background:#fff;transition:.15s left;}
+  .switch.on .knob{left:20px;}
+  .setrow{display:flex;align-items:flex-start;gap:14px;padding:13px 0;border-top:1px solid var(--line);}
+  .setrow.first{border-top:none;padding-top:2px;}
+  .setrow .txt{flex:1;min-width:0;}
+  .setrow .lab{font-weight:650;font-size:14px;}
+  .schead{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
+  .modeseg{display:inline-flex;background:var(--panel-2);border:1px solid var(--line-2);
+    border-radius:10px;padding:3px;}
+  .modeseg button{background:none;border:none;border-radius:8px;padding:7px 14px;font-size:12.5px;
+    font-weight:650;color:var(--ink-2);cursor:pointer;}
+  .modeseg button.on{background:var(--accent);color:var(--accent-ink);}
+  .linkbtn{background:none;border:none;color:var(--accent);font-weight:600;font-size:12px;
+    cursor:pointer;padding:0;}
+  .week{display:flex;flex-direction:column;gap:7px;margin-top:2px;}
+  .ruler,.dayrow{display:grid;grid-template-columns:44px 42px 1fr minmax(214px,auto);
+    align-items:center;gap:12px;}
+  .ruler .rt{grid-column:3;display:flex;justify-content:space-between;font-size:10.5px;color:var(--muted);}
+  .dayrow.off{opacity:.45;}
+  .dayrow .dn{font-size:13px;font-weight:600;color:var(--ink-2);}
+  .track{position:relative;height:26px;border-radius:8px;background:#0e1013;
+    border:1px solid var(--line);overflow:hidden;}
+  .track .tick{position:absolute;top:0;bottom:0;width:1px;background:var(--line);}
+  .band{position:absolute;top:0;bottom:0;background:linear-gradient(180deg,#5fb0ff,#3d86e0);opacity:.9;}
+  .ctl{display:flex;gap:8px;align-items:center;justify-content:flex-end;}
+  .timesel{background:var(--panel-2);border:1px solid var(--line);border-radius:8px;color:var(--ink);
+    font-size:12.5px;padding:6px 8px;font-variant-numeric:tabular-nums;cursor:pointer;}
+  .timesel:disabled{opacity:.5;cursor:default;}
+  .to{color:var(--muted);font-size:12px;}
+  .week.disabled{opacity:.5;pointer-events:none;}
+  .savebar{position:sticky;bottom:16px;margin-top:18px;display:flex;align-items:center;gap:12px;
+    background:rgba(20,22,25,.94);backdrop-filter:blur(8px);border:1px solid var(--line-2);
+    border-radius:12px;padding:12px 16px;box-shadow:var(--shadow);}
+  .savebar .grow{flex:1;}
+  .btn-primary{background:var(--accent);color:var(--accent-ink);border:none;border-radius:9px;
+    padding:10px 18px;font-weight:700;font-size:13.5px;cursor:pointer;}
+</style>
+</head>
+<body>
+  <div class="ribbon">Static mockup — final look · not functional</div>
+
+  <div class="jf">
+    <!-- sidebar -->
+    <aside class="jf-side">
+      <div class="jf-brand"><div class="logo"></div><b>Jellyfin</b></div>
+      <div class="jf-group">Server</div>
+      <div class="jf-nav"><span class="ic">🏠</span>Dashboard</div>
+      <div class="jf-nav"><span class="ic">▶</span>Playback</div>
+      <div class="jf-nav"><span class="ic">📚</span>Libraries</div>
+      <div class="jf-group">Plugins</div>
+      <div class="jf-nav active"><span class="ic">🛡</span>Clean Media</div>
+      <div class="jf-nav"><span class="ic">⚙</span>Clean Media settings</div>
+      <div class="jf-group">Advanced</div>
+      <div class="jf-nav"><span class="ic">📋</span>Logs</div>
+      <div class="jf-nav"><span class="ic">⏱</span>Scheduled tasks</div>
+    </aside>
+
+    <!-- main -->
+    <div class="jf-main">
+      <div class="jf-top">
+        <div class="crumbs">Dashboard · Plugins · <b>Clean Media</b></div>
+        <div class="grow"></div>
+        <div class="search">Search…</div>
+        <div class="avatar"></div>
+      </div>
+
+      <div class="page">
+        <div class="phead">
+          <h1>Clean Media</h1>
+          <div class="status">
+            <span><span class="dot-live"></span>Worker online</span>
+            <span><span class="k">GPU</span> NVIDIA RTX</span>
+            <span><span class="k">Hours</span> 22:00–06:00</span>
+          </div>
+        </div>
+
+        <div class="tabbar">
+          <button class="on" data-t="settings">Settings</button>
+          <button data-t="queue">Queue</button>
+        </div>
+
+        <div id="tab-queue" class="tabpanel" hidden>
+        <div class="lede">One worker, one GPU — the top job runs, the rest wait their turn.
+          Drag to reorder what runs next; a running job is never interrupted.</div>
+
+        <div class="work">
+          <!-- ===== LEFT: controls ===== -->
+          <div class="leftcol">
+            <div class="filters">
+              <span class="flabel">Show</span>
+              <span class="chip"><span class="dot" style="background:var(--t-subtitles)"></span>Subtitles<span class="n">3</span></span>
+              <span class="chip"><span class="dot" style="background:var(--t-whisper)"></span>Whisper<span class="n">1</span></span>
+              <span class="chip"><span class="dot" style="background:var(--t-vlm)"></span>Visual<span class="n">3</span></span>
+              <span class="chip off"><span class="dot" style="background:var(--t-render)"></span>Render<span class="n">1</span></span>
+              <span class="spacer"></span>
+              <button class="link">Show all</button>
+            </div>
+
+            <div class="addcard">
+              <div class="addhead"><span class="t">Add to queue</span>
+                <span class="s">— pick a pass, open a collection, click a film</span></div>
+              <div class="seg">
+                <span class="opt sel" style="color:var(--t-subtitles)"><span class="dot" style="background:var(--t-subtitles)"></span>Profanity · subtitles</span>
+                <span class="opt"><span class="dot" style="background:var(--t-whisper)"></span>Profanity · whisper</span>
+                <span class="opt"><span class="dot" style="background:var(--t-vlm)"></span>Visual scenes</span>
+                <span class="opt"><span class="dot" style="background:var(--t-render)"></span>Render clean copy</span>
+              </div>
+              <div class="search2">🔎  Search films…</div>
+              <div class="cblabel">Collections</div>
+              <div class="collist">
+                <div class="crow"><div class="th" style="background:linear-gradient(145deg,#2a3550,#1b2236)">🗂</div>
+                  <div><div class="cn">Movies</div><div class="cc">24 films</div></div><span class="go">›</span></div>
+                <div class="crow"><div class="th" style="background:linear-gradient(145deg,#4a2f52,#2a1b30)">🗂</div>
+                  <div><div class="cn">Kids &amp; Family</div><div class="cc">12 films</div></div><span class="go">›</span></div>
+                <div class="crow"><div class="th" style="background:linear-gradient(145deg,#1f4a45,#12302c)">🗂</div>
+                  <div><div class="cn">Documentaries</div><div class="cc">8 films</div></div><span class="go">›</span></div>
+                <div class="crow"><div class="th" style="background:linear-gradient(145deg,#4a3a1f,#2f2612)">🗂</div>
+                  <div><div class="cn">Late Night</div><div class="cc">5 films</div></div><span class="go">›</span></div>
+                <div class="crow"><div class="th" style="background:linear-gradient(145deg,#3a2440,#241528)">🗂</div>
+                  <div><div class="cn">Classics</div><div class="cc">17 films</div></div><span class="go">›</span></div>
+                <div class="crow"><div class="th" style="background:linear-gradient(145deg,#243a44,#152730)">🗂</div>
+                  <div><div class="cn">Holiday</div><div class="cc">9 films</div></div><span class="go">›</span></div>
+                <div class="crow"><div class="th" style="background:linear-gradient(145deg,#443024,#2f2015)">🗂</div>
+                  <div><div class="cn">Anime</div><div class="cc">31 films</div></div><span class="go">›</span></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ===== RIGHT: queue ===== -->
+          <div class="rightcol">
+            <h2>Running now <span class="count">1</span></h2>
+            <div class="rows">
+              <div class="row">
+                <div class="stripe" style="background:var(--t-vlm)"></div>
+                <div class="grip dim"><svg width="12" height="18" viewBox="0 0 12 18"><g fill="currentColor"><circle cx="3" cy="3" r="1.6"/><circle cx="9" cy="3" r="1.6"/><circle cx="3" cy="9" r="1.6"/><circle cx="9" cy="9" r="1.6"/><circle cx="3" cy="15" r="1.6"/><circle cx="9" cy="15" r="1.6"/></g></svg></div>
+                <div class="glyph" style="background:rgba(181,133,255,.15)">👁</div>
+                <div class="info">
+                  <div class="name">Some Film (2010).mkv</div>
+                  <div class="sub"><span class="type-tag" style="background:rgba(181,133,255,.16);color:var(--t-vlm)">Visual</span>
+                    <span>42%</span><span>· sampling shots</span><span>· ~1h 20m left</span></div>
+                  <div class="bar"><div class="barfill" style="width:42%;background:var(--t-vlm)"></div></div>
+                </div>
+                <span class="badge b-running">running</span>
+                <div class="acts"><button class="iconbtn danger" title="Cancel">✕</button></div>
+              </div>
+            </div>
+
+            <h2>Up next <span class="count">3</span> <span class="note">— drag ⠿ to reorder</span></h2>
+            <div class="rows">
+              <div class="row">
+                <div class="stripe" style="background:var(--t-subtitles)"></div>
+                <div class="grip"><svg width="12" height="18" viewBox="0 0 12 18"><g fill="currentColor"><circle cx="3" cy="3" r="1.6"/><circle cx="9" cy="3" r="1.6"/><circle cx="3" cy="9" r="1.6"/><circle cx="9" cy="9" r="1.6"/><circle cx="3" cy="15" r="1.6"/><circle cx="9" cy="15" r="1.6"/></g></svg></div>
+                <span class="pos">1</span>
+                <div class="glyph" style="background:rgba(224,179,68,.15)">💬</div>
+                <div class="info"><div class="name">Another Movie (2019).mkv</div>
+                  <div class="sub"><span class="type-tag" style="background:rgba(224,179,68,.16);color:var(--t-subtitles)">Subtitles</span><span>queued</span></div></div>
+                <div class="acts"><button class="iconbtn danger" title="Delete">✕</button></div>
+              </div>
+              <div class="row">
+                <div class="stripe" style="background:var(--t-vlm)"></div>
+                <div class="grip"><svg width="12" height="18" viewBox="0 0 12 18"><g fill="currentColor"><circle cx="3" cy="3" r="1.6"/><circle cx="9" cy="3" r="1.6"/><circle cx="3" cy="9" r="1.6"/><circle cx="9" cy="9" r="1.6"/><circle cx="3" cy="15" r="1.6"/><circle cx="9" cy="15" r="1.6"/></g></svg></div>
+                <span class="pos">2</span>
+                <div class="glyph" style="background:rgba(181,133,255,.15)">👁</div>
+                <div class="info"><div class="name">Documentary (2021).mkv</div>
+                  <div class="sub"><span class="type-tag" style="background:rgba(181,133,255,.16);color:var(--t-vlm)">Visual</span><span>queued</span></div></div>
+                <div class="acts"><button class="iconbtn danger" title="Delete">✕</button></div>
+              </div>
+              <div class="row">
+                <div class="stripe" style="background:var(--t-render)"></div>
+                <div class="grip"><svg width="12" height="18" viewBox="0 0 12 18"><g fill="currentColor"><circle cx="3" cy="3" r="1.6"/><circle cx="9" cy="3" r="1.6"/><circle cx="3" cy="9" r="1.6"/><circle cx="9" cy="9" r="1.6"/><circle cx="3" cy="15" r="1.6"/><circle cx="9" cy="15" r="1.6"/></g></svg></div>
+                <span class="pos">3</span>
+                <div class="glyph" style="background:rgba(55,198,207,.15)">🎬</div>
+                <div class="info"><div class="name">Winter Tale (2013).mkv</div>
+                  <div class="sub"><span class="type-tag" style="background:rgba(55,198,207,.16);color:var(--t-render)">Render</span><span>queued · render-only</span></div></div>
+                <div class="acts"><button class="iconbtn danger" title="Delete">✕</button></div>
+              </div>
+            </div>
+
+            <div class="toolbar">
+              <button class="danger">Cancel all</button>
+              <button class="ghost">Pause queue</button>
+            </div>
+
+            <h2>Recent <span class="count">3</span></h2>
+            <div class="rows recent">
+              <div class="row">
+                <div class="stripe" style="background:var(--t-vlm)"></div>
+                <div class="glyph" style="background:rgba(181,133,255,.1);opacity:.8">👁</div>
+                <div class="info"><div class="name">Cartoon Hour (2022).mkv</div>
+                  <div class="sub"><span class="type-tag" style="background:rgba(181,133,255,.16);color:var(--t-vlm)">Visual</span><span>7 findings</span></div></div>
+                <span class="badge b-completed">completed</span>
+                <div class="acts"><button class="mini">Review</button><button class="iconbtn ghost" title="Remove">✕</button></div>
+              </div>
+              <div class="row">
+                <div class="stripe" style="background:var(--t-render)"></div>
+                <div class="glyph" style="background:rgba(55,198,207,.1);opacity:.8">🎬</div>
+                <div class="info"><div class="name">Road Trip (2017).mkv</div>
+                  <div class="sub"><span class="type-tag" style="background:rgba(55,198,207,.16);color:var(--t-render)">Render</span><span>clean copy written</span></div></div>
+                <span class="badge b-rendered">rendered</span>
+                <div class="acts"><button class="iconbtn ghost" title="Remove">✕</button></div>
+              </div>
+              <div class="row">
+                <div class="stripe" style="background:var(--t-subtitles)"></div>
+                <div class="glyph" style="background:rgba(224,179,68,.1);opacity:.8">💬</div>
+                <div class="info"><div class="name">Late Night (2008).mkv</div>
+                  <div class="sub"><span class="type-tag" style="background:rgba(224,179,68,.16);color:var(--t-subtitles)">Subtitles</span>
+                    <span style="color:#ffb4b0">· no subtitle track found</span></div></div>
+                <span class="badge b-failed">failed</span>
+                <div class="acts"><button class="mini">↻ Requeue</button><button class="iconbtn ghost" title="Remove">✕</button></div>
+              </div>
+            </div>
+          </div>
+        </div><!-- /work -->
+        </div><!-- /tab-queue -->
+
+        <!-- ===== SETTINGS (same page, folded in — no separate settings page) ===== -->
+        <div id="tab-settings" class="tabpanel">
+          <div class="setwrap">
+            <div class="setgrid two">
+              <!-- worker connection -->
+              <div class="scard">
+                <h3>Worker connection</h3>
+                <p class="cdesc">The Clean Media worker does the analysis and rendering. Jellyfin
+                  reaches it over your LAN or Tailscale.</p>
+                <div class="connpill"><span class="dot-live"></span>Connected · v0.9.0 · NVIDIA RTX · queue idle</div>
+                <div class="field">
+                  <label>Worker URL</label>
+                  <div class="input">http://192.168.68.98:8765</div>
+                  <p class="help">Base URL reachable from this Jellyfin server.</p>
+                </div>
+                <div class="field">
+                  <label>Timeout (seconds)</label>
+                  <div class="input" style="max-width:130px;">15</div>
+                </div>
+                <button class="mini" style="margin-top:15px;">Test connection</button>
+              </div>
+
+              <!-- playback -->
+              <div class="scard">
+                <h3>Playback</h3>
+                <p class="cdesc">How approved findings affect what plays in Jellyfin.</p>
+                <div class="setrow first">
+                  <div class="switch on"><div class="knob"></div></div>
+                  <div class="txt"><div class="lab">Skip approved scenes during playback</div>
+                    <p class="help">Reported to Jellyfin as Commercial segments. Set each client's
+                      Commercial action to “Skip” or “Ask to skip”.</p></div>
+                </div>
+                <div class="setrow">
+                  <div class="switch on"><div class="knob"></div></div>
+                  <div class="txt"><div class="lab">Only use approved findings</div>
+                    <p class="help">Strongly recommended. With this off, unreviewed AI guesses are
+                      skipped during playback.</p></div>
+                </div>
+                <p class="help" style="border-top:1px solid var(--line);padding-top:12px;margin-top:13px;">
+                  Jellyfin can only <b>skip</b> during playback. Muting profanity and blurring need a
+                  rendered clean copy from the worker — no client supports them live.</p>
+              </div>
+            </div>
+
+            <!-- schedule -->
+            <div class="scard" style="margin-top:16px;">
+              <div class="schead">
+                <div>
+                  <h3>Analysis schedule</h3>
+                  <p class="cdesc" style="margin-bottom:0;">Choose when library analysis may use the GPU.
+                    Rendering a clean copy is never delayed.</p>
+                </div>
+                <div class="modeseg" id="modeseg" style="margin-left:auto;">
+                  <button data-m="always">Always on</button>
+                  <button class="on" data-m="sched">Scheduled hours</button>
+                </div>
+              </div>
+
+              <div id="alwaysNote" class="help" style="margin-top:14px;display:none;">
+                Analysis runs whenever it's queued — no time restriction.</div>
+
+              <div id="schedBody">
+                <div style="display:flex;align-items:center;gap:10px;margin:14px 0 12px;flex-wrap:wrap;">
+                  <span class="help" style="margin:0;">Set the allowed hours for each day. Times are the
+                    worker's local time; a window whose end is earlier than its start runs overnight.</span>
+                  <button class="linkbtn" id="applyAll" style="margin-left:auto;">Copy Monday to every day</button>
+                </div>
+                <div class="week" id="week"></div>
+                <p class="help" style="margin-top:13px;">The long visual pass checkpoints and resumes
+                  across the overnight boundary, so a window that spans midnight is fine.</p>
+              </div>
+            </div>
+
+            <div class="savebar">
+              <span class="dot-live"></span><span class="help" style="margin:0;">Unsaved changes</span>
+              <div class="grow"></div>
+              <button class="mini ghost">Discard</button>
+              <button class="btn-primary">Save settings</button>
+            </div>
+          </div>
+        </div><!-- /tab-settings -->
+
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Presentation-only: switch tabs, flip toggles, edit + draw the schedule week.
+    document.querySelectorAll('.tabbar button').forEach(function(b){
+      b.onclick=function(){
+        document.querySelectorAll('.tabbar button').forEach(function(x){x.classList.toggle('on',x===b);});
+        document.getElementById('tab-queue').hidden = b.dataset.t!=='queue';
+        document.getElementById('tab-settings').hidden = b.dataset.t!=='settings';
+      };
+    });
+    // playback toggles only (day toggles are wired when the week is built)
+    document.querySelectorAll('.scard .setrow .switch').forEach(function(s){
+      s.onclick=function(){s.classList.toggle('on');};
+    });
+
+    // ---- editable weekly schedule (12-hour AM/PM) ----
+    function pad(n){return (n<10?"0":"")+n;}
+    function to12(mins){var h=Math.floor(mins/60),m=mins%60,p=h<12?"AM":"PM",h12=h%12===0?12:h%12;
+      return h12+":"+pad(m)+" "+p;}
+    function opts(sel){var s="";for(var t=0;t<1440;t+=15){
+      s+='<option value="'+t+'"'+(t===sel?" selected":"")+'>'+to12(t)+'</option>';}return s;}
+    function bands(s,e){var pc=function(x){return x/1440*100;};
+      if(s===e) return [[0,100]];
+      if(s<e)   return [[pc(s),pc(e-s)]];
+      return [[pc(s),pc(1440-s)],[0,pc(e)]];   // wraps past midnight
+    }
+    function paint(tr,s,e){
+      var ticks=[6,12,18].map(function(h){return '<div class="tick" style="left:'+(h/24*100)+'%"></div>';}).join("");
+      var b=bands(s,e).map(function(x){return '<div class="band" style="left:'+x[0]+'%;width:'+x[1]+'%"></div>';}).join("");
+      tr.innerHTML=ticks+b;
+    }
+    var days=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+    var wk=document.getElementById("week");
+    wk.innerHTML='<div class="ruler"><div class="rt"><span>12 AM</span><span>6 AM</span><span>12 PM</span><span>6 PM</span><span>12 AM</span></div></div>'
+      + days.map(function(d){
+        return '<div class="dayrow"><span class="dn">'+d+'</span>'
+          +'<div class="switch on"><div class="knob"></div></div>'
+          +'<div class="track"></div>'
+          +'<div class="ctl"><select class="timesel start">'+opts(1320)+'</select>'
+          +'<span class="to">to</span><select class="timesel end">'+opts(360)+'</select></div></div>';
+      }).join("");
+    function rowUpdate(row){paint(row.querySelector(".track"),+row.querySelector(".start").value,+row.querySelector(".end").value);}
+    wk.querySelectorAll(".dayrow").forEach(function(row){
+      rowUpdate(row);
+      row.querySelectorAll("select").forEach(function(sel){sel.onchange=function(){rowUpdate(row);};});
+      var sw=row.querySelector(".switch");
+      sw.onclick=function(){sw.classList.toggle("on");var off=!sw.classList.contains("on");
+        row.classList.toggle("off",off);
+        row.querySelectorAll("select").forEach(function(s){s.disabled=off;});};
+    });
+    document.getElementById("applyAll").onclick=function(){
+      var first=wk.querySelector(".dayrow");
+      var s=first.querySelector(".start").value,e=first.querySelector(".end").value;
+      wk.querySelectorAll(".dayrow").forEach(function(row){
+        row.querySelector(".start").value=s;row.querySelector(".end").value=e;rowUpdate(row);});
+    };
+    document.querySelectorAll("#modeseg button").forEach(function(b){
+      b.onclick=function(){
+        document.querySelectorAll("#modeseg button").forEach(function(x){x.classList.toggle("on",x===b);});
+        var sched=b.dataset.m==="sched";
+        document.getElementById("schedBody").style.display=sched?"":"none";
+        document.getElementById("alwaysNote").style.display=sched?"none":"";
+      };
+    });
+  </script>
+</body>
+</html>

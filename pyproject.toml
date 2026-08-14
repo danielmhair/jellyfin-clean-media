@@ -24,6 +24,9 @@ dependencies = [
 dev = [
     "pytest>=8",
     "httpx>=0.27",
+    # Drives the real review page in a browser for the E2E suite (tests/e2e/).
+    # After `uv sync`, install the browser once: `uv run playwright install chromium`.
+    "playwright>=1.40",
 ]
 
 [tool.uv]

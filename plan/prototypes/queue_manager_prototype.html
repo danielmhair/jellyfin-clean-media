@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<!--
+  ============================================================================
+  PROTOTYPE — THROWAWAY.  Clean Media queue manager (feel + logic).
+  Answers: "does the queue-manager UI + reorder/requeue/state model feel right?"
+  Double-click to run. In-memory only, no worker, no persistence.
+  NOT production code. The validated decision goes into reviewPage.html + queue.py;
+  this file is captured to a throwaway branch, not main.
+  ============================================================================
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PROTOTYPE — Clean Media queue manager</title>
+<style>
+  :root{
+    --bg:#0c0d10; --panel:#141619; --panel-2:#191c21; --card:#1b1e24;
+    --line:#262a31; --line-2:#31363f;
+    --ink:#eceef1; --ink-2:#aab0b8; --muted:#767d87;
+    --accent:#4aa8ff; --accent-ink:#04121f;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.28);
+    --radius:14px;
+    /* type / engine colours */
+    --t-subtitles:#e0b344; --t-whisper:#f0885a; --t-vlm:#b585ff; --t-render:#37c6cf;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;}
+  body{background:
+        radial-gradient(1200px 600px at 80% -10%, #12161d 0%, transparent 60%),
+        var(--bg);
+       color:var(--ink);min-height:100vh;
+       font:14.5px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+       -webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1180px;margin:0 auto;padding:26px 24px 80px;}
+
+  /* header */
+  .top{display:flex;align-items:center;gap:14px;margin-bottom:6px;}
+  .top h1{font-size:22px;font-weight:700;letter-spacing:-.01em;margin:0;}
+  .proto-pill{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;
+    color:#f0d9a0;background:rgba(224,179,68,.12);border:1px solid rgba(224,179,68,.35);
+    padding:3px 9px;border-radius:999px;}
+  .lede{color:var(--ink-2);margin:2px 0 20px;font-size:13.5px;}
+
+  h2{font-size:11.5px;font-weight:700;text-transform:uppercase;letter-spacing:.09em;
+     color:var(--muted);margin:26px 0 10px;display:flex;align-items:center;gap:8px;}
+  h2 .count{color:var(--ink-2);background:var(--panel-2);border:1px solid var(--line);
+     border-radius:999px;padding:1px 8px;font-size:11px;font-weight:600;letter-spacing:0;}
+
+  .cols{display:grid;grid-template-columns:1fr 340px;gap:26px;align-items:start;}
+  @media(max-width:920px){.cols{grid-template-columns:1fr;}}
+
+  /* generic controls */
+  button{font:inherit;cursor:pointer;border:1px solid var(--line-2);background:var(--panel-2);
+    color:var(--ink);border-radius:9px;padding:8px 13px;font-size:13px;font-weight:600;
+    transition:.13s filter,.13s background,.13s border-color,.13s transform;}
+  button:hover{filter:brightness(1.15);}
+  button:active{transform:translateY(1px);}
+  button:disabled{opacity:.35;cursor:default;filter:none;}
+  button.primary{background:var(--accent);color:var(--accent-ink);border-color:transparent;}
+  button.ghost{background:transparent;}
+  button.danger{color:#ffb4b0;border-color:rgba(248,113,105,.3);background:rgba(248,113,105,.07);}
+  button.mini{padding:5px 9px;font-size:12px;border-radius:8px;}
+
+  /* ===== filter / legend bar ===== */
+  .filters{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+    background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:12px 14px;box-shadow:var(--shadow);}
+  .filters .flabel{font-size:12px;color:var(--muted);font-weight:600;margin-right:2px;}
+  .chip{display:inline-flex;align-items:center;gap:8px;padding:7px 12px 7px 10px;
+    border-radius:999px;border:1px solid var(--line-2);background:var(--panel-2);
+    color:var(--ink);font-size:12.5px;font-weight:600;cursor:pointer;user-select:none;
+    transition:.13s all;}
+  .chip .dot{width:10px;height:10px;border-radius:50%;box-shadow:0 0 0 3px rgba(255,255,255,.04);}
+  .chip .n{color:var(--muted);font-weight:600;font-variant-numeric:tabular-nums;}
+  .chip.off{opacity:.4;filter:grayscale(.7);}
+  .chip.off .dot{background:var(--muted)!important;}
+  .chip:hover{border-color:var(--line-2);filter:brightness(1.1);}
+  .filters .spacer{flex:1;}
+  .filters .link{background:none;border:none;color:var(--accent);font-weight:600;font-size:12.5px;
+    padding:4px 2px;}
+
+  /* ===== add strip ===== */
+  .addcard{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:14px 16px 16px;box-shadow:var(--shadow);margin-top:14px;}
+  .addhead{display:flex;align-items:center;gap:10px;margin-bottom:12px;}
+  .addhead .t{font-size:13px;font-weight:700;}
+  .addhead .s{font-size:12px;color:var(--muted);}
+  .seg{display:inline-flex;gap:6px;flex-wrap:wrap;}
+  .seg .opt{display:inline-flex;align-items:center;gap:7px;padding:7px 12px;border-radius:9px;
+    border:1px solid var(--line-2);background:var(--panel-2);font-size:12.5px;font-weight:600;
+    cursor:pointer;transition:.13s all;}
+  .seg .opt .dot{width:9px;height:9px;border-radius:50%;}
+  .seg .opt.sel{border-color:currentColor;background:rgba(255,255,255,.04);}
+  .films{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:10px;margin-top:14px;}
+  .film{position:relative;border-radius:11px;overflow:hidden;cursor:pointer;border:1px solid var(--line);
+    background:var(--card);transition:.14s transform,.14s border-color;}
+  .film:hover{transform:translateY(-2px);border-color:var(--line-2);}
+  .film .poster{aspect-ratio:2/3;display:grid;place-items:center;color:#fff;font-weight:800;
+    font-size:26px;letter-spacing:.02em;text-shadow:0 1px 6px rgba(0,0,0,.45);}
+  .film .cap{padding:7px 9px 9px;font-size:12px;line-height:1.3;color:var(--ink-2);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .film .plus{position:absolute;top:8px;right:8px;width:26px;height:26px;border-radius:50%;
+    background:rgba(0,0,0,.55);backdrop-filter:blur(4px);display:grid;place-items:center;
+    font-size:16px;font-weight:700;color:#fff;opacity:0;transition:.14s opacity;}
+  .film:hover .plus{opacity:1;}
+  .film .cnt{position:absolute;top:8px;right:8px;padding:2px 9px;border-radius:999px;
+    background:rgba(0,0,0,.6);backdrop-filter:blur(4px);font-size:11.5px;font-weight:700;color:#fff;}
+  .film .poster .folder{font-size:34px;opacity:.9;}
+  .film.col:hover{border-color:var(--accent);}
+  .addnav{display:flex;align-items:center;gap:12px;margin-top:14px;min-height:0;}
+  .addnav:empty{display:none;}
+  .addnav .crumb{font-size:13px;font-weight:700;}
+  .addnav .crumb .muted{color:var(--muted);font-weight:600;}
+  .toast{position:absolute;inset:0;display:grid;place-items:center;background:rgba(20,120,60,.82);
+    color:#fff;font-weight:700;font-size:13px;opacity:0;pointer-events:none;transition:.15s opacity;}
+  .film.added .toast{opacity:1;}
+
+  /* ===== rows ===== */
+  .rows{display:flex;flex-direction:column;gap:8px;}
+  .row{position:relative;display:flex;align-items:center;gap:12px;background:var(--card);
+    border:1px solid var(--line);border-radius:12px;padding:12px 14px 12px 0;
+    box-shadow:0 1px 1px rgba(0,0,0,.25);overflow:hidden;}
+  .row .stripe{width:4px;align-self:stretch;border-radius:0 4px 4px 0;flex:0 0 auto;}
+  .row.dragging{opacity:.4;}
+  .row.drop-before{box-shadow:inset 0 3px 0 var(--accent);}
+  .row.drop-after{box-shadow:inset 0 -3px 0 var(--accent);}
+  .grip{flex:0 0 auto;width:26px;display:flex;justify-content:center;color:var(--muted);
+    cursor:grab;touch-action:none;}
+  .grip:active{cursor:grabbing;}
+  .grip svg{display:block;}
+  .glyph{flex:0 0 auto;width:38px;height:38px;border-radius:10px;display:grid;place-items:center;
+    font-size:18px;}
+  .info{flex:1 1 auto;min-width:0;}
+  .name{font-weight:650;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .sub{font-size:12.5px;color:var(--muted);margin-top:2px;display:flex;align-items:center;gap:8px;
+    flex-wrap:wrap;}
+  .type-tag{font-size:11.5px;font-weight:700;padding:2px 8px;border-radius:999px;}
+  .bar{height:6px;background:#0e1013;border-radius:999px;overflow:hidden;margin-top:9px;max-width:420px;}
+  .barfill{height:100%;border-radius:999px;transition:width .3s ease;}
+  .pos{flex:0 0 auto;font-size:12px;font-weight:700;color:var(--muted);width:28px;text-align:center;
+    font-variant-numeric:tabular-nums;}
+  .acts{flex:0 0 auto;display:flex;gap:6px;align-items:center;padding-right:2px;}
+  .iconbtn{width:32px;height:32px;padding:0;display:grid;place-items:center;font-size:15px;
+    border-radius:9px;}
+  .badge{font-size:11px;font-weight:700;padding:3px 9px;border-radius:999px;letter-spacing:.02em;}
+  .b-running{background:rgba(74,168,255,.16);color:#8cc6ff;}
+  .b-rendering{background:rgba(55,198,207,.16);color:#7fe0e6;}
+  .b-completed,.b-rendered{background:rgba(63,185,80,.16);color:#7ee787;}
+  .b-failed,.b-cancelled{background:rgba(248,113,105,.16);color:#ffb4b0;}
+  .recent .name{font-weight:600;color:var(--ink-2);}
+  .empty{color:var(--muted);font-size:13px;padding:16px;border:1px dashed var(--line-2);
+    border-radius:12px;text-align:center;}
+
+  /* ===== sidebar (dev/validation) ===== */
+  .side{position:sticky;top:20px;display:flex;flex-direction:column;gap:14px;}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:14px 15px;box-shadow:var(--shadow);}
+  .card h3{font-size:11.5px;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);
+    margin:0 0 10px;font-weight:700;}
+  .tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;}
+  .tabs button{padding:6px 10px;font-size:12px;border-radius:8px;}
+  .tabs button.on{background:var(--accent);color:var(--accent-ink);border-color:transparent;}
+  .step{font-size:12.5px;color:var(--ink-2);white-space:pre-wrap;min-height:44px;}
+  pre{background:#08090b;border:1px solid var(--line);border-radius:10px;padding:11px;
+    font:11.5px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#a9d4c4;
+    overflow:auto;max-height:260px;margin:0;}
+  .log{font:11.5px/1.5 ui-monospace,Menlo,Consolas,monospace;color:#9aa0a8;max-height:150px;
+    overflow:auto;}
+  .log div{padding:2px 0;border-bottom:1px solid #14161a;}
+  .toolbar{display:flex;gap:8px;flex-wrap:wrap;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <h1>Analysis queue</h1>
+    <span class="proto-pill">Prototype</span>
+  </div>
+  <div class="lede">One worker, one GPU — the top job runs, the rest wait their turn.
+    Drag to reorder what runs next; a running job is never interrupted.</div>
+
+  <div class="cols">
+    <!-- ================= LEFT: queue manager ================= -->
+    <div>
+      <!-- filter / legend -->
+      <div class="filters" id="filters">
+        <span class="flabel">Show</span>
+        <span id="chips" style="display:contents;"></span>
+        <span class="spacer"></span>
+        <button class="link" id="showAll">Show all</button>
+      </div>
+
+      <!-- add films (no dropdown — pick engine, then click a poster) -->
+      <div class="addcard">
+        <div class="addhead">
+          <span class="t">Add to queue</span>
+          <span class="s" id="addHint">— choose a pass, then open a collection</span>
+        </div>
+        <div class="seg" id="engineSeg"></div>
+        <div class="addnav" id="addNav"></div>
+        <div class="films" id="films"></div>
+      </div>
+
+      <h2>Running now <span class="count" id="cActive">0</span></h2>
+      <div class="rows" id="active"></div>
+
+      <h2>Up next <span class="count" id="cQueued">0</span>
+        <span style="font-weight:600;letter-spacing:0;text-transform:none;color:var(--muted);font-size:11px;">— drag ⠿ to reorder</span>
+      </h2>
+      <div class="rows" id="queued"></div>
+
+      <div class="toolbar" style="margin-top:14px;">
+        <button class="danger" id="btnCancelAll">Cancel all</button>
+        <button class="ghost" id="btnTick">▶ Process step</button>
+        <button class="ghost" id="btnAutorun">⏩ Auto-run</button>
+        <button class="ghost" id="btnReset">Reset</button>
+      </div>
+
+      <h2>Recent <span class="count" id="cRecent">0</span></h2>
+      <div class="rows recent" id="recent"></div>
+    </div>
+
+    <!-- ================= RIGHT: validation aids ================= -->
+    <div class="side">
+      <div class="card">
+        <h3>Guided walkthroughs</h3>
+        <div class="tabs" id="tabs"></div>
+        <div class="step" id="stepText">Free play, or pick a walkthrough.</div>
+        <div class="toolbar" style="margin-top:10px;">
+          <button class="primary mini" id="btnNext" disabled>Next step ▸</button>
+          <button class="mini ghost" id="btnScenarioReset">Restart</button>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Full queue state</h3>
+        <pre id="state"></pre>
+      </div>
+      <div class="card">
+        <h3>Action log</h3>
+        <div class="log" id="log"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ============================================================================
+   TYPE SYSTEM — colour + glyph per engine "type" (the thing the queue shows)
+   ============================================================================ */
+var TYPES = {
+  subtitles:{label:"Profanity · subtitles", tag:"Subtitles", color:"#e0b344", glyph:"💬"},
+  whisper:  {label:"Profanity · whisper",   tag:"Whisper",   color:"#f0885a", glyph:"🎙"},
+  vlm:      {label:"Visual scenes",         tag:"Visual",    color:"#b585ff", glyph:"👁"},
+  render:   {label:"Render clean copy",     tag:"Render",    color:"#37c6cf", glyph:"🎬"},
+};
+var ORDER = ["subtitles","whisper","vlm","render"];
+// Collections drill down to films, exactly as the plugin dashboard navigates
+// libraries → items. (Real posters come from Jellyfin; these are stand-ins.)
+var COLLECTIONS = [
+  {name:"Movies",        films:["Some Film (2010).mkv","Another Movie (2019).mkv","Road Trip (2017).mkv","Winter Tale (2013).mkv"]},
+  {name:"Kids",          films:["Cartoon Hour (2022).mkv","Family Feature (2015).mkv"]},
+  {name:"Documentaries", films:["Documentary (2021).mkv","Deep Ocean (2020).mkv"]},
+  {name:"Late Night",    films:["Late Night (2008).mkv"]},
+];
+var hidden = {};            // engine -> true when its rows are toggled off
+var addEngine = "subtitles";
+var addView = null;         // null = collections list; else index into COLLECTIONS
+
+/* ============================================================================
+   STATE MODEL (mirrors queue.py intent) — the logic we're validating
+   ============================================================================ */
+var jobs=[], seq=0, posCounter=0, clock=0;
+function alloc(){ return posCounter++; }
+function now(){ return clock++; }
+function isPending(j){ return j.status==="queued"||j.status==="rendering"; }
+function isActive(j){ return j.status==="running"||j.status==="rendering"; }
+function isTerminal(j){ return ["completed","failed","cancelled","rendered"].includes(j.status); }
+function mk(name,engine,status){
+  var pending=!status||status==="queued"||status==="rendering";
+  return {id:"job"+(++seq),name:name,engine:engine,status:status||"queued",progress:0,stage:"",
+          error:null,queuePosition:pending?alloc():null,createdAt:now()};
+}
+function seed(){
+  jobs=[];seq=0;posCounter=0;clock=0;
+  var r=mk("Some Film (2010).mkv","vlm","running");r.progress=.42;r.stage="sampling shots";jobs.push(r);
+  jobs.push(mk("Another Movie (2019).mkv","subtitles"));
+  jobs.push(mk("Documentary (2021).mkv","vlm"));
+  jobs.push(mk("Family Feature (2015).mkv","whisper"));
+  var f=mk("Late Night (2008).mkv","subtitles","failed");f.error="no subtitle track found";jobs.push(f);
+  var c=mk("Cartoon Hour (2022).mkv","vlm","completed");c.progress=1;jobs.push(c);
+}
+function pending(){ return jobs.filter(isPending).sort((a,b)=>a.queuePosition-b.queuePosition); }
+
+function reorder(ids){ var by={};jobs.forEach(j=>by[j.id]=j);var p=0;
+  ids.forEach(id=>{var j=by[id];if(j&&isPending(j))j.queuePosition=p++;});
+  log("reorder → "+ids.map(short).join(" · ")); }
+function requeue(id){ var j=find(id);if(!j)return;
+  if(j.status!=="failed"&&j.status!=="cancelled"){log("requeue refused ("+j.status+")");return;}
+  j.status="queued";j.progress=0;j.error=null;j.stage="";j.queuePosition=alloc();
+  log("requeue → "+short(j)); }
+function del(id){ var j=find(id);if(!j)return;
+  if(isActive(j)){j.status="cancelled";j.stage="cancelled";log("cancel → "+short(j));}
+  else{jobs=jobs.filter(x=>x.id!==id);log("delete → "+short(j));} }
+function cancelAll(){ var n=0;jobs.forEach(j=>{if(j.status==="queued"||isActive(j)){j.status="cancelled";j.stage="cancelled";n++;}});
+  log("cancel all → "+n); }
+function add(name,engine){ jobs.push(mk(name,engine));log("add → "+name.replace(/ \(.*/,"")+" ("+TYPES[engine].tag+")"); }
+function tick(){
+  var a=jobs.find(isActive);
+  if(a){ a.progress=Math.min(1,a.progress+.34); a.stage=a.progress>=1?"done":"working…";
+    if(a.progress>=1){a.status=a.engine==="render"?"rendered":"completed";a.queuePosition=null;log("finished → "+short(a));}
+    else return; }
+  var q=pending();
+  if(q.length){var n=q[0];n.status=n.engine==="render"?"rendering":"running";n.progress=.05;n.stage="starting…";
+    log("start → "+short(n)+" (was #"+n.queuePosition+")");}
+}
+function find(id){ return jobs.find(x=>x.id===id); }
+function short(j){ j=typeof j==="string"?find(j):j; return j?j.name.replace(/ \(.*/,"")+"·"+TYPES[j.engine].tag:""; }
+
+var logLines=[];
+function log(m){ logLines.unshift(m); if(logLines.length>60)logLines.pop(); render(); }
+
+/* ============================================================================
+   RENDER
+   ============================================================================ */
+function visible(j){ return !hidden[j.engine]; }
+function typeTag(e){ var t=TYPES[e]; return '<span class="type-tag" style="background:'+hex(t.color,.16)+';color:'+t.color+'">'+t.tag+'</span>'; }
+function hex(c,a){ var n=parseInt(c.slice(1),16); return 'rgba('+(n>>16&255)+','+(n>>8&255)+','+(n&255)+','+a+')'; }
+function gripSVG(){ return '<svg width="12" height="18" viewBox="0 0 12 18"><g fill="currentColor">'
+  +[3,9,15].map(y=>'<circle cx="3" cy="'+y+'" r="1.6"/><circle cx="9" cy="'+y+'" r="1.6"/>').join('')+'</g></svg>'; }
+
+function rowActive(j){ var t=TYPES[j.engine];
+  return '<div class="row"><div class="stripe" style="background:'+t.color+'"></div>'
+    +'<div class="grip" style="opacity:.25;cursor:default">'+gripSVG()+'</div>'
+    +'<div class="glyph" style="background:'+hex(t.color,.15)+'">'+t.glyph+'</div>'
+    +'<div class="info"><div class="name">'+esc(j.name)+'</div>'
+    +'<div class="sub">'+typeTag(j.engine)+'<span>'+Math.round(j.progress*100)+'%</span>'
+    +(j.stage?'<span>· '+esc(j.stage)+'</span>':'')+'</div>'
+    +'<div class="bar"><div class="barfill" style="width:'+Math.round(j.progress*100)+'%;background:'+t.color+'"></div></div></div>'
+    +'<span class="badge b-'+j.status+'">'+j.status+'</span>'
+    +'<div class="acts"><button class="iconbtn danger" title="Cancel" onclick="del(\''+j.id+'\')">✕</button></div></div>'; }
+
+function rowQueued(j,i){ var t=TYPES[j.engine];
+  return '<div class="row" draggable="false" data-id="'+j.id+'">'
+    +'<div class="stripe" style="background:'+t.color+'"></div>'
+    +'<div class="grip" data-grip="'+j.id+'" title="Drag to reorder">'+gripSVG()+'</div>'
+    +'<span class="pos">'+(i+1)+'</span>'
+    +'<div class="glyph" style="background:'+hex(t.color,.15)+'">'+t.glyph+'</div>'
+    +'<div class="info"><div class="name">'+esc(j.name)+'</div>'
+    +'<div class="sub">'+typeTag(j.engine)+'<span>queued</span></div></div>'
+    +'<div class="acts"><button class="iconbtn danger" title="Delete" onclick="del(\''+j.id+'\')">✕</button></div></div>'; }
+
+function rowRecent(j){ var t=TYPES[j.engine];var can=j.status==="failed"||j.status==="cancelled";
+  return '<div class="row"><div class="stripe" style="background:'+t.color+'"></div>'
+    +'<div class="glyph" style="background:'+hex(t.color,.1)+';opacity:.8">'+t.glyph+'</div>'
+    +'<div class="info"><div class="name">'+esc(j.name)+'</div>'
+    +'<div class="sub">'+typeTag(j.engine)+(j.error?'<span style="color:#ffb4b0">· '+esc(j.error)+'</span>':'')+'</div></div>'
+    +'<span class="badge b-'+j.status+'">'+j.status+'</span>'
+    +'<div class="acts">'
+    +(can?'<button class="mini" onclick="requeue(\''+j.id+'\')">↻ Requeue</button>':'')
+    +'<button class="iconbtn ghost" title="Remove" onclick="del(\''+j.id+'\')">✕</button></div></div>'; }
+
+function renderChips(){
+  var counts={}; ORDER.forEach(e=>counts[e]=0);
+  jobs.forEach(j=>counts[j.engine]++);
+  document.getElementById("chips").innerHTML = ORDER.map(e=>{var t=TYPES[e];
+    return '<span class="chip '+(hidden[e]?'off':'')+'" data-eng="'+e+'">'
+      +'<span class="dot" style="background:'+t.color+'"></span>'+t.tag
+      +'<span class="n">'+counts[e]+'</span></span>';}).join("");
+  document.querySelectorAll('#chips .chip').forEach(c=>c.onclick=()=>{
+    var e=c.getAttribute('data-eng'); hidden[e]=!hidden[e]; render(); });
+}
+function renderSeg(){
+  document.getElementById("engineSeg").innerHTML = ORDER.map(e=>{var t=TYPES[e];
+    return '<span class="opt '+(addEngine===e?'sel':'')+'" data-eng="'+e+'" style="color:'
+      +(addEngine===e?t.color:'var(--ink)')+'"><span class="dot" style="background:'+t.color+'"></span>'
+      +t.label+'</span>';}).join("");
+  document.querySelectorAll('#engineSeg .opt').forEach(o=>o.onclick=()=>{
+    addEngine=o.getAttribute('data-eng'); renderSeg(); });
+}
+function posterGradient(name){ var h=0;for(var i=0;i<name.length;i++)h=(h*31+name.charCodeAt(i))>>>0;
+  var a=h%360,b=(a+40)%360; return 'linear-gradient(145deg,hsl('+a+' 45% 32%),hsl('+b+' 50% 20%))'; }
+function initials(name){ return name.replace(/ \(.*/,"").split(/\s+/).slice(0,2).map(w=>w[0]).join("").toUpperCase(); }
+function filmCard(n){
+  return '<div class="film" data-film="'+esc(n)+'"><div class="poster" style="background:'+posterGradient(n)+'">'
+    +initials(n)+'</div><div class="plus">＋</div><div class="toast">Queued ✓</div>'
+    +'<div class="cap">'+esc(n.replace(/ \(.*/,""))+'</div></div>';
+}
+function collectionCard(c,i){
+  return '<div class="film col" data-col="'+i+'"><div class="poster" style="background:'+posterGradient(c.name)+'">'
+    +'<span class="folder">🗂</span></div><div class="cnt">'+c.films.length+'</div>'
+    +'<div class="cap">'+esc(c.name)+'</div></div>';
+}
+function renderAdd(){
+  var nav=document.getElementById("addNav"), films=document.getElementById("films");
+  var hint=document.getElementById("addHint");
+  if(addView===null){
+    nav.innerHTML="";
+    hint.textContent="— choose a pass, then open a collection";
+    films.innerHTML = COLLECTIONS.map(collectionCard).join("");
+    films.querySelectorAll('[data-col]').forEach(el=>el.onclick=()=>{addView=+el.getAttribute('data-col');renderAdd();});
+  } else {
+    var c=COLLECTIONS[addView];
+    hint.textContent="— click a film to queue it";
+    nav.innerHTML='<button class="mini ghost" id="addBack">← Collections</button>'
+      +'<span class="crumb">'+esc(c.name)+' <span class="muted">· '+c.films.length+' films</span></span>';
+    document.getElementById("addBack").onclick=()=>{addView=null;renderAdd();};
+    films.innerHTML = c.films.map(filmCard).join("");
+    films.querySelectorAll('[data-film]').forEach(el=>el.onclick=()=>{
+      add(el.getAttribute('data-film'), addEngine);
+      el.classList.add('added'); setTimeout(()=>el.classList.remove('added'),650); });
+  }
+}
+
+function render(){
+  var act=jobs.filter(j=>isActive(j)&&visible(j));
+  var q=pending().filter(visible);
+  var rec=jobs.filter(j=>isTerminal(j)&&visible(j)).sort((a,b)=>b.createdAt-a.createdAt);
+
+  document.getElementById("active").innerHTML = act.length?act.map(rowActive).join(""):'<div class="empty">Idle — nothing running</div>';
+  document.getElementById("queued").innerHTML = q.length?q.map(rowQueued).join(""):'<div class="empty">Queue is empty</div>';
+  document.getElementById("recent").innerHTML = rec.length?rec.map(rowRecent).join(""):'<div class="empty">Nothing finished yet</div>';
+  document.getElementById("cActive").textContent=act.length;
+  document.getElementById("cQueued").textContent=q.length;
+  document.getElementById("cRecent").textContent=rec.length;
+
+  wireDrag();
+  renderChips();
+  document.getElementById("state").textContent = JSON.stringify(
+    jobs.map(j=>({id:j.id,name:j.name.replace(/ \(.*/,""),type:TYPES[j.engine].tag,status:j.status,
+      pos:j.queuePosition,prog:+j.progress.toFixed(2)})),null,1);
+  document.getElementById("log").innerHTML = logLines.map(l=>'<div>'+esc(l)+'</div>').join("");
+  document.getElementById("btnTick").disabled = !jobs.some(isActive)&&!pending().length;
+}
+function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+/* ============================================================================
+   DRAG-TO-REORDER — grip-initiated native DnD, drop-line indicator
+   ============================================================================ */
+var dragId=null;
+function wireDrag(){
+  document.querySelectorAll('#queued .row').forEach(row=>{
+    var id=row.getAttribute('data-id');
+    var grip=row.querySelector('[data-grip]');
+    if(grip){ grip.addEventListener('mousedown',()=>row.setAttribute('draggable','true'));
+      row.addEventListener('mouseup',()=>row.setAttribute('draggable','false')); }
+    row.addEventListener('dragstart',e=>{dragId=id;row.classList.add('dragging');e.dataTransfer.effectAllowed='move';});
+    row.addEventListener('dragend',()=>{dragId=null;row.setAttribute('draggable','false');clearDrop();render();});
+    row.addEventListener('dragover',e=>{e.preventDefault();if(dragId===id)return;
+      var r=row.getBoundingClientRect();var after=e.clientY>r.top+r.height/2;
+      clearDrop();row.classList.add(after?'drop-after':'drop-before');});
+    row.addEventListener('drop',e=>{e.preventDefault();if(!dragId||dragId===id)return;
+      var after=row.classList.contains('drop-after');
+      var order=pending().filter(visible).map(j=>j.id);
+      order=order.filter(x=>x!==dragId);
+      var idx=order.indexOf(id)+(after?1:0);
+      order.splice(idx,0,dragId);
+      reorder(order);clearDrop();});
+  });
+}
+function clearDrop(){ document.querySelectorAll('.drop-before,.drop-after').forEach(r=>r.classList.remove('drop-before','drop-after')); }
+
+/* ============================================================================
+   GUIDED WALKTHROUGHS
+   ============================================================================ */
+var SCENARIOS={
+  "Free play":null,
+  "Reorder past running":[
+    ["A visual pass is running; three jobs queued behind it. Drag the whisper job to the top — or watch it happen.",seed],
+    ["Promote the whisper job to the front of the queue.",()=>{var q=pending();var w=q.find(j=>j.engine==='whisper');reorder([w.id].concat(q.filter(j=>j.id!==w.id).map(j=>j.id)));}],
+    ["Process a step — the RUNNING job is untouched. Reorder only changes what runs next.",tick],
+    ["Finish the running job…",()=>{for(var k=0;k<4;k++)tick();}],
+    ["The whisper job you promoted started next — not the original front-runner. ✓",()=>{}]
+  ],
+  "Requeue a failed job":[
+    ["'Late Night' failed — no subtitle track. It sits in Recent.",seed],
+    ["Requeue it → returns to the back of the queue, error cleared.",()=>{requeue(jobs.find(j=>j.status==='failed').id);}],
+    ["Want it retried first? Drag it up — or promote it here.",()=>{var q=pending();var l=q.find(j=>j.name.indexOf('Late')===0);reorder([l.id].concat(q.filter(j=>j.id!==l.id).map(j=>j.id)));}],
+    ["Requeue is safe: requeuing a running/queued job is refused.",()=>{requeue(jobs.find(j=>j.status==='running').id);}]
+  ],
+  "Filter by type":[
+    ["All types shown. Each row is colour-coded by pass type.",seed],
+    ["Hide everything except Visual — toggle the other chips off.",()=>{hidden={subtitles:true,whisper:true,render:true};}],
+    ["Now only Visual jobs show, across Running / Up next / Recent.",()=>{}],
+    ["Show all again.",()=>{hidden={};}]
+  ],
+  "Drain the queue":[
+    ["Fresh queue.",seed],
+    ["Watch positions collapse as each job promotes in order.",()=>{for(var k=0;k<3;k++)tick();}],
+    ["Keep going…",()=>{for(var k=0;k<7;k++)tick();}],
+    ["Queue empties into Recent. The failed job stays failed until requeued.",()=>{}]
+  ]
+};
+var scName="Free play",scSteps=null,scIdx=0;
+function buildTabs(){ var t=document.getElementById("tabs");t.innerHTML="";
+  Object.keys(SCENARIOS).forEach(n=>{var b=document.createElement("button");b.textContent=n;
+    if(n===scName)b.className="on";b.onclick=()=>selectSc(n);t.appendChild(b);}); }
+function selectSc(n){ scName=n;scSteps=SCENARIOS[n];scIdx=0;buildTabs();
+  if(scSteps){seed();hidden={};document.getElementById("btnNext").disabled=false;
+    document.getElementById("stepText").textContent="▶ "+n+"\n\nHit “Next step”.";}
+  else{document.getElementById("btnNext").disabled=true;
+    document.getElementById("stepText").textContent="Free play — use the controls on the left.";}
+  render(); }
+function nextStep(){ if(!scSteps||scIdx>=scSteps.length)return;var s=scSteps[scIdx++];
+  document.getElementById("stepText").textContent="Step "+scIdx+"/"+scSteps.length+"\n\n"+s[0];
+  s[1]();render();document.getElementById("btnNext").disabled=scIdx>=scSteps.length; }
+
+/* ============================================================================
+   WIRING
+   ============================================================================ */
+var autorun=null;
+document.getElementById("btnTick").onclick=()=>{tick();render();};
+document.getElementById("btnAutorun").onclick=function(){
+  if(autorun){clearInterval(autorun);autorun=null;this.textContent="⏩ Auto-run";return;}
+  this.textContent="⏸ Stop";autorun=setInterval(()=>{tick();
+    if(!jobs.some(isActive)&&!pending().length){clearInterval(autorun);autorun=null;
+      document.getElementById("btnAutorun").textContent="⏩ Auto-run";}render();},700);};
+document.getElementById("btnCancelAll").onclick=cancelAll;
+document.getElementById("btnReset").onclick=()=>{seed();logLines=[];hidden={};addView=null;renderAdd();selectSc("Free play");};
+document.getElementById("showAll").onclick=()=>{hidden={};render();};
+document.getElementById("btnNext").onclick=nextStep;
+document.getElementById("btnScenarioReset").onclick=()=>selectSc(scName);
+
+renderSeg();renderAdd();seed();buildTabs();render();
+</script>
+</body>
+</html>

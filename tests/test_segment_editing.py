@@ -98,6 +98,23 @@ def test_patch_reasoning_through_the_api(tmp_path, monkeypatch):
     assert load_timeline(media).segments[0].reasoning == "edited via api"
 
 
+def test_patch_category_through_the_api(tmp_path, monkeypatch):
+    # The Studio page's category dropdown patches {category} on the by-path
+    # endpoint; a dropped field would silently ignore the correction.
+    monkeypatch.setenv("CLEANMEDIA_MEDIA_ROOTS", str(tmp_path))
+    media = _film(tmp_path)
+    client = TestClient(app)
+
+    body = client.patch(
+        f"/api/segments/1?path={media.name}", json={"category": "gore"}
+    ).json()
+
+    segment = [s for s in body["segments"] if s["id"] == 1][0]
+    assert segment["category"] == "gore"
+    assert segment["startMs"] == 1000  # only the sent field changed
+    assert load_timeline(media).segments[0].category == "gore"
+
+
 def _scene_film(tmp_path):
     """A film with a run of adjacent visual findings, as a scene flagged shot
     by shot — the case merge exists for."""
@@ -122,6 +139,29 @@ def _scene_film(tmp_path):
     )
     sidecar_for(media).write_text(json.dumps(timeline.model_dump()), encoding="utf-8")
     return media
+
+
+def test_scrub_audio_rejects_unknown_media(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLEANMEDIA_MEDIA_ROOTS", str(tmp_path))
+    client = TestClient(app)
+    r = client.get("/api/scrub_audio?path=Nope.mkv&startMs=0&endMs=1000")
+    assert r.status_code == 404
+
+
+def test_stream_rejects_unknown_media(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLEANMEDIA_MEDIA_ROOTS", str(tmp_path))
+    client = TestClient(app)
+    assert client.get("/api/stream?path=Nope.mkv&startMs=0").status_code == 404
+
+
+def test_stream_rejects_a_start_past_the_end(tmp_path, monkeypatch):
+    # A seek beyond the runtime must not spawn an ffmpeg that never produces
+    # anything — it's refused up front.
+    monkeypatch.setenv("CLEANMEDIA_MEDIA_ROOTS", str(tmp_path))
+    media = _film(tmp_path)  # touched file → runtime falls back to last endMs+60s
+    client = TestClient(app)
+    r = client.get(f"/api/stream?path={media.name}&startMs=9999999")
+    assert r.status_code == 416
 
 
 def test_merge_spans_all_and_replaces_the_originals(tmp_path):

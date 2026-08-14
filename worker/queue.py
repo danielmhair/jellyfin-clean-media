@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import queue
+import math
 import threading
 import time
 import traceback
@@ -59,7 +59,16 @@ class JobQueue:
         poll_s: float = 30.0,
     ):
         self.store = store
-        self._queue: "queue.Queue[tuple[str, str]]" = queue.Queue()  # (kind, job_id)
+        # The queue order lives on the jobs themselves (``queuePosition``), not
+        # in an in-memory FIFO, so it can be reordered and survives a restart.
+        # The worker waits on this condition and, when woken (a submit, reorder,
+        # requeue, resume, or the poll_s timeout), runs the lowest-position
+        # runnable job. ``_paused`` holds the *start* of the next job — it never
+        # preempts the one already running. ``_running_id`` is that job, so it is
+        # excluded from the "waiting" count.
+        self._cond = threading.Condition()
+        self._paused = False
+        self._running_id: Optional[str] = None
         # Ids asked to stop. A queued job is skipped when its turn comes; a
         # running job aborts at its next progress tick (see _progress_cb).
         self._cancelled: set[str] = set()
@@ -97,16 +106,18 @@ class JobQueue:
         return None
 
     def _recover(self) -> None:
-        """Re-queue jobs left unfinished by a previous run, in submission order.
+        """Ready jobs left unfinished by a previous run, in submission order.
 
-        The processing queue is in memory, so a restart empties it while the job
-        rows persist in the store. Everything still queued/running/rendering is
-        put back oldest-first, so the worker picks up where it left off and the
-        order the administrator submitted is preserved. A pass interrupted
-        mid-run reads as ``running``/``rendering``; it is reset to its pre-start
-        state so the UI shows it waiting and the worker re-runs it. Resumable
-        analysis engines (the VLM) then resume from their on-disk checkpoint;
-        others re-run from the start. Terminal jobs are left untouched.
+        The processing order lives on the jobs (``queuePosition``); the worker
+        selects the lowest-position runnable job straight from the store, so a
+        restart doesn't lose the queue. What recovery must still do is reset the
+        status of anything caught mid-flight and give any job that predates
+        ``queuePosition`` a position derived from ``createdAt`` — so the order
+        the administrator submitted (and reordered) is preserved across the
+        restart. A pass interrupted mid-run reads as ``running``/``rendering``;
+        it is reset so the UI shows it waiting and the worker re-runs it.
+        Resumable analysis engines (the VLM) then resume from their on-disk
+        checkpoint; others re-run from the start. Terminal jobs are untouched.
         """
         pending = [
             j for j in self.store.list_jobs()
@@ -114,28 +125,103 @@ class JobQueue:
         ]
         pending.sort(key=lambda j: j.createdAt)  # oldest first == original order
 
+        next_pos = self._alloc_position()
         recovered = 0
         for job in pending:
-            kind = self._kind_for(job)
-            if kind is None:
+            if self._kind_for(job) is None:
                 continue
+            changed = False
             if job.status == JobStatus.running:
                 # Interrupted analysis: back to queued so _analyze re-runs it.
                 # Progress is kept so a resumable engine shows where it resumes.
                 job.status = JobStatus.queued
                 job.stage = "resuming after restart"
-                self.store.save_job(job)
+                changed = True
             elif job.status == JobStatus.rendering:
                 job.stage = "resuming render after restart"
+                changed = True
+            if job.queuePosition is None:
+                # Predates queuePosition: assign one in createdAt order so it
+                # sorts after any already-positioned job but keeps its relative
+                # place among the other unpositioned ones.
+                job.queuePosition = next_pos
+                next_pos += 1
+                changed = True
+            if changed:
                 self.store.save_job(job)
-            self._queue.put((kind, job.id))
             recovered += 1
 
         if recovered:
             log.info(
-                "recovery: re-queued %d unfinished job(s) from the store, "
+                "recovery: readied %d unfinished job(s) from the store, "
                 "resuming in submission order", recovered,
             )
+
+    # -- persisted-order selection -------------------------------------------
+
+    def _alloc_position(self) -> int:
+        """The next end-of-queue position: above every position now in the store."""
+        positions = [
+            j.queuePosition for j in self.store.list_jobs()
+            if j.queuePosition is not None
+        ]
+        return (max(positions) + 1) if positions else 0
+
+    @staticmethod
+    def _order_key(job: Job) -> tuple:
+        """Sort key: by position (unset last), then submission time."""
+        pos = job.queuePosition if job.queuePosition is not None else math.inf
+        return (pos, job.createdAt)
+
+    def _select_runnable(self) -> Optional[Job]:
+        """The lowest-position job that may start right now, or None.
+
+        Runnable means: a render (``rendering`` — never schedule-gated) or an
+        analysis job (``queued``) while the schedule window is open. Selection
+        is schedule-aware so an analysis job blocked by the window is simply not
+        picked yet — the worker never *commits* to a job while it waits, which is
+        what lets a reorder made during the wait take effect. Nothing is picked
+        while the queue is paused (but a job already running is not preempted).
+        """
+        if self._paused:
+            return None
+        allowed = self._analysis_allowed()
+        best: Optional[Job] = None
+        best_key: Optional[tuple] = None
+        for job in self.store.list_jobs():
+            if job.status == JobStatus.rendering:
+                pass  # renders are never gated by the schedule
+            elif job.status == JobStatus.queued:
+                if not allowed:
+                    continue
+            else:
+                continue
+            if job.id in self._cancelled:
+                continue  # cancelled mid-flight, status not yet reflected
+            key = self._order_key(job)
+            if best_key is None or key < best_key:
+                best, best_key = job, key
+        return best
+
+    def _claim_next(self) -> Job:
+        """Block until a runnable job exists, then mark and return it.
+
+        Woken by ``_cond`` on any queue change, and every ``poll_s`` regardless,
+        so a schedule window opening or a paused flag clearing is re-evaluated
+        without an explicit signal.
+        """
+        while True:
+            with self._cond:
+                job = self._select_runnable()
+                if job is not None:
+                    self._running_id = job.id
+                    return job
+                self._cond.wait(timeout=self._poll_s)
+
+    def _signal(self) -> None:
+        """Wake the worker to re-evaluate what to run (after any queue change)."""
+        with self._cond:
+            self._cond.notify_all()
 
     def _analysis_allowed(self) -> bool:
         return bool(self._allowed_fn(self._now_fn()))
@@ -163,11 +249,13 @@ class JobQueue:
             mediaFingerprint=fingerprint,
             options=req.options,
         )
-        self.store.save_job(job)
-        self._queue.put(("analyze", job.id))
+        with self._cond:
+            job.queuePosition = self._alloc_position()
+            self.store.save_job(job)
+            self._cond.notify_all()
         log.info(
             "job %s queued: %s on %s (queue depth %d)",
-            job.id, req.engine, media.name, self._queue.qsize(),
+            job.id, req.engine, media.name, self.queue_size(),
         )
         return job
 
@@ -182,8 +270,10 @@ class JobQueue:
         job.status = JobStatus.rendering
         job.progress = 0.0
         job.stage = "queued for rendering"
-        self.store.save_job(job)
-        self._queue.put(("render", job.id))
+        with self._cond:
+            job.queuePosition = self._alloc_position()
+            self.store.save_job(job)
+            self._cond.notify_all()
         return job
 
     def submit_media_render(
@@ -222,12 +312,91 @@ class JobQueue:
         )
         if output_path:
             job.options["renderOutputPath"] = output_path
-        self.store.save_job(job)
-        self._queue.put(("render_media", job.id))
+        with self._cond:
+            job.queuePosition = self._alloc_position()
+            self.store.save_job(job)
+            self._cond.notify_all()
         return job
 
     def queue_size(self) -> int:
-        return self._queue.qsize()
+        """How many jobs are waiting to start (queued/rendering, not the running one)."""
+        with self._cond:
+            running = self._running_id
+        n = 0
+        for job in self.store.list_jobs():
+            if (
+                job.status in (JobStatus.queued, JobStatus.rendering)
+                and job.id != running
+                and job.id not in self._cancelled
+            ):
+                n += 1
+        return n
+
+    # -- reorder / requeue / pause -------------------------------------------
+
+    def reorder(self, ids: list[str]) -> list[Job]:
+        """Reassign queue positions from a front-first list of job ids.
+
+        Only jobs currently queued/rendering are repositioned (0..n in the given
+        order); running, terminal and unknown ids are ignored, so a running pass
+        is never preempted. Returns the full job list so the caller re-renders
+        from the stored truth rather than its own optimistic order.
+        """
+        with self._cond:
+            pending = {
+                j.id: j for j in self.store.list_jobs()
+                if j.status in (JobStatus.queued, JobStatus.rendering)
+            }
+            pos = 0
+            for job_id in ids:
+                job = pending.get(job_id)
+                if job is None:
+                    continue
+                job.queuePosition = pos
+                pos += 1
+                self.store.save_job(job)
+            self._cond.notify_all()
+        return self.store.list_jobs()
+
+    def requeue(self, job_id: str) -> Job:
+        """Retry a failed or cancelled job from the back of the queue.
+
+        Its progress, error and stage are cleared and it gets a fresh
+        end-of-queue position (then it can be dragged to the front). Analysis
+        jobs return to ``queued``; a render job returns to ``rendering`` so it is
+        re-run as a render, not re-analyzed. Raises ``KeyError`` for an unknown
+        id and ``ValueError`` for a job that is not failed/cancelled.
+        """
+        with self._cond:
+            job = self.store.get_job(job_id)
+            if job is None:
+                raise KeyError(job_id)
+            if job.status not in (JobStatus.failed, JobStatus.cancelled):
+                raise ValueError(
+                    f"job {job_id} is {job.status.value}, not a failed or "
+                    "cancelled job that can be requeued"
+                )
+            is_render = job.engine == "render"
+            job.status = JobStatus.rendering if is_render else JobStatus.queued
+            job.progress = 0.0
+            job.error = None
+            job.stage = "queued for rendering" if is_render else "queued"
+            job.queuePosition = self._alloc_position()
+            self.store.save_job(job)
+            with self._cancel_lock:
+                self._cancelled.discard(job_id)
+            self._cond.notify_all()
+        return job
+
+    def set_paused(self, paused: bool) -> bool:
+        """Hold (or release) the start of the next job. Never preempts a running one."""
+        with self._cond:
+            self._paused = bool(paused)
+            self._cond.notify_all()
+        return self._paused
+
+    def is_paused(self) -> bool:
+        return self._paused
 
     # -- cancellation ---------------------------------------------------------
 
@@ -247,6 +416,7 @@ class JobQueue:
         job.status = JobStatus.cancelled
         job.stage = "cancelled"
         self.store.save_job(job)
+        self._signal()  # re-evaluate: a cancelled queued job must not be picked
         return True
 
     def cancel_all(self) -> int:
@@ -265,9 +435,13 @@ class JobQueue:
 
     def _loop(self) -> None:
         while True:
-            kind, job_id = self._queue.get()
-            job = self.store.get_job(job_id)
-            if not job or job.status == JobStatus.cancelled:
+            job = self._claim_next()  # blocks until a runnable job is available
+            job_id = job.id
+            kind = self._kind_for(job)
+            if kind is None or job.status == JobStatus.cancelled:
+                # Raced to a terminal/cancelled state between select and claim.
+                with self._cond:
+                    self._running_id = None
                 with self._cancel_lock:
                     self._cancelled.discard(job_id)
                 continue
@@ -281,12 +455,12 @@ class JobQueue:
             except JobPaused:
                 # The schedule window closed mid-run: re-queue to resume from the
                 # engine's checkpoint when it reopens, rather than fail or lose
-                # the work done so far.
+                # the work done so far. Its position is kept, so it holds its
+                # place in line and resumes first when the window reopens.
                 job = self.store.get_job(job_id) or job
                 job.status = JobStatus.queued
                 job.stage = "paused — outside scheduled hours"
                 self.store.save_job(job)
-                self._queue.put((kind, job_id))
                 log.info(
                     "job %s paused at %.0f%% (outside scheduled hours) - will resume",
                     job_id, (job.progress or 0.0) * 100,
@@ -308,6 +482,11 @@ class JobQueue:
                     job_id, job.engine, _name(job), exc, exc_info=True,
                 )
             finally:
+                with self._cond:
+                    self._running_id = None
+                    # Wake at once so the next job starts without waiting out a
+                    # full poll_s — matters for the FIFO-fast test cadence.
+                    self._cond.notify_all()
                 with self._cancel_lock:
                     self._cancelled.discard(job_id)
 

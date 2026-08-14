@@ -118,6 +118,87 @@ The administrator's review surface, served by the worker at `/api/review`.
 
 ---
 
+## Review UI — "Studio" refactor (2026-08-13, in progress)
+
+> This section is a **placeholder**. The review page above has been rebuilt as
+> the **Studio** workspace ([spec](../plan/prds/2026-08-13-review-page-studio-refactor.md)),
+> and the "Review UI (worker page)" section above will be **rewritten to describe
+> the Studio version** once the two follow-ups below land. Until then, both
+> descriptions are partly true: the Studio page ships most of the workspace, but
+> not yet the playback/filtering the old page had.
+
+**What the Studio page changes** — one **monitor** that follows a **playhead**, a
+full-film **minimap** whose viewport box drives a zoomable **editor** (real
+filmstrip + waveform stacked), and a **findings rail** with inline descriptions
+and one-click **✂ Cut out / 👁 Leave in** (decision language keyed to the
+viewer's outcome; still `approved:true/false` in the sidecar). **Discreet mode**
+(on by default) hides the picture so a parent can review privately, with
+hold-to-reveal. Carve tools — add cut, split, keep-the-beat, retime (drag / type
+/ nudge), category & description edit, same-type merge — all persist to the
+sidecar through the existing endpoints. The plugin contract is unchanged.
+
+**Restored on the Studio page (2026-08-13, Phase 1)** — the old page's
+`/api/clip` playback and type filtering are back, redesigned to fit the Studio:
+
+- **Playback with audio** — a **Visual/Video** picture toggle (audio always
+  plays; Visual shows frames + sound for private review, Video plays the real
+  picture) and a three-way **audio mode**: **Normal**, **Cleaned**, and
+  **Muted**. **Cleaned** plays the window as the viewer will get it — **every**
+  cut-out (approved) finding in the window is removed and mutes/voice silenced
+  (a windowed render via `/api/preview_clip`, so the cut footage is never
+  transcoded); the playhead jumps across the cuts. Normal/Muted play the whole
+  scene window via the clip endpoint; Shift+drag auditions a span's audio.
+- **Type filter that scopes the whole workspace** — filtering to a type shows
+  only that type in the rail, the minimap **and** the editor, with **bulk "Cut
+  all / Leave all"** for the filtered group.
+
+**Phase 2 (2026-08-13, built)** — whole-film *continuous* playback via a new
+`GET /api/stream` transcode endpoint, added behind a **Scene ↔ Film** range
+toggle on the monitor. **Scene** keeps the fast cached per-window clip; **Film**
+streams the film from the playhead as a live fragmented MP4, so you hold play and
+watch it run across scenes with sound. All three audio modes apply in Film mode —
+**Cleaned** removes *every* approved cut and silences every approved mute **over
+the whole remaining film** (the cut footage is never transcoded; the playhead
+jumps the cuts). Each stream owns one ffmpeg process, killed on client
+disconnect, so re-seeking never orphans a transcode. **Duplicate finding** is not
+yet re-added. Voice-only spans are silenced, not Demucs-separated, in the
+whole-film cleaned stream.
+
+**Live scrub audio (2026-08-14, built)** — dragging the playhead now **plays
+audio as you scrub**, so an edit point can be found by ear. A new
+`GET /api/scrub_audio` serves a compact mono WAV of a window around the cursor;
+the page decodes it once with WebAudio and plays short faded **grains** at the
+drag position (DAW-style, single-voice so there's no echo), on both the editor
+and the full-film minimap scrub. A ±45 s window is buffered and refetched only on
+a big jump. It plays the source audio at the position (a locator), not the
+cleaned/muted mix.
+
+**Blur in Cleaned + editor scrollbar (2026-08-14, built)** — a finding set to
+**blur** is now blurred in the Cleaned preview/stream with the render's own
+full-frame `gblur` (preview matches the clean copy). And the zoomed editor gains
+a **horizontal scrollbar** whose thumb is the viewport over the whole film — drag
+to pan, click to jump, without reaching up to the minimap. It's flanked by **◀/▶
+step buttons** that nudge the playhead a little bit each click (hold to repeat)
+with scrub audio + frame — a fine scrub for placing an edit exactly.
+
+**Retiming a region scrubs (2026-08-14, built)** — dragging a region's edge or
+body now moves the **playhead with the edge** and plays **scrub audio + the frame**
+as you go, so you place a cut bound by ear and eye — scrubbing with the segment
+landing exactly right, instead of retiming blind.
+
+**Fixed-viewport app shell (2026-08-14, built)** — the studio now fits the
+screen: the **page itself never scrolls**, only the findings rail and the stage
+scroll inside their own bounds, so the editor is always in view instead of hidden
+below a page fold. All scrollbars share **one slim rounded style** for
+consistency. (The old layout used a stale fixed height and grid items that grew
+to their content, which pushed the page past the viewport and stacked an extra
+page scrollbar on top of the internal ones.)
+
+See the spec's [Follow-up spec — monitor playback + type filtering](../plan/prds/2026-08-13-review-page-studio-refactor.md#follow-up-spec--monitor-playback--type-filtering-agreed-not-yet-built)
+for the full requirements and the Phase-2 seams.
+
+---
+
 ## Jellyfin plugin (C#, net9.0)
 
 - **Segment provider** — implements `IMediaSegmentProvider`; reports approved

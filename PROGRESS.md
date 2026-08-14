@@ -7,7 +7,7 @@ review loop has its own spec in
 This file tracks the current state and open threads. Keep entries generic — no
 real film names (see [CLAUDE.md](CLAUDE.md)).
 
-_Last updated: 2026-08-13._
+_Last updated: 2026-08-14._
 
 ## Where it's running now
 
@@ -290,6 +290,43 @@ its box (`[ ]` → `[x]`), and move the **← NEXT** marker on.
   the fix. Recovery + logging mean the run survives restarts and is observable.
 
 ## Recent changes
+
+### Review page rebuilt as the "Studio" workspace (2026-08-13/14, worker)
+
+The worker review page (`GET /api/review`) has been **replaced** by a single
+**Studio** workspace — spec + full ledger in
+[plan/prds/2026-08-13-review-page-studio-refactor.md](plan/prds/2026-08-13-review-page-studio-refactor.md).
+All in [worker/review.py](worker/review.py) (+ small `main.py`/`models.py`
+additions); needs a worker restart to serve. The `.cleanmedia.json` sidecar,
+the `approvedOnly=true` plugin contract, and the render path are unchanged — this
+is a presentation + playback refactor. Built and tested end to end (unit +
+Python-Playwright E2E against a synthesised `.mkv`).
+
+- **The workspace.** A continuous **monitor** that follows a **playhead**, a
+  full-film **minimap** whose viewport box drives a zoomable **editor** (real
+  filmstrip + waveform stacked), and a findings rail with inline descriptions and
+  one-click **✂ Cut out / 👁 Leave in** (still `approved:true/false`). **Discreet
+  mode** (on by default) hides the picture with hold-to-reveal. Carve tools (add
+  cut, split, keep-the-beat, retime, category/description edit, same-type merge),
+  a triage progress bar, type-filter that scopes the whole workspace with bulk
+  cut/leave, and keyboard shortcuts — all persist through the existing endpoints.
+  One API addition: editable `category` on the segment PATCH.
+- **Playback with audio.** A **Visual/Video** picture toggle (audio always plays)
+  and a **Normal / Cleaned / Muted** audio mode. **Cleaned** removes every
+  approved cut and silences mutes (and **blurs** blur findings, with the render's
+  own `gblur`) so you see/hear exactly what the viewer gets. A **Scene ↔ Film**
+  range toggle: **Scene** plays the finding's window via `/api/clip`; **Film**
+  streams the **whole film continuously** from the playhead via a new
+  `GET /api/stream` (live fragmented MP4; one ffmpeg per stream, killed on client
+  disconnect so a re-seek never orphans a transcode).
+- **Live scrub audio.** Dragging the playhead (or a region edge) now **plays audio
+  as you scrub** — a new `GET /api/scrub_audio` serves a compact mono WAV window
+  the page decodes once and plays as single-voice WebAudio grains (no echo), so an
+  edit point is found by ear.
+- **Layout & scrub polish (2026-08-14).** A fixed-viewport app shell (the page
+  itself never scrolls; only the rail and stage do) with one consistent scrollbar
+  style; retiming a region follows the playhead with scrub audio + frame; and
+  ◀/▶ fine-scrub step buttons (hold to repeat) on the editor scrollbar.
 
 ### Review editor polish — duplicates, editable notes, timing follow (2026-08-13, worker)
 

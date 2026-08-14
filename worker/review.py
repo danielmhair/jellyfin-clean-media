@@ -22,6 +22,7 @@ from pathlib import Path, PurePosixPath
 from typing import Optional
 
 from .models import Segment, Timeline
+from .render import BLUR_SIGMA
 from .store import media_fingerprint
 
 THUMB_WIDTH = 480
@@ -225,6 +226,7 @@ def update_segment(
     end_ms=...,
     action=...,
     reasoning=...,
+    category=...,
 ) -> Optional[Segment]:
     """Edit one finding in place. Returns None if it does not exist.
 
@@ -247,6 +249,8 @@ def update_segment(
             segment.recommendedAction = action
         if reasoning is not ...:
             segment.reasoning = reasoning
+        if category is not ...:
+            segment.category = category
         # An inverted span would silently skip nothing, or everything.
         if segment.endMs < segment.startMs:
             segment.startMs, segment.endMs = segment.endMs, segment.startMs
@@ -431,6 +435,129 @@ def clip_path(
     return cache / f"{key}.mp4"
 
 
+def _merge_spans(spans: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    out: list[tuple[float, float]] = []
+    for a, b in sorted(spans):
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
+def _window_keeps(cuts: list[tuple[float, float]], dur: float) -> list[tuple[float, float]]:
+    """Invert cut spans into the spans to keep across [0, dur] (seconds)."""
+    keeps: list[tuple[float, float]] = []
+    prev = 0.0
+    for a, b in cuts:
+        if a > prev:
+            keeps.append((prev, a))
+        prev = max(prev, b)
+    if prev < dur:
+        keeps.append((prev, dur))
+    return keeps
+
+
+def preview_clip_path(
+    media: Path, win_start_ms: int, win_end_ms: int,
+    cut_rel: list[tuple[float, float]], mute_rel: list[tuple[float, float]],
+    blur_rel: list[tuple[float, float]],
+) -> Path:
+    """Cache location for a cleaned-window preview, keyed by its decisions so a
+    change (approve another finding, retime one, blur one) yields a different file."""
+    sig = f"{media}|{win_start_ms}|{win_end_ms}|{cut_rel}|{mute_rel}|{blur_rel}"
+    key = hashlib.sha256(sig.encode("utf-8")).hexdigest()[:20]
+    cache = Path(tempfile.gettempdir()) / "cleanmedia-clips"
+    cache.mkdir(exist_ok=True)
+    return cache / f"preview-{key}.mp4"
+
+
+def _blur_vf(blur_rel: list[tuple[float, float]]) -> str:
+    """Leading video filter that blurs the frame across the given (relative-second)
+    spans — the same full-frame ``gblur`` the render applies, so the Cleaned
+    preview shows a blur exactly where the clean copy will have one."""
+    if not blur_rel:
+        return ""
+    expr = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in blur_rel)
+    return f"gblur=sigma={BLUR_SIGMA}:enable='{expr}',"
+
+
+def build_preview_clip(
+    media: Path,
+    win_start_ms: int,
+    win_end_ms: int,
+    cuts: list[tuple[int, int]],
+    mutes: list[tuple[int, int]],
+    blurs: Optional[list[tuple[int, int]]] = None,
+) -> Optional[Path]:
+    """A short *cleaned* preview of a window: approved **skips are cut out** (their
+    footage is never transcoded — the whole point vs. encoding then jumping),
+    approved **mutes/voice are silenced**, and approved **blurs are blurred** (the
+    render's full-frame ``gblur``), so a reviewer sees/hears the window as the
+    viewer will. ``cuts`` / ``mutes`` / ``blurs`` are absolute-ms spans; the window
+    is [win_start_ms, win_end_ms]. Returns None on failure.
+
+    Voice-only mutes are silenced (not Demucs-separated) in this quick preview —
+    the multi-region, per-play case can't afford the separation pass; the
+    dedicated voice check remains a per-finding concern.
+    """
+    win_start = max(0.0, win_start_ms / 1000)
+    win_dur = max(0.1, (win_end_ms - win_start_ms) / 1000)
+
+    def rel(spans: list[tuple[int, int]]) -> list[tuple[float, float]]:
+        out: list[tuple[float, float]] = []
+        for a, b in spans:
+            ra = max(0.0, a / 1000 - win_start)
+            rb = min(win_dur, b / 1000 - win_start)
+            if rb - ra > 0.02:
+                out.append((ra, rb))
+        return out
+
+    cut_rel = _merge_spans(rel(cuts))
+    mute_rel = rel(mutes)
+    blur_rel = rel(blurs or [])
+
+    out = preview_clip_path(media, win_start_ms, win_end_ms, cut_rel, mute_rel, blur_rel)
+    if out.is_file() and out.stat().st_size > 0:
+        return out
+
+    keeps = _window_keeps(cut_rel, win_dur)
+    if not keeps:  # the whole window is cut — keep a sliver so the element loads
+        keeps = [(0.0, min(0.2, win_dur))]
+
+    n = len(keeps)
+    parts: list[str] = [f"[0:v]{_blur_vf(blur_rel)}scale=640:-2,split={n}" + "".join(f"[vs{i}]" for i in range(n))]
+    asrc = "[0:a]"
+    if mute_rel:
+        expr = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in mute_rel)
+        parts.append(f"[0:a]volume=enable='{expr}':volume=0[am]")
+        asrc = "[am]"
+    parts.append(f"{asrc}asplit={n}" + "".join(f"[as{i}]" for i in range(n)))
+    for i, (s, e) in enumerate(keeps):
+        parts.append(f"[vs{i}]trim=start={s:.3f}:end={e:.3f},setpts=PTS-STARTPTS[v{i}]")
+        parts.append(f"[as{i}]atrim=start={s:.3f}:end={e:.3f},asetpts=PTS-STARTPTS[a{i}]")
+    joins = "".join(f"[v{i}][a{i}]" for i in range(n))
+    parts.append(f"{joins}concat=n={n}:v=1:a=1[outv][outa]")
+    filter_complex = ";".join(parts)
+
+    proc = subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-y",
+            "-ss", f"{win_start:.3f}", "-i", str(media), "-t", f"{win_dur:.3f}",
+            "-filter_complex", filter_complex,
+            "-map", "[outv]", "-map", "[outa]",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart", str(out),
+        ],
+        capture_output=True, text=True, errors="replace",
+    )
+    if proc.returncode != 0 or not out.is_file():
+        out.unlink(missing_ok=True)
+        return None
+    return out
+
+
 def build_clip(
     media: Path,
     start_ms: int,
@@ -532,6 +659,105 @@ def _build_voice_clip(
     return out
 
 
+def scrub_audio_path(media: Path, start_ms: int, end_ms: int) -> Path:
+    key = hashlib.sha256(f"{media}|{start_ms}|{end_ms}|scrub".encode("utf-8")).hexdigest()[:20]
+    cache = Path(tempfile.gettempdir()) / "cleanmedia-clips"
+    cache.mkdir(exist_ok=True)
+    return cache / f"scrub-{key}.wav"
+
+
+def build_scrub_audio(media: Path, start_ms: int, end_ms: int) -> Optional[Path]:
+    """A compact mono WAV of the window [start_ms, end_ms], for **live scrub
+    audio**: the page decodes it once with WebAudio and then plays short grains at
+    the drag position, so a reviewer hears the film as they drag the playhead —
+    the way to locate an edit point by ear. Cheap to extract (audio only,
+    downmixed to 22 kHz mono) and cached, so a scrub session hits it once.
+    """
+    start = max(0.0, start_ms / 1000)
+    dur = max(0.05, (end_ms - start_ms) / 1000)
+    out = scrub_audio_path(media, start_ms, end_ms)
+    if out.is_file() and out.stat().st_size > 0:
+        return out
+    proc = subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-ss", f"{start:.3f}", "-i", str(media),
+         "-t", f"{dur:.3f}", "-vn", "-ac", "1", "-ar", "22050", "-c:a", "pcm_s16le", str(out)],
+        capture_output=True, text=True, errors="replace",
+    )
+    if proc.returncode != 0 or not out.is_file():
+        out.unlink(missing_ok=True)
+        return None
+    return out
+
+
+def stream_command(
+    media: Path,
+    start_ms: int,
+    runtime_ms: int,
+    cuts: list[tuple[int, int]],
+    mutes: list[tuple[int, int]],
+    blurs: Optional[list[tuple[int, int]]] = None,
+) -> list[str]:
+    """ffmpeg argv to transcode the film from ``start_ms`` to the end into a
+    **fragmented MP4 on stdout** (``pipe:1``) — a live stream a browser ``<video>``
+    plays continuously across scenes, the Phase-2 whole-film counterpart to the
+    per-scene ``build_clip``.
+
+    With no cuts/mutes it is a straight transcode (Normal; the page mutes the
+    element for Muted, so Muted reuses this same stream). With them (Cleaned) the
+    cut spans are **removed** — their footage never transcoded, a whole-film
+    version of ``build_preview_clip`` — and mutes silenced; the stream is then
+    time-compressed and the page maps stream-time→film-time through the same
+    keeps (``D_buildKeeps`` mirrors ``_merge_spans`` + ``_window_keeps``).
+
+    Fragmented MP4 (``frag_keyframe+empty_moov``) needs no seekable output, so
+    ffmpeg emits fragments as it encodes: playback starts in a second or two even
+    though the encode runs to the end of the film. Seeking is the page's job (it
+    reloads the stream from a new ``start_ms``), so no output-side seeking is
+    required.
+    """
+    start = max(0.0, start_ms / 1000)
+    dur = max(0.1, (runtime_ms - start_ms) / 1000)
+    tail = [
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+        "-f", "mp4", "pipe:1",
+    ]
+    head = ["ffmpeg", "-v", "error", "-ss", f"{start:.3f}", "-i", str(media), "-t", f"{dur:.3f}"]
+
+    def rel(spans: list[tuple[int, int]]) -> list[tuple[float, float]]:
+        out: list[tuple[float, float]] = []
+        for a, b in spans:
+            ra = max(0.0, a / 1000 - start)
+            rb = min(dur, b / 1000 - start)
+            if rb - ra > 0.02:
+                out.append((ra, rb))
+        return out
+
+    cut_rel = _merge_spans(rel(cuts))
+    mute_rel = rel(mutes)
+    blur_rel = rel(blurs or [])
+
+    if not cut_rel and not mute_rel and not blur_rel:  # Normal/Muted — no filtergraph
+        return [*head, "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=640:-2", *tail]
+
+    keeps = _window_keeps(cut_rel, dur) or [(0.0, min(0.2, dur))]
+    n = len(keeps)
+    parts: list[str] = [f"[0:v]{_blur_vf(blur_rel)}scale=640:-2,split={n}" + "".join(f"[vs{i}]" for i in range(n))]
+    asrc = "[0:a]"
+    if mute_rel:
+        expr = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in mute_rel)
+        parts.append(f"[0:a]volume=enable='{expr}':volume=0[am]")
+        asrc = "[am]"
+    parts.append(f"{asrc}asplit={n}" + "".join(f"[as{i}]" for i in range(n)))
+    for i, (s, e) in enumerate(keeps):
+        parts.append(f"[vs{i}]trim=start={s:.3f}:end={e:.3f},setpts=PTS-STARTPTS[v{i}]")
+        parts.append(f"[as{i}]atrim=start={s:.3f}:end={e:.3f},asetpts=PTS-STARTPTS[a{i}]")
+    joins = "".join(f"[v{i}][a{i}]" for i in range(n))
+    parts.append(f"{joins}concat=n={n}:v=1:a=1[outv][outa]")
+    return [*head, "-filter_complex", ";".join(parts), "-map", "[outv]", "-map", "[outa]", *tail]
+
+
 def build_peaks(
     media: Path,
     start_ms: int,
@@ -627,801 +853,1245 @@ def grab_thumbnail(media: Path, at_ms: int) -> Optional[bytes]:
     return proc.stdout or None
 
 
-PAGE = """<!doctype html>
-<meta charset="utf-8"><title>Review — {title}</title>
+def media_runtime_ms(media: Path, timeline: Timeline) -> int:
+    """The film's length in ms, for the Studio minimap's full-film scale.
+
+    A single ffprobe (no decode), the same source the render path trusts for
+    skip keeps. Falls back to just past the last finding if ffprobe can't read
+    the container, so the map still spans every marker rather than collapsing.
+    """
+    try:
+        from .shots import media_duration
+
+        seconds = media_duration(media)
+        if seconds and seconds > 0:
+            return int(round(seconds * 1000))
+    except Exception:
+        pass
+    last = max((s.endMs for s in timeline.segments), default=0)
+    return last + 60_000 if last else 60_000
+
+
+PAGE = r"""<!doctype html>
+<meta charset="utf-8"><title>Review — __TITLE__</title>
 <style>
- body{{font-family:system-ui,sans-serif;background:#111;color:#eee;margin:0;padding:24px}}
- h1{{font-weight:600;margin:0 0 4px}}
- .sub{{color:#9aa;margin-bottom:12px}}
- /* flex-start, or a tall card stretches every neighbour in its row */
- .grid{{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start}}
- .cell{{width:440px;background:#1d1d1f;border-radius:10px;overflow:hidden;
-        border:2px solid transparent}}
- .cell.approved{{border-color:#3fb950}} .cell.rejected{{border-color:#f85149;opacity:.55}}
- .cell.tentative{{background:#20201a}}
- .cell.hidden{{display:none}}
- .tag{{display:inline-block;padding:1px 7px;border-radius:99px;font-size:11px;
-       font-weight:700;background:#7a5c00;color:#ffd479;margin-left:6px}}
- .tag.est{{background:#5a2d00;color:#ffb877}} .tag.exact{{background:#12361f;color:#7ee787}}
- /* the box keeps its size whatever is inside, so swapping the thumbnail
-    for a loading state or a video never makes the page jump */
- .shot{{position:relative;cursor:pointer;aspect-ratio:16/9;background:#000}}
- .cell img,.cell video{{width:100%;height:100%;display:block;
-                        object-fit:contain;background:#000}}
- .play{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
-        background:rgba(0,0,0,.35);color:#fff;font-size:15px;font-weight:600}}
- .play span{{background:rgba(0,0,0,.72);padding:9px 16px;border-radius:99px}}
- /* preview cut-marker: a strip over the top of the video showing the flagged
-    span (the part acted on) and a playhead, so it is clear what is cut. */
- .cliptl{{position:absolute;left:0;right:0;top:0;height:18px;z-index:2;
-          background:rgba(0,0,0,.5);pointer-events:none;font-size:11px}}
- .cliptl .cutband{{position:absolute;top:0;bottom:0;background:rgba(248,81,73,.4);
-                   border-left:2px solid #f85149;border-right:2px solid #f85149}}
- .cliptl.skip .cutband{{border-color:#ffb877;background:repeating-linear-gradient(
-     45deg,rgba(255,184,119,.5) 0 6px,rgba(255,184,119,.15) 6px 12px)}}
- .cliptl.flash .cutband{{background:rgba(255,255,255,.75);transition:background .1s}}
- .cliptl .ph{{position:absolute;top:0;bottom:0;width:2px;background:#fff;
-              box-shadow:0 0 3px #000}}
- .cliptl .cutlbl{{position:absolute;left:6px;top:2px;color:#ffd0cb;font-weight:600;
-                  text-shadow:0 1px 2px #000;white-space:nowrap}}
- .hint{{color:#8b949e;font-size:11px;padding:0 12px 8px}}
- .meta{{padding:10px 12px;font-size:13px;line-height:1.55}}
- .cat{{color:#ff8f6b;font-weight:600}} .act{{color:#7ee787}}
- .word{{color:#ffd479;font-weight:600}}
- .why{{color:#9aa;font-style:italic;cursor:text;border-radius:4px;
-       padding:1px 3px;margin:0 -3px}}
- .why:hover{{background:#1b1f24}}
- .why:focus{{outline:none;font-style:normal;color:#e6edf3;background:#0d1117;
-             box-shadow:0 0 0 1px #30588c}}
- .clipbtns{{display:flex;gap:8px;padding:0 12px 8px}}
- .clipbtns button{{background:#22262c;font-size:12px;padding:7px}}
- .btns{{display:flex;gap:8px;padding:0 12px 12px}}
- button{{flex:1;padding:9px;border:0;border-radius:6px;font-size:13px;
-         font-weight:600;cursor:pointer;background:#30363d;color:#eee}}
- button.yes.on{{background:#238636}} button.no.on{{background:#da3633}}
- .btns select{{flex:0 0 auto;padding:9px;border:0;border-radius:6px;background:#30363d;
-               color:#eee;font-size:13px;font-weight:600;cursor:pointer}}
- .editor{{padding:0 12px 12px;display:none}} .editor.open{{display:block}}
- .wavewrap{{overflow-x:auto;background:#0c0c0d;border:1px solid #2a2f36;border-radius:6px}}
- .wavebox{{position:relative}} .wavebox canvas,.wavebox .strip{{display:block}}
- .strip{{object-fit:fill;image-rendering:auto}}
- .wavebox{{cursor:crosshair}}
- .region{{position:absolute;top:0;bottom:0;background:rgba(255,212,121,.15);pointer-events:none}}
- /* a scratch selection to audition a spot, separate from the segment bounds */
- .selregion{{position:absolute;top:0;bottom:0;background:rgba(88,166,255,.22);
-             border-left:2px solid #58a6ff;border-right:2px solid #58a6ff;
-             pointer-events:none;display:none}}
- .handle{{position:absolute;top:0;bottom:0;width:2px;background:#ffd479;pointer-events:none}}
- .handle.end{{background:#7ee787}}
- .handle .grip{{position:absolute;top:0;left:-6px;width:14px;height:18px;border-radius:3px;
-                background:inherit;pointer-events:auto;cursor:ew-resize}}
- .tctrls{{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px;
-          font-size:12px;color:#9aa}}
- .tctrls button{{flex:0 0 auto;padding:6px 10px;background:#22262c;font-size:12px}}
- .tctrls button.tsave{{background:#238636;color:#fff}}
- .selread{{font-size:12px;color:#9aa;margin-left:8px;font-variant-numeric:tabular-nums}}
- .selread b{{color:#e6edf3}}
- .seluse{{flex:0 0 auto;padding:4px 9px;background:#30588c;color:#fff;font-size:11px;margin-left:8px}}
- .tlabel{{display:inline-block;min-width:34px}}
- .tread{{font-variant-numeric:tabular-nums;color:#eee;font-weight:600}}
- .thint{{opacity:.6}} .tload{{padding:12px;color:#9aa;font-size:12px}}
- /* editable time fields (timing editor + add-segment form) */
- .tinput{{background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:4px;
-          padding:3px 6px;font:inherit;font-size:12px;font-variant-numeric:tabular-nums}}
- .tinput:focus{{outline:none;border-color:#30588c}}
- #addbar button{{background:#30588c;color:#fff}}
- #addbar .tosep{{margin:0 4px;color:#8b949e}}
- #addbar .mhint{{font-size:12px;color:#8b949e;margin-left:8px}}
- .clipbtns button.dup{{margin-left:auto}}
- .clipbtns button.del{{color:#ff7b72}}
- .bar{{position:sticky;top:0;background:#111;padding:10px 0;margin-bottom:10px;z-index:9}}
- .filters{{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px}}
- .filters button{{flex:0 0 auto;padding:6px 12px;background:#22262c;color:#9aa;font-size:12px}}
- .filters button.on{{background:#30588c;color:#fff}}
- .filters label{{font-size:12px;color:#9aa;margin-left:8px;cursor:pointer;user-select:none}}
- .flabel{{font-size:12px;color:#8b949e;font-weight:600;margin-right:2px}}
- .filters .count{{opacity:.65;font-weight:400}}
- /* the bulk row acts on whatever is shown, so keep it visually apart */
- #bulk{{border-top:1px solid #2a2f36;padding-top:8px}}
- #bulk button.set-yes{{background:#238636;color:#fff}}
- #bulk button.set-no{{background:#da3633;color:#fff}}
- #bulk button.set-clear{{background:#3a3f47;color:#eee}}
- #bulk button:disabled{{opacity:.4;cursor:default}}
- /* merge: pick 2+ findings and collapse them into one segment */
- #mergebar button{{background:#30588c;color:#fff}}
- #mergebar button:disabled{{opacity:.4;cursor:default}}
- #mergebar .mhint{{font-size:12px;color:#8b949e;margin-left:8px}}
- .mergepick{{font-size:11px;color:#8b949e;cursor:pointer;user-select:none;float:right}}
- .mergepick input{{vertical-align:middle;margin:0 3px 0 0}}
- .cell.picked{{outline:2px solid #30588c}}
+:root{
+  --bg:#0d1013; --panel:#16191d; --panel2:#1d2126; --line:#2a2f36;
+  --ink:#e6edf3; --dim:#9aa5b1; --dim2:#6e7681;
+  --pos:#2ea043; --pos-d:#12361f; --neg:#da3633; --neg-d:#3d1517;
+  --pick:#3b82f6; --undecided:#c9a227;
+  --radius:12px;
+  /* one colour + one glyph per category, severity-ranked (mirrors _MERGE_SEVERITY) */
+  --c-nudity:#ff5c8a; --c-sexual_activity:#ff6b6b; --c-intense_kissing:#ff9f45;
+  --c-suggestive:#e0b341; --c-violence:#a78bfa; --c-gore:#e5484d; --c-profanity:#4aa3ff;
+  --c-manual:#8b98a5;
+  font-family:system-ui,-apple-system,Segoe UI,sans-serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);-webkit-font-smoothing:antialiased}
+button{font:inherit;cursor:pointer;border:0;border-radius:8px;background:var(--panel2);color:var(--ink);padding:8px 12px}
+button:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--pick);outline-offset:2px}
+.hidden{display:none!important}
+.mono{font-variant-numeric:tabular-nums}
+kbd{font-family:ui-monospace,monospace}
+
+.cchip{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;
+  padding:3px 9px 3px 7px;border-radius:99px;line-height:1;white-space:nowrap}
+.cchip .g{font-size:13px}
+.tentative-flag{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;
+  color:#0d1013;background:var(--undecided);padding:2px 6px;border-radius:5px}
+
+/* Fixed-viewport app shell: the whole studio fits the screen and never scrolls
+   the page — only the findings rail and the stage scroll, inside their own
+   bounds. (Without min-height:0 on the scrolling children a grid/flex item grows
+   to its content instead of scrolling, which is what pushed the page past 100vh
+   and produced the extra page scrollbar.) */
+#D{display:flex;flex-direction:column;height:100vh;overflow:hidden}
+#D .dtop,#D .filmtl,#D .dmerge,#D .khint{flex:0 0 auto}
+/* One scrollbar style everywhere — the slim rounded thumb, matching the editor's. */
+#D *{scrollbar-width:thin;scrollbar-color:#39424e transparent}
+#D *::-webkit-scrollbar{width:12px;height:12px}
+#D *::-webkit-scrollbar-track{background:transparent}
+#D *::-webkit-scrollbar-thumb{background:#39424e;border:3px solid transparent;background-clip:padding-box;border-radius:99px}
+#D *::-webkit-scrollbar-thumb:hover{background:#4a5561;border:3px solid transparent;background-clip:padding-box}
+
+#D .dtop{padding:14px 22px 12px;border-bottom:1px solid var(--line);position:sticky;top:0;z-index:20;
+  background:linear-gradient(#0d1013,#0d1013e6);backdrop-filter:blur(6px)}
+#D .dtoprow{display:flex;align-items:center;gap:16px}
+#D .dtop h1{margin:0;font-size:17px;font-weight:650}
+#D .dtop .path{color:var(--dim2);font-size:12px;margin-top:1px}
+#D .discreet-toggle{margin-left:auto;display:flex;align-items:center;gap:9px;font-size:12.5px;color:var(--dim);
+  background:var(--panel2);border:1px solid var(--line);border-radius:99px;padding:6px 12px;cursor:pointer;user-select:none}
+#D .discreet-toggle.on{background:#2a2140;border-color:#6d4bb0;color:#d8c9ff}
+#D .discreet-toggle .sw{width:30px;height:16px;border-radius:99px;background:#3a4048;position:relative;transition:.15s}
+#D .discreet-toggle.on .sw{background:#8b5cf6}
+#D .discreet-toggle .sw::after{content:'';position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:99px;background:#fff;transition:.15s}
+#D .discreet-toggle.on .sw::after{left:16px}
+#D .prog{margin-top:11px;display:flex;align-items:center;gap:14px}
+#D .progbar{flex:1;height:11px;border-radius:99px;background:#22262c;overflow:hidden;display:flex}
+#D .progbar>span{height:100%;transition:width .3s}
+#D .progbar .p-cut{background:var(--neg)} #D .progbar .p-leave{background:var(--pos)} #D .progbar .p-un{background:repeating-linear-gradient(45deg,#3a4048 0 7px,#31373e 7px 14px)}
+#D .progstats{display:flex;gap:15px;font-size:12px;color:var(--dim)} #D .progstats b{color:var(--ink)}
+#D .progstats .dot{display:inline-block;width:8px;height:8px;border-radius:99px;margin-right:6px;vertical-align:1px}
+
+#D .filmtl{padding:10px 22px 6px}
+#D .filmtl .ftrack{position:relative;height:30px;background:#171b20;border-radius:7px;cursor:pointer;overflow:hidden}
+#D .filmtl .ftick{position:absolute;top:0;bottom:0;width:3px;transform:translateX(-1px);border-radius:2px;opacity:.9;z-index:1}
+#D .filmtl .fbox{position:absolute;top:0;bottom:0;background:rgba(88,166,255,.16);border:1px solid #58a6ff;
+  box-shadow:0 0 0 1px #0006 inset;border-radius:4px;cursor:grab;z-index:2;min-width:6px}
+#D .filmtl .fbox:active{cursor:grabbing}
+#D .filmtl .fph{position:absolute;top:-2px;bottom:-2px;width:2px;background:#fff;box-shadow:0 0 5px #000;z-index:3}
+#D .filmtl .fph::before{content:'';position:absolute;top:-1px;left:-4px;border:5px solid transparent;border-top-color:#fff}
+#D .filmtl .flbl{display:flex;justify-content:space-between;font-size:10.5px;color:var(--dim2);margin-top:4px}
+
+#D .dwork{display:grid;grid-template-columns:340px 1fr;gap:0;flex:1 1 auto;min-height:0}
+#D .drail{border-right:1px solid var(--line);overflow-y:auto;min-height:0;padding:8px}
+#D .drailhead{display:flex;align-items:center;justify-content:space-between;padding:4px 8px 8px;font-size:11px;color:var(--dim2);text-transform:uppercase;letter-spacing:.5px}
+#D .drailhead button{font-size:11px;padding:4px 9px;background:var(--panel2);color:var(--dim);text-transform:none;letter-spacing:0}
+#D .drailhead button.on{background:#243244;color:#cfe3ff}
+#D .drow{padding:9px 10px;border-radius:9px;cursor:pointer;border:1px solid transparent;border-left:3px solid transparent;margin-bottom:2px}
+#D .drow:hover{background:var(--panel)}
+#D .drow.cur{background:var(--panel2);border-color:#33404e}
+#D .drow.cut{border-left-color:var(--neg)} #D .drow.leave{border-left-color:var(--pos);opacity:.72}
+#D .drow .r1{display:flex;align-items:center;gap:8px}
+#D .drow .cglyph{font-size:12px}
+#D .drow .cname{font-size:12.5px;font-weight:650;text-transform:capitalize}
+#D .drow .rtime{margin-left:auto;font-size:11px;color:var(--dim2);font-variant-numeric:tabular-nums}
+#D .drow .rdesc{font-size:11.5px;color:var(--dim);margin-top:3px;line-height:1.4}
+#D .drow .rdesc .word{color:#ffd479;font-weight:600}
+#D .drow .r3{display:flex;gap:6px;margin-top:7px;align-items:center}
+#D .drow .qd{font-size:11px;padding:4px 9px;border-radius:6px;background:var(--panel2);color:var(--dim);font-weight:600;flex:1}
+#D .drow .qd.cut.on{background:var(--neg);color:#fff} #D .drow .qd.leave.on{background:var(--pos);color:#04220d}
+#D .drow .mpick{width:16px;height:16px;border-radius:5px;border:1.5px solid #40474f;display:grid;place-items:center;font-size:10px;font-weight:800;color:transparent}
+#D .drow .mpick.on{background:var(--pick);border-color:var(--pick);color:#fff}
+#D .drailempty{padding:18px 10px;color:var(--dim2);font-size:12.5px;line-height:1.5}
+
+#D .dstage{overflow-y:auto;min-height:0;padding:16px 20px}
+#D .monitor{position:relative;aspect-ratio:16/9;max-height:34vh;margin:0 auto;border-radius:12px;overflow:hidden;background:#000;display:grid;place-items:center}
+/* the <video> is always present (so audio keeps playing even in Visual mode,
+   where the frame image covers it); display is controlled inline in D_monitor. */
+#D .monitor .mvideo{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;z-index:0}
+#D .monitor .mframe{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;z-index:1}
+#D .monitor .grad{position:absolute;inset:0;z-index:1}
+#D .monitor.discreet .mframe,#D .monitor.discreet .grad,#D .monitor.discreet .mvideo{filter:blur(26px) brightness(.7);transform:scale(1.15)}
+#D .monitor .mnote{position:relative;z-index:3;text-align:center;color:#fff;text-shadow:0 2px 10px #000;pointer-events:none;padding:0 12px}
+#D .monitor .mnote .glyph{font-size:34px}
+#D .monitor .mnote .lab{margin-top:6px;font-size:13px;font-weight:600}
+#D .monitor .mnote .sub{font-size:11.5px;color:#d0d6dd;margin-top:2px}
+#D .monitor .veil{position:absolute;inset:0;z-index:2;display:grid;align-content:start;justify-items:center;padding-top:12px;background:#0b0d10cc;color:#c9b8ff;font-size:12.5px;letter-spacing:.3px}
+#D .monitor .reveal{position:absolute;bottom:10px;right:10px;z-index:4;font-size:11px;background:#000a;color:#fff;border:1px solid #fff4;padding:5px 10px;border-radius:7px}
+#D .monitor .scrub{position:absolute;top:10px;left:12px;z-index:4;font-size:11px;color:#9be7c8;background:#0008;padding:3px 9px;border-radius:6px;display:none}
+#D .monitor.scrubbing .scrub{display:block}
+#D .monitor .cliploading{position:absolute;inset:0;z-index:6;display:none;align-items:center;justify-content:center;gap:9px;
+  background:#0b0d10cc;color:#cfe3ff;font-size:12.5px;letter-spacing:.2px}
+#D .monitor.loadingclip .cliploading{display:flex}
+#D .monitor .cliploading .spin{width:15px;height:15px;border-radius:99px;border:2px solid #3b6ea5;border-top-color:transparent;animation:D-spin .8s linear infinite}
+@keyframes D-spin{to{transform:rotate(360deg)}}
+#D .transport{display:flex;align-items:center;gap:12px;margin:10px auto 0;max-width:640px}
+#D .transport button{background:var(--panel2)}
+#D .transport .pp{background:#fff;color:#000;font-weight:700;width:42px;height:42px;border-radius:99px;font-size:16px}
+#D .transport .tt{font-variant-numeric:tabular-nums;font-size:13px;color:var(--dim)}
+#D .transport .tt b{color:var(--ink)}
+#D .transport .now{margin-left:auto;font-size:12px;color:var(--dim2)}
+#D .playopts{display:flex;align-items:center;justify-content:center;gap:14px;margin:9px auto 0;max-width:640px;flex-wrap:wrap}
+#D .segbtn{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--panel2)}
+#D .segbtn .lbl{font-size:11px;color:var(--dim2);padding:0 9px}
+#D .segbtn button{border-radius:0;background:transparent;color:var(--dim);font-size:12px;padding:7px 11px;font-weight:600}
+#D .segbtn button.on{background:#243244;color:#cfe3ff}
+
+/* rail: type filter + bulk */
+#D .dtypebar{display:flex;flex-wrap:wrap;gap:5px;padding:2px 8px 8px}
+#D .dtypebar button{font-size:11px;padding:4px 9px;background:var(--panel2);color:var(--dim);border-radius:99px;font-weight:600;display:inline-flex;align-items:center;gap:5px;text-transform:capitalize}
+#D .dtypebar button.on{background:#243244;color:#cfe3ff;box-shadow:inset 0 0 0 1px #3b6ea5}
+#D .dtypebar button .n{opacity:.6;font-weight:500}
+#D .dbulk{display:flex;align-items:center;gap:7px;padding:8px;margin:0 4px 6px;background:#151b24;border:1px solid #24344a;border-radius:9px;font-size:12px}
+#D .dbulk .grow{flex:1}
+#D .dbulk #D-bulklabel{color:var(--dim)}
+#D .dbulk button{font-size:11.5px;padding:6px 10px;font-weight:600}
+#D .dbulk .bcut{background:var(--neg);color:#fff} #D .dbulk .bleave{background:var(--pos);color:#04220d}
+
+#D .edcard{margin-top:10px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px}
+#D .edhead{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+#D .edhead .cchip{cursor:default}
+#D .edhead .zoomhint{margin-left:auto;font-size:11px;color:var(--dim2)}
+#D .edscroll{overflow:hidden;padding-bottom:2px}
+/* a horizontal scrollbar for the zoomed editor: the track is the whole film,
+   the thumb is the viewport — drag it to pan without going up to the minimap. */
+#D .edbarrow{display:flex;align-items:center;gap:6px;margin:6px 0 2px}
+#D .edstep{flex:0 0 auto;width:28px;height:15px;padding:0;display:grid;place-items:center;font-size:10px;line-height:1;
+  background:#1b2027;border:1px solid var(--line);border-radius:6px;color:var(--dim);user-select:none}
+#D .edstep:hover{background:#243244;color:#cfe3ff}
+#D .edstep:active{background:var(--pick);color:#fff}
+#D .edbar{position:relative;flex:1;height:15px;border-radius:8px;background:#0c0f13;border:1px solid var(--line);cursor:pointer}
+#D .edbar .edthumb{position:absolute;top:1px;bottom:1px;min-width:16px;border-radius:7px;background:#39424e;border:1px solid #4a5561;cursor:grab}
+#D .edbar .edthumb:hover{background:#455060}
+#D .edbar .edthumb:active{cursor:grabbing;background:var(--pick)}
+#D .edtrack{position:relative;user-select:none}
+#D .edfilm{position:relative;height:52px;border-radius:6px 6px 0 0;overflow:hidden;cursor:crosshair;background:#0c0c0d}
+#D .edfilm .edfilmimg{position:absolute;inset:0;width:100%;height:100%;object-fit:fill;display:block}
+#D .edfilm .shotmark{position:absolute;top:0;bottom:0;width:2px;background:#ffffff66;pointer-events:none;z-index:2}
+#D .edwave{display:block;background:#0c0c0d;cursor:crosshair}
+#D .edlane{position:relative;height:52px;margin-top:6px;background:#14181d;border-radius:6px;overflow:hidden;cursor:crosshair}
+#D .edlane .keeplane{position:absolute;inset:0;display:grid;place-items:center;color:#3f6d4e;font-size:10.5px;text-transform:uppercase;letter-spacing:.4px;pointer-events:none}
+#D .region{position:absolute;top:4px;bottom:4px;border-radius:6px;cursor:grab;overflow:hidden;border:1px solid;box-shadow:0 2px 6px #0006}
+#D .region.sel{outline:2px solid #fff;z-index:5}
+#D .region.leave{opacity:.38;filter:grayscale(.4)}
+#D .region .rlabel{position:absolute;top:4px;left:7px;font-size:10px;font-weight:800;color:#fff;text-shadow:0 1px 2px #000;pointer-events:none;letter-spacing:.3px}
+#D .region .rlen{position:absolute;bottom:3px;left:7px;font-size:9.5px;color:#fffd;text-shadow:0 1px 2px #000;pointer-events:none}
+#D .region .rotag{position:absolute;top:4px;right:7px;font-size:9px;font-weight:700;color:#ffdcae;text-shadow:0 1px 2px #000;pointer-events:none}
+#D .region .redge{position:absolute;top:0;bottom:0;width:9px;cursor:ew-resize;z-index:4}
+#D .region .redge.l{left:0} #D .region .redge.r{right:0}
+#D .edph{position:absolute;top:0;bottom:0;width:2px;background:#fff;box-shadow:0 0 5px #000;z-index:8;pointer-events:none}
+#D .edsel{position:absolute;top:0;bottom:0;background:rgba(88,166,255,.22);border-left:2px solid #58a6ff;border-right:2px solid #58a6ff;z-index:6;pointer-events:none;display:none}
+#D .edtools{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:12px}
+#D .edtools button{font-size:12px}
+#D .edtools .add{background:var(--pos);color:#04220d;font-weight:650} #D .edtools .split{background:#3b6ea5;color:#fff;font-weight:600}
+#D .edtools kbd{font-size:10.5px;opacity:.7;margin-left:3px}
+#D .edtools .sep{width:1px;height:22px;background:var(--line);margin:0 3px}
+#D .edtools .note{margin-left:auto;font-size:11.5px;color:#ffb877;min-height:15px}
+#D .edform{margin-top:12px;display:grid;grid-template-columns:auto 1fr;gap:9px 12px;align-items:center;font-size:12.5px}
+#D .edform label{color:var(--dim2);font-size:11.5px}
+#D .edform .val{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+#D .edform input,#D .edform select,#D .edform textarea{background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:6px 8px;font:inherit;font-size:12px}
+#D .edform input.time{width:120px;font-variant-numeric:tabular-nums}
+#D .edform textarea{width:100%;min-height:38px;resize:vertical}
+#D .edform .nudge{padding:5px 8px;background:var(--panel2);font-size:11px;font-variant-numeric:tabular-nums}
+#D .edform .dur{color:var(--dim2);font-size:11.5px}
+#D .edform .ro{color:#ffb877;font-size:11px}
+#D .eddecide{display:flex;gap:9px;margin-top:14px;align-items:center;flex-wrap:wrap}
+#D .eddecide .big{flex:1;min-width:130px;padding:13px;font-size:14px;font-weight:650;border-radius:9px;border:1.5px solid var(--line);background:var(--panel2);display:flex;align-items:center;justify-content:center;gap:8px}
+#D .eddecide .big.cut.on{background:var(--neg);border-color:var(--neg);color:#fff}
+#D .eddecide .big.leave.on{background:var(--pos);border-color:var(--pos);color:#04220d}
+#D .eddecide .trash{background:transparent;color:var(--dim2);border:1px solid var(--line);font-size:12px}
+#D .edresult{margin-top:12px;font-size:12px;color:var(--dim);line-height:1.6}
+#D .edresult .keep{color:#5ee27f;font-weight:600} #D .edresult .warn{color:#ffb877;font-weight:600}
+
+#D .dmerge{padding:9px 22px;background:#151b24;border-bottom:1px solid #24344a;display:flex;gap:10px;align-items:center;font-size:12.5px}
+#D .dmerge b{color:#cfe3ff} #D .dmerge .grow{flex:1}
+#D .dmerge button.go{background:#3b6ea5;color:#fff;font-weight:600} #D .dmerge button.go:disabled{opacity:.4;cursor:default}
+#D .dmerge button.x{background:transparent;color:var(--dim)}
+#D .khint{color:var(--dim2);font-size:11.5px;padding:8px 22px;border-top:1px solid var(--line);display:flex;gap:16px;flex-wrap:wrap}
+#D .khint kbd{background:var(--panel2);border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:1px 6px;font-family:inherit;font-size:10.5px;color:var(--ink)}
 </style>
-<div class=bar>
-  <h1>{title}</h1>
-  <div class=sub id=summary>{count} finding(s) — approve what should be acted on</div>
-  <div class=filters>
-    <span class=flabel>Decision:</span>
-    <button data-f=all class=on>All</button>
-    <button data-f=undecided>Undecided</button>
-    <button data-f=approved>Approved</button>
-    <button data-f=rejected>Rejected</button>
-    <label><input type=checkbox id=tight> Play flagged part only</label>
-  </div>
-  <div class=filters id=typeFilters>
-    <span class=flabel>Type:</span>
-  </div>
-  <div class=filters id=bulk>
-    <span class=flabel>Apply to all <b id=shownCount>0</b> shown:</span>
-    <button class=set-yes>Bad — act on all</button>
-    <button class=set-no>Fine — ignore all</button>
-    <button class=set-clear>Reset all</button>
-  </div>
-  <div class=filters id=mergebar>
-    <span class=flabel>Merge into one:</span>
-    <select id=mergeAction>
-      <option value=skip selected>skip</option>
-      <option value=mute>mute</option>
-      <option value=voice>voice-only mute</option>
-      <option value=blur>blur</option>
-    </select>
-    <button id=mergeBtn disabled>Merge selected (0)</button>
-    <span class=mhint>tick “merge” on 2+ findings to combine them into one segment spanning them all</span>
-  </div>
-  <div class=filters id=addbar>
-    <span class=flabel>Add:</span>
-    <button id=addToggle>&#43; Add segment</button>
-    <span id=addform style="display:none">
-      <input id=addStart class=tinput size=11 placeholder="0:00:00.000">
-      <span class=tosep>to</span>
-      <input id=addEnd class=tinput size=11 placeholder="0:00:00.000">
-      <select id=addAction>
-        <option value=skip selected>skip</option>
-        <option value=mute>mute</option>
-        <option value=voice>voice-only mute</option>
-        <option value=blur>blur</option>
-      </select>
-      <input id=addNote class=tinput size=22 placeholder="description (optional)">
-      <button id=addSave>Add</button>
-      <button id=addCancel>Cancel</button>
-      <span class=mhint>times as H:MM:SS.mmm</span>
-    </span>
-  </div>
-</div>
-<div class=grid id=grid></div>
-<script>
-const MEDIA = {media!r};
-const segs = {segments};
-const PAD = {pad:.0f};
 
-// A weaker signal the model was told to raise rather than force a guess on.
-const TENTATIVE = ['suggestive'];
-let filter = 'all';
-let typeFilter = 'all';
-// Ids ticked for merging. Merge collapses them into one segment spanning all.
-const selected = new Set();
-
-// The reviewer-facing "type" of a finding: for profanity that is the muted
-// word — each word its own group — and otherwise the category. This is what
-// the Type filter row groups and counts by.
-function typeOf(s) {{ return word(s) || s.category; }}
-
-const fmt = ms => {{ const x = ms/1000;
-  return `${{Math.floor(x/3600)}}:${{String(Math.floor(x%3600/60)).padStart(2,'0')}}:${{(x%60).toFixed(1).padStart(4,'0')}}`; }};
-
-// The timing tier the subtitle engine recorded, in parentheses in the
-// reasoning. Everything but 'estimated' is a real, to-the-word timing.
-function timing(s) {{
-  const m = /\\((single-word-cue|cached-asr|retranscribed|estimated|whole-cue)\\)/.exec(s.reasoning||'');
-  if (!m) return null;
-  const exact = m[1] !== 'estimated';
-  return {{exact, label: exact ? 'exact timing' : 'approx — ASR could not place the word'}};
-}}
-// The muted word, from the [word] the subtitle engine prefixes.
-function word(s) {{ const m = /^\\[([^\\]]+)\\]/.exec(s.reasoning||''); return m ? m[1] : null; }}
-
-function playClip(box, s, mute, voice, padOverride, skip) {{
-  box.innerHTML = '<div class=play><span>'
-    + (voice ? 'separating voice&hellip; (a few seconds)' : 'loading clip&hellip;')
-    + '</span></div>';
-  const tight = document.getElementById('tight').checked;
-  // padOverride lets an audition play just the selected span, not padded ±PAD.
-  const pad = padOverride != null ? padOverride : (tight ? 2 : PAD);
-  // Where the flagged span sits inside the padded clip (seconds from clip start).
-  const clipStart = Math.max(0, s.startMs / 1000 - pad);
-  const cutStart = s.startMs / 1000 - clipStart;
-  const cutEnd = s.endMs / 1000 - clipStart;
-  // Mark the cut only on full previews, not the tiny waveform auditions.
-  const showBar = padOverride == null;
-
-  const v = document.createElement('video');
-  v.controls = true; v.autoplay = true; v.preload = 'auto';
-  v.src = `/api/clip?path=${{encodeURIComponent(MEDIA)}}`
-        + `&startMs=${{s.startMs}}&endMs=${{s.endMs}}&pad=${{pad}}`
-        + (mute ? '&mute=true' : '') + (voice ? '&voice=true' : '');
-
-  // A strip over the top of the video marks the flagged span — the part being
-  // cut, muted or blurred — with a playhead, so it is clear exactly what the
-  // finding covers. In skip mode the strip is hatched and playback jumps the
-  // span, the way Jellyfin skips the scene during playback.
-  let tl, band, ph;
-  if (showBar) {{
-    tl = document.createElement('div');
-    tl.className = 'cliptl' + (skip ? ' skip' : '');
-    tl.innerHTML = '<div class=cutband></div><div class=ph></div><div class=cutlbl></div>';
-    band = tl.querySelector('.cutband'); ph = tl.querySelector('.ph');
-    tl.querySelector('.cutlbl').textContent =
-      (skip ? 'skips ' : 'flagged ') + fmt(s.startMs) + ' - ' + fmt(s.endMs);
-  }}
-
-  v.onloadedmetadata = () => {{
-    box.innerHTML = ''; box.appendChild(v);
-    const dur = v.duration || (cutEnd - cutStart + 2 * pad);
-    if (showBar) {{
-      box.appendChild(tl);
-      band.style.left = (100 * cutStart / dur) + '%';
-      band.style.width = (100 * Math.max(0.3, cutEnd - cutStart) / dur) + '%';
-      // Start just before the flagged part so its onset — and, in skip mode,
-      // the jump over it — is visible rather than already past.
-      v.currentTime = Math.max(0, cutStart - (skip ? 3 : 2));
-    }} else {{
-      v.currentTime = Math.min(pad, v.duration / 3);
-    }}
-  }};
-  v.ontimeupdate = () => {{
-    if (!showBar) return;
-    const dur = v.duration || 1;
-    ph.style.left = (100 * Math.min(v.currentTime, dur) / dur) + '%';
-    if (skip && v.currentTime >= cutStart && v.currentTime < cutEnd - 0.05) {{
-      v.currentTime = cutEnd;                 // jump the cut, as playback will
-      tl.classList.add('flash');
-      setTimeout(() => {{ if (tl) tl.classList.remove('flash'); }}, 500);
-    }}
-  }};
-  v.onerror = () => box.innerHTML = '<div class=play><span>clip failed</span></div>';
-}}
-
-function card(s) {{
-  const el = document.createElement('div');
-  const tentative = TENTATIVE.includes(s.category);
-  el.className = 'cell' + (tentative ? ' tentative' : '')
-    + (s.approved === true ? ' approved' : s.approved === false ? ' rejected' : '');
-  const tm = timing(s), w = word(s);
-  const canMute = s.recommendedAction === 'mute';
-  const canVoice = s.recommendedAction === 'voice';
-  // Each finding is set to how it should be acted on. skip works live in
-  // Jellyfin; mute/voice/blur only take effect in a rendered clean copy.
-  // "voice" removes only the vocals (Demucs) so music/ambient play through.
-  const actLabels = {{mute:'mute (silence all)', voice:'voice-only mute', blur:'blur', skip:'skip'}};
-  const acts = ['mute','voice','blur','skip'].map(a =>
-    `<option value=${{a}} ${{s.recommendedAction===a?'selected':''}}>${{actLabels[a]}}</option>`).join('');
-  el.innerHTML = `
-    <div class=shot>
-      <img loading=lazy src="/api/thumbnail?path=${{encodeURIComponent(MEDIA)}}&ms=${{Math.floor((s.startMs+s.endMs)/2)}}">
-      <div class=play><span>&#9654; Play clip</span></div>
-    </div>
-    <div class=clipbtns>
-      <button class=play-plain>&#9654; Play scene</button>
-      <button class=play-skip title="Play the scene as it will play once this span is skipped">&#9197; Preview skip</button>
-      ${{canMute ? '<button class=play-muted>&#9654; Play muted</button>' : ''}}
-      ${{canVoice ? '<button class=play-voice>&#9654; Play voice-removed</button>' : ''}}
-      <button class=edit-timing>&#9998; Timing</button>
-      <button class=dup title="Copy this finding; then retime the copy to another place">&#10697; Duplicate</button>
-      <button class=del title="Delete this finding">&#10005; Delete</button>
-    </div>
-    <div class=meta>
-      <label class=mergepick title="Select to merge with others"><input type=checkbox class=mergesel> merge</label>
-      <b>#${{s.id}}</b> ${{fmtHMS(s.startMs)}} – ${{fmtHMS(s.endMs)}}
-      (${{((s.endMs-s.startMs)/1000).toFixed(1)}}s)${{
-        tm ? `<span class="tag ${{tm.exact?'exact':'est'}}">${{tm.label}}</span>` : ''}}<br>
-      <span class=cat>${{s.category}}</span>${{w ? ` <span class=word>“${{w}}”</span>` : ''}}${{
-        tentative ? '<span class=tag>needs your call</span>' : ''}} ${{s.confidence}} · ${{s.engine}}<br>
-      <span class=why>${{(s.reasoning||'').replace(/</g,'&lt;')}}</span>
-    </div>
-    <div class=btns>
-      <button class="yes ${{s.approved===true?'on':''}}">Bad — act on it</button>
-      <button class="no ${{s.approved===false?'on':''}}">Fine — ignore</button>
-      <select class=actsel title="What to do with this finding when acted on">${{acts}}</select>
-    </div>
-    <div class=editor></div>`;
-  const shot = el.querySelector('.shot');
-  shot.onclick = () => playClip(shot, s, false);
-  el.querySelector('.play-plain').onclick = () => playClip(shot, s, false);
-  el.querySelector('.play-skip').onclick = () => playClip(shot, s, false, false, null, true);
-  const pm = el.querySelector('.play-muted');
-  if (pm) pm.onclick = () => playClip(shot, s, true, false);
-  const pv = el.querySelector('.play-voice');
-  if (pv) pv.onclick = () => playClip(shot, s, false, true);
-
-  const [yes, no] = el.querySelectorAll('.btns button');
-  const send = v => fetch(`/api/segments/${{s.id}}?path=${{encodeURIComponent(MEDIA)}}`, {{
-      method: 'PATCH', headers: {{'Content-Type':'application/json'}},
-      body: JSON.stringify({{approved: v}})
-    }}).then(() => {{ s.approved = v; el.replaceWith(card(s)); apply(); tally(); }});
-  yes.onclick = () => send(s.approved === true ? null : true);
-  no.onclick  = () => send(s.approved === false ? null : false);
-
-  // Change what the finding does (mute/blur/skip). Re-render so "Play muted"
-  // and the action badge update to match.
-  const sel = el.querySelector('.actsel');
-  sel.onchange = () => fetch(`/api/segments/${{s.id}}?path=${{encodeURIComponent(MEDIA)}}`, {{
-      method: 'PATCH', headers: {{'Content-Type':'application/json'}},
-      body: JSON.stringify({{recommendedAction: sel.value}})
-    }}).then(() => {{ s.recommendedAction = sel.value; el.replaceWith(card(s)); apply(); tally(); }});
-
-  // Tick to include this finding in a merge. The card highlights while picked.
-  const mp = el.querySelector('.mergesel');
-  mp.checked = selected.has(s.id);
-  el.classList.toggle('picked', mp.checked);
-  mp.onchange = () => {{
-    if (mp.checked) selected.add(s.id); else selected.delete(s.id);
-    el.classList.toggle('picked', mp.checked);
-    updateMergeBtn();
-  }};
-
-  el.querySelector('.edit-timing').onclick = () => toggleTiming(el, s, el.querySelector('.editor'));
-
-  // The description is editable in place — e.g. to fix the stale shot reference
-  // a duplicated finding carries, or to annotate a manual one. Saves on blur if
-  // it changed (Ctrl/Cmd+Enter commits without leaving the field).
-  const why = el.querySelector('.why');
-  why.contentEditable = 'true';
-  why.spellcheck = false;
-  why.title = 'Click to edit the description';
-  why.addEventListener('keydown', e => {{
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {{ e.preventDefault(); why.blur(); }}
-  }});
-  why.addEventListener('blur', () => {{
-    const val = why.textContent;
-    if (val === (s.reasoning || '')) return;  // unchanged
-    fetch(`/api/segments/${{s.id}}?path=${{encodeURIComponent(MEDIA)}}`, {{
-      method: 'PATCH', headers: {{'Content-Type':'application/json'}},
-      body: JSON.stringify({{reasoning: val}})
-    }}).then(r => {{ if (r.ok) s.reasoning = val; else why.textContent = s.reasoning || ''; }})
-      .catch(() => {{ why.textContent = s.reasoning || ''; }});
-  }});
-
-  // Duplicate: create a manual copy at the same spot, then reload so the new
-  // card appears. The reviewer retimes the copy (editable times) to its place.
-  el.querySelector('.dup').onclick = () => {{
-    fetch(`/api/segments?path=${{encodeURIComponent(MEDIA)}}`, {{
-      method: 'POST', headers: {{'Content-Type':'application/json'}},
-      body: JSON.stringify({{startMs: s.startMs, endMs: s.endMs, category: s.category,
-        recommendedAction: s.recommendedAction, reasoning: s.reasoning || ''}})
-    }}).then(r => {{ if (!r.ok) throw new Error('duplicate failed'); return r.json(); }})
-      .then(() => location.reload()).catch(() => {{}});
-  }};
-
-  // Delete: remove the finding outright (we can add them now, so we must be
-  // able to remove them). Confirmed, since it can't be undone.
-  el.querySelector('.del').onclick = () => {{
-    if (!confirm('Delete finding #' + s.id + '? This cannot be undone.')) return;
-    fetch(`/api/segments/${{s.id}}?path=${{encodeURIComponent(MEDIA)}}`, {{ method: 'DELETE' }})
-      .then(r => {{ if (!r.ok) throw new Error('delete failed'); return r.json(); }})
-      .then(() => location.reload()).catch(() => {{}});
-  }};
-  return el;
-}}
-
-const fmtMs = ms => {{ const s = Math.floor(ms / 1000);
-  return `${{Math.floor(s / 60)}}:${{String(s % 60).padStart(2, '0')}}`
-       + `.${{String(Math.floor(ms % 1000)).padStart(3, '0')}}`; }};
-
-// H:MM:SS.mmm, for the editable time fields, so hours-in are readable.
-const fmtHMS = ms => {{ const t = Math.floor(ms / 1000);
-  return `${{Math.floor(t / 3600)}}:${{String(Math.floor(t % 3600 / 60)).padStart(2, '0')}}`
-       + `:${{String(t % 60).padStart(2, '0')}}.${{String(Math.floor(ms % 1000)).padStart(3, '0')}}`; }};
-
-// Flexible parse for a typed time: H:MM:SS.mmm, MM:SS(.mmm), or plain seconds.
-// Returns ms (>= 0) or null if it can't be read.
-function parseTime(str) {{
-  str = String(str == null ? '' : str).trim();
-  if (!str) return null;
-  const p = str.split(':').map(x => parseFloat(x));
-  if (!p.length || p.some(x => !isFinite(x))) return null;
-  let sec;
-  if (p.length === 3) sec = p[0] * 3600 + p[1] * 60 + p[2];
-  else if (p.length === 2) sec = p[0] * 60 + p[1];
-  else sec = p[0];
-  return Math.max(0, Math.round(sec * 1000));
-}}
-
-// Waveform timing editor. Zoomed to ~160px/s so 25ms is a few pixels; the
-// scrollable window spans the finding ±PAD s, so a mute can be dragged onto
-// the exact word by eye (and ear, via Preview muted) and saved to the sidecar.
-// Visual findings (scene detections) get a filmstrip to place by eye; audio
-// findings (spoken words) get a waveform to place by eye and ear. Check the
-// category as well as the engine: a duplicated or merged finding carries the
-// 'manual' engine but keeps its scene category, so keying off the engine alone
-// wrongly opened a waveform for a copied visual finding. Categories mirror
-// worker/policy.py.
-const VISUAL_CATS = ['nudity', 'sexual_activity', 'intense_kissing', 'suggestive'];
-function isVisual(s) {{
-  return s.engine === 'vlm' || s.engine === 'pureframe' || VISUAL_CATS.includes(s.category);
-}}
-
-function toggleTiming(cell, s, box) {{
-  if (box.dataset.open === '1') {{
-    box.dataset.open = ''; box.classList.remove('open'); box.innerHTML = ''; return;
-  }}
-  box.dataset.open = '1'; box.classList.add('open');
-  openTimingAt(cell, s, box, s.startMs, s.endMs);
-}}
-
-// (Re)load the editor's frames/waveform for a window centred on [atStart,atEnd]:
-// the finding's saved spot on first open, or the edited bounds when the reviewer
-// moves the finding somewhere the current window doesn't reach (a duplicate
-// dragged minutes away). Without re-anchoring, the strip stayed at the old spot
-// and a far-moved finding showed a blank/mismatched strip.
-function openTimingAt(cell, s, box, atStart, atEnd) {{
-  if (isVisual(s)) {{
-    box.innerHTML = '<div class=tload>loading frames&hellip;</div>';
-    buildTiming(cell, s, box, {{visual: true}}, atStart, atEnd);
-  }} else {{
-    box.innerHTML = '<div class=tload>loading waveform&hellip;</div>';
-    fetch(`/api/peaks?path=${{encodeURIComponent(MEDIA)}}&startMs=${{atStart}}&endMs=${{atEnd}}&pad=${{PAD}}`)
-      .then(r => r.json())
-      .then(d => buildTiming(cell, s, box, {{peaks: d.peaks}}, atStart, atEnd))
-      .catch(() => box.innerHTML = '<div class=tload>could not load waveform</div>');
-  }}
-}}
-
-function buildTiming(cell, s, box, mode, atStart, atEnd) {{
-  // Window bounds match the server (build_peaks/build_filmstrip): the anchor
-  // span ±PAD, clamped at the file start. The anchor is the finding's saved
-  // spot on open, or its edited bounds after a recenter — so the strip always
-  // shows where the finding currently is.
-  const winStart = Math.max(0, atStart - PAD * 1000), winEnd = atEnd + PAD * 1000;
-  const span = Math.max(1, winEnd - winStart);
-  const PXPS = 160, SNAP = 25, H = 90;
-  const W = Math.max(320, Math.round(span / 1000 * PXPS));
-  const clamp = t => Math.max(winStart, Math.min(winEnd, t));
-  let st = clamp(atStart), en = clamp(atEnd);
-  const canMute = s.recommendedAction === 'mute';
-  const canVoice = s.recommendedAction === 'voice';
-  const bg = mode.visual
-    ? `<img class=strip style="width:${{W}}px;height:${{H}}px" `
-      + `src="/api/filmstrip?path=${{encodeURIComponent(MEDIA)}}`
-      + `&startMs=${{atStart}}&endMs=${{atEnd}}&pad=${{PAD}}">`
-    : `<canvas width=${{W}} height=${{H}}></canvas>`;
-
-  box.innerHTML = `
-    <div class=wavewrap>
-      <div class=wavebox style="width:${{W}}px;height:${{H}}px">
-        ${{bg}}
-        <div class=region></div>
-        <div class=selregion></div>
-        <div class="handle start"><div class=grip></div></div>
-        <div class="handle end"><div class=grip></div></div>
+<section id="D">
+  <div class="dtop">
+    <div class="dtoprow">
+      <div>
+        <h1>__TITLE__</h1>
+        <div class="path mono">__PATH_DISPLAY__</div>
+      </div>
+      <div class="discreet-toggle on" id="D-discreet" title="Blur the picture so you can review without others seeing the content">
+        <span class="sw"></span> Discreet mode
       </div>
     </div>
-    <div class=tctrls>
-      <span class=tlabel>Start</span>
-      <button data-h=start data-d=-1000>&#9664;&#9664; 1s</button>
-      <button data-h=start data-d=-25>&#9664; 25ms</button>
-      <button data-h=start data-d=25>25ms &#9654;</button>
-      <button data-h=start data-d=1000>1s &#9654;&#9654;</button>
-      <input class=tinput id=tstart-${{s.id}} size=11 title="type any time: H:MM:SS.mmm">
+    <div class="prog">
+      <div class="progbar" id="D-progbar"></div>
+      <div class="progstats" id="D-progstats"></div>
     </div>
-    <div class=tctrls>
-      <span class=tlabel>End</span>
-      <button data-h=end data-d=-1000>&#9664;&#9664; 1s</button>
-      <button data-h=end data-d=-25>&#9664; 25ms</button>
-      <button data-h=end data-d=25>25ms &#9654;</button>
-      <button data-h=end data-d=1000>1s &#9654;&#9654;</button>
-      <input class=tinput id=tend-${{s.id}} size=11 title="type any time: H:MM:SS.mmm">
-      <span style="margin-left:14px" class=tread id=tdur-${{s.id}}></span>
-    </div>
-    <div class=tctrls>
-      <button class=tprev>&#9654; ${{canMute ? 'Preview muted' : canVoice ? 'Preview voice-removed' : 'Preview scene'}}</button>
-      <button class=trecenter title="Reload the frames/waveform around the current start and end">&#8635; Frames here</button>
-      <button class=tsave>Save timing</button>
-      <button class=tcancel>Cancel</button>
-      <span class=selread id=tsel-${{s.id}}></span>
-    </div>
-    <div class=tctrls>
-      <span class=thint>drag the handles or type a time to set the bounds; drag across the
-      strip to select a span — it shows its time and can be used as the bounds</span>
+  </div>
+  <div class="filmtl">
+    <div class="ftrack" id="D-ftrack"><div class="fbox" id="D-fbox" title="What the editor below is showing — drag to pan, zoom the editor to resize"></div><div class="fph" id="D-fph"></div></div>
+    <div class="flbl"><span>0:00</span><span>click to jump · drag the box to pan the editor · markers are findings</span><span id="D-runtime">0:00</span></div>
+  </div>
+  <div class="dmerge hidden" id="D-mergebar">
+    <b><span id="D-mergecount">0</span> picked</b>
+    <span id="D-mergehint" style="color:var(--dim2)"></span>
+    <div class="grow"></div>
+    <button class="go" id="D-mergego" disabled>Merge into one</button>
+    <button class="x" id="D-mergeclear">Clear</button>
+  </div>
+  <div class="dwork">
+    <aside class="drail">
+      <div class="drailhead"><span>Findings</span>
+        <button id="D-mergemode">⇄ Merge…</button></div>
+      <div class="dtypebar" id="D-typechips"></div>
+      <div class="dbulk hidden" id="D-bulkrow">
+        <span id="D-bulklabel"></span>
+        <div class="grow"></div>
+        <button class="bcut" id="D-bulkcut">✂ Cut all</button>
+        <button class="bleave" id="D-bulkleave">👁 Leave all</button>
+      </div>
+      <div id="D-list"></div>
+    </aside>
+    <main class="dstage">
+      <div class="monitor discreet" id="D-monitor">
+        <video class="mvideo" id="D-clip" playsinline preload="metadata"></video>
+        <img class="mframe" id="D-mframe" alt="">
+        <div class="grad" id="D-mgrad"></div>
+        <div class="veil" id="D-veil">picture hidden · discreet mode</div>
+        <div class="mnote" id="D-mnote"></div>
+        <div class="scrub">♪ playing audio for this scene</div>
+        <div class="cliploading" id="D-cliploading"><span class="spin"></span> building clip… (transcoding this scene)</div>
+        <button class="reveal" id="D-reveal">👁 Hold to reveal</button>
+      </div>
+      <div class="transport">
+        <button class="pp" id="D-pp">▶</button>
+        <button id="D-back1">◀ 1s</button>
+        <button id="D-fwd1">1s ▶</button>
+        <span class="tt mono" id="D-tt"></span>
+        <span class="now" id="D-now"></span>
+      </div>
+      <div class="playopts">
+        <div class="segbtn" id="D-picmode" title="Show frames only (private) or play the real video">
+          <button data-pic="visual" class="on">🖼 Visual</button>
+          <button data-pic="video">🎬 Video</button>
+        </div>
+        <div class="segbtn" id="D-audmode" title="How the audio plays back">
+          <span class="lbl">Audio</span>
+          <button data-aud="normal" class="on">Normal</button>
+          <button data-aud="cleaned" title="Apply this finding's decision: skips jumped, mutes/voice silenced — hear it as the viewer will">Cleaned</button>
+          <button data-aud="muted">Muted</button>
+        </div>
+        <div class="segbtn" id="D-range" title="Play just this scene (fast, cached) or stream the whole film from the playhead">
+          <span class="lbl">Range</span>
+          <button data-range="scene" class="on">Scene</button>
+          <button data-range="film" title="Hold play and the film runs continuously across scenes from the playhead">Film</button>
+        </div>
+      </div>
+      <div class="edcard" id="D-edcard"></div>
+    </main>
+  </div>
+  <div class="khint">
+    <span><kbd>J</kbd> <kbd>K</kbd> findings</span>
+    <span><kbd>Space</kbd> play/pause</span>
+    <span><kbd>A</kbd> add cut</span>
+    <span><kbd>S</kbd> split</span>
+    <span><kbd>Del</kbd> delete region</span>
+    <span><kbd>C</kbd> cut out</span>
+    <span><kbd>L</kbd> leave in</span>
+    <span><kbd>Shift</kbd>+drag = audition · wheel = zoom</span>
+  </div>
+</section>
+
+<script>
+// ---------- injected by the worker ----------
+const MEDIA = __MEDIA_JSON__;
+const PAD = __PAD__;
+const RUNTIME_MS = __RUNTIME_MS__;
+let SEGS = __SEGS_JSON__;
+
+// ---------- category system (mirrors worker/policy.py severity order) ----------
+const CAT = {
+  nudity:{g:'●',sev:5}, sexual_activity:{g:'●',sev:4}, intense_kissing:{g:'♥',sev:4},
+  suggestive:{g:'◐',sev:2}, violence:{g:'⚔',sev:3}, gore:{g:'✦',sev:5},
+  profanity:{g:'“”',sev:1}, manual:{g:'✎',sev:0},
+};
+const CATEGORIES=['profanity','suggestive','intense_kissing','sexual_activity','nudity','violence','gore','manual'];
+const VISUAL_CATS=['nudity','sexual_activity','intense_kissing','suggestive','violence','gore'];
+function isVisual(s){return s.engine==='vlm'||s.engine==='pureframe'||VISUAL_CATS.includes(s.category);}
+const catColor = c => getComputedStyle(document.documentElement).getPropertyValue('--c-'+c).trim() || '#8b98a5';
+const TENTATIVE=['suggestive'];
+
+// action → region look (skip works live; mute/voice/blur are render-only)
+const C_ACT={
+  skip:{c:'#f85149',bg:'repeating-linear-gradient(45deg,#f8514977 0 8px,#f8514922 8px 16px)',lbl:'SKIP'},
+  mute:{c:'#4aa3ff',bg:'#4aa3ff44',lbl:'MUTE'},
+  voice:{c:'#2dd4bf',bg:'#2dd4bf44',lbl:'VOICE'},
+  blur:{c:'#a78bfa',bg:'#a78bfa44',lbl:'BLUR'}};
+const actLabels={mute:'Mute (silence all)',voice:'Voice-only mute',blur:'Blur',skip:'Skip'};
+const engineName={subtitle:'subtitle text',subtitles:'subtitle text',whisper:'speech (Whisper)',
+  vlm:'vision AI',pureframe:'frame heuristics',manual:'added by hand'};
+
+// ---------- helpers ----------
+const pad=(n,l=2)=>String(n).padStart(l,'0');
+const fmtHMS=ms=>{ms=Math.max(0,Math.floor(ms));const t=Math.floor(ms/1000);
+  return `${Math.floor(t/3600)}:${pad(Math.floor(t%3600/60))}:${pad(t%60)}.${pad(Math.floor(ms%1000),3)}`;};
+const fmtShort=ms=>{const t=Math.floor(Math.max(0,ms)/1000);return `${Math.floor(t/60)}:${pad(t%60)}`;};
+const word=s=>{const m=/^\[([^\]]+)\]/.exec(s.reasoning||'');return m?m[1]:null;};
+const esc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+const friendly=s=>{
+  const w=word(s);
+  if(w) return `Muted word <span class="word">“${esc(w)}”</span> in the dialogue.`;
+  return esc((s.reasoning||'').replace(/;?\s*policy:.*$/,'').trim())||'—';
+};
+function gradFor(s){const c=s?catColor(s.category):'#8b98a5';
+  return `radial-gradient(120% 120% at 30% 20%, ${c}44, #000 60%), linear-gradient(135deg, ${c}22, #000)`;}
+function cchip(s){const c=catColor(s.category);const t=TENTATIVE.includes(s.category);
+  return `<span class="cchip" style="background:${c}22;color:${c}">
+    <span class="g">${CAT[s.category]?.g||'●'}</span>${esc(s.category.replace(/_/g,' '))}</span>`
+    + (t?` <span class="tentative-flag">needs your call</span>`:'');}
+// Flexible parse for a typed time: H:MM:SS.mmm, MM:SS(.mmm), or plain seconds.
+function parseTime(str){
+  str=String(str==null?'':str).trim();
+  if(!str)return null;
+  const p=str.split(':').map(x=>parseFloat(x));
+  if(!p.length||p.some(x=>!isFinite(x)))return null;
+  let sec;
+  if(p.length===3)sec=p[0]*3600+p[1]*60+p[2];
+  else if(p.length===2)sec=p[0]*60+p[1];
+  else sec=p[0];
+  return Math.max(0,Math.round(sec*1000));
+}
+function C_merge(iv){const s=iv.map(x=>x.slice()).sort((a,b)=>a[0]-b[0]);const o=[];
+  for(const v of s){if(o.length&&v[0]<=o[o.length-1][1])o[o.length-1][1]=Math.max(o[o.length-1][1],v[1]);else o.push(v.slice());}return o;}
+
+// ---------- persistence (every decision reaches the sidecar) ----------
+function patchSeg(id,body){
+  return fetch(`/api/segments/${id}?path=${encodeURIComponent(MEDIA)}`,{
+    method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+}
+function createSeg(body){
+  return fetch(`/api/segments?path=${encodeURIComponent(MEDIA)}`,{
+    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .then(r=>{if(!r.ok)throw new Error('create failed');return r.json();});
+}
+function deleteSeg(id){
+  return fetch(`/api/segments/${id}?path=${encodeURIComponent(MEDIA)}`,{method:'DELETE'})
+    .then(r=>{if(!r.ok)throw new Error('delete failed');return r.json();});
+}
+function mergeSeg(ids,action){
+  return fetch(`/api/segments/merge?path=${encodeURIComponent(MEDIA)}`,{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ids,recommendedAction:action,approved:true})})
+    .then(r=>{if(!r.ok)throw new Error('merge failed');return r.json();});
+}
+// Re-read the whole timeline (all findings, not approvedOnly) after a structural
+// change, so ids and shape match the sidecar exactly.
+function refetch(){
+  return fetch(`/api/segments?path=${encodeURIComponent(MEDIA)}&approvedOnly=false`)
+    .then(r=>r.json()).then(tl=>{SEGS=tl.segments||[];});
+}
+
+// ---------- state ----------
+const D_PAD=15000;
+let D={sel:SEGS[0]?SEGS[0].id:null, playMs:SEGS[0]?SEGS[0].startMs:0, discreet:true, playing:false, timer:null,
+       viewStart:null, viewEnd:null, merge:false, picks:new Set(), scrubbing:false, held:false,
+       peaksKey:null, peaks:null, frameKey:null, frameTimer:null,
+       typeFilter:'all',            // scope the whole workspace to one finding type
+       picMode:'visual',            // 'visual' (frames+audio) | 'video' (real picture+audio)
+       audioMode:'normal',          // 'normal' | 'cleaned' (acted-on) | 'muted'
+       range:'scene',               // 'scene' (per-window clip) | 'film' (whole-film stream)
+       clipStartAbs:0, cutStart:null, cutEnd:null,
+       clipKey:null, loadingClip:false,     // dedup the transcoded clip + show a build state
+       keeps:null, playWinStart:0,           // cleaned playback: clip-time → film-time map
+       sa:{ctx:null,buf:null,key:null,winStart:0,winEnd:0,loading:false,last:0}};  // live scrub-audio (WebAudio grains)
+
+// The reviewer-facing "type" of a finding: a profane word is its own group,
+// everything else its category — matches the old page's type filter.
+function typeOf(s){return word(s)||s.category;}
+function D_visible(s){return D.typeFilter==='all'||typeOf(s)===D.typeFilter;}
+function D_shown(){return SEGS.filter(D_visible);}
+
+function D_get(id){return SEGS.find(s=>s.id===id);}
+function D_nearest(ms){
+  if(!SEGS.length)return null;
+  const inside=SEGS.filter(s=>ms>=s.startMs&&ms<=s.endMs).sort((a,b)=>(a.endMs-a.startMs)-(b.endMs-b.startMs))[0];
+  if(inside)return inside;
+  let best=null,bd=Infinity;
+  SEGS.forEach(s=>{const d=Math.min(Math.abs(ms-s.startMs),Math.abs(ms-s.endMs));if(d<bd){bd=d;best=s;}});
+  return best;
+}
+// approved===true => CUT OUT (red); ===false => LEAVE IN (green); null => undecided
+function D_state(s){return s.approved===true?'cut':s.approved===false?'leave':'undecided';}
+
+// ---------- viewport / minimap ----------
+function D_edW(){const c=document.getElementById('D-edcard');return Math.max(320,(c?c.clientWidth:900)-28);}
+function D_ex(ms){const span=(D.viewEnd-D.viewStart)||1;return (ms-D.viewStart)/span*D_edW();}
+function D_clampView(){let span=D.viewEnd-D.viewStart;
+  if(span>=RUNTIME_MS){D.viewStart=0;D.viewEnd=RUNTIME_MS;return;}
+  if(D.viewStart<0){D.viewEnd-=D.viewStart;D.viewStart=0;}
+  if(D.viewEnd>RUNTIME_MS){D.viewStart-=(D.viewEnd-RUNTIME_MS);D.viewEnd=RUNTIME_MS;if(D.viewStart<0)D.viewStart=0;}}
+function D_ensureView(){if(D.viewStart==null){const s=D_get(D.sel)||SEGS[0];
+  if(!s){D.viewStart=0;D.viewEnd=Math.min(RUNTIME_MS,60000);return;}
+  const span=Math.min(RUNTIME_MS,Math.max(24000,(s.endMs-s.startMs)+30000));
+  const c=(s.startMs+s.endMs)/2;D.viewStart=c-span/2;D.viewEnd=c+span/2;D_clampView();}}
+function D_centerView(s){const span=(D.viewEnd-D.viewStart)||40000;const c=(s.startMs+s.endMs)/2;
+  D.viewStart=c-span/2;D.viewEnd=c+span/2;D_clampView();}
+function D_highlightNearest(){const n=D_nearest(D.playMs);if(!n)return;
+  document.querySelectorAll('#D-list .drow').forEach(r=>r.classList.toggle('cur',+r.dataset.id===n.id));}
+
+// ---------- render ----------
+function D_render(){
+  // A filter that hides the selected finding would leave the editor on
+  // something off-screen — snap the selection into the shown set.
+  if(D.sel!=null){const cur=D_get(D.sel);if(cur&&!D_visible(cur)){const first=D_shown()[0];D.sel=first?first.id:null;}}
+  D_ensureView();
+  D_prog(); D_typechips(); D_bulkrow(); D_filmtl(); D_list(); D_monitor(); D_editor(); D_mergebar();
+  document.getElementById('D-runtime').textContent=fmtShort(RUNTIME_MS);
+}
+
+// One chip per type present, plus All; picking one scopes the whole workspace.
+function D_typechips(){
+  const row=document.getElementById('D-typechips');
+  const counts={};SEGS.forEach(s=>{const t=typeOf(s);counts[t]=(counts[t]||0)+1;});
+  const order=Object.keys(counts).sort((a,b)=>counts[b]-counts[a]||a.localeCompare(b));
+  const chip=(key,label,n)=>`<button data-type="${esc(key)}" class="${key===D.typeFilter?'on':''}">${esc(label)}<span class="n">${n}</span></button>`;
+  row.innerHTML=chip('all','All',SEGS.length)+order.map(t=>chip(t,t.replace(/_/g,' '),counts[t])).join('');
+  row.querySelectorAll('button').forEach(b=>b.onclick=()=>{D.typeFilter=b.dataset.type;D_render();});
+}
+
+// Bulk cut/leave acts on exactly the findings the current filter shows.
+function D_bulkrow(){
+  const bar=document.getElementById('D-bulkrow');
+  const shown=D_shown();
+  const on=D.typeFilter!=='all';
+  bar.classList.toggle('hidden',!on);
+  if(!on)return;
+  document.getElementById('D-bulklabel').innerHTML=`<b>${shown.length}</b> ${esc(D.typeFilter.replace(/_/g,' '))} shown`;
+}
+function D_bulk(v){
+  const ids=D_shown().map(s=>s.id);
+  if(!ids.length)return;
+  fetch(`/api/segments?path=${encodeURIComponent(MEDIA)}`,{
+    method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids,approved:v})})
+    .then(r=>r.json()).then(tl=>{const by={};(tl.segments||[]).forEach(x=>by[x.id]=x);
+      SEGS.forEach(s=>{if(by[s.id])s.approved=by[s.id].approved;});D_render();})
+    .catch(()=>D_ednote&&D_ednote('bulk failed'));
+}
+
+function D_prog(){
+  const n=SEGS.length||1;
+  const c=SEGS.filter(s=>s.approved===true).length, l=SEGS.filter(s=>s.approved===false).length, u=SEGS.length-c-l;
+  const p=x=>100*x/n;
+  document.getElementById('D-progbar').innerHTML=
+    `<span class="p-cut" style="width:${p(c)}%"></span><span class="p-leave" style="width:${p(l)}%"></span><span class="p-un" style="width:${p(u)}%"></span>`;
+  document.getElementById('D-progstats').innerHTML=
+    `<span><span class="dot" style="background:var(--neg)"></span><b>${c}</b> cut out</span>`+
+    `<span><span class="dot" style="background:var(--pos)"></span><b>${l}</b> left in</span>`+
+    `<span><span class="dot" style="background:#3a4048"></span><b>${u}</b> to review</span>`;
+}
+
+function D_filmtl(){
+  const track=document.getElementById('D-ftrack'), box=document.getElementById('D-fbox');
+  [...track.querySelectorAll('.ftick')].forEach(n=>n.remove());
+  D_shown().forEach(s=>{const mid=(s.startMs+s.endMs)/2;const t=document.createElement('div');
+    t.className='ftick';t.style.left=100*mid/RUNTIME_MS+'%';t.style.background=catColor(s.category);
+    if(s.id===D.sel)t.style.outline='2px solid #fff';track.insertBefore(t,box);});
+  box.style.left=100*D.viewStart/RUNTIME_MS+'%';
+  box.style.width=100*(D.viewEnd-D.viewStart)/RUNTIME_MS+'%';
+  document.getElementById('D-fph').style.left=100*D.playMs/RUNTIME_MS+'%';
+}
+
+function D_list(){
+  const list=document.getElementById('D-list');
+  if(!SEGS.length){list.innerHTML='<div class="drailempty">No findings for this film yet. Scrub the film and press <b>A</b> to add a cut where you spot something.</div>';return;}
+  const shown=D_shown();
+  if(!shown.length){list.innerHTML='<div class="drailempty">No findings of this type. Clear the filter above to see the rest.</div>';return;}
+  list.innerHTML=shown.map(s=>{
+    const st=D_state(s), w=word(s);
+    return `<div class="drow ${s.id===D.sel?'cur':''} ${st}" data-id="${s.id}">
+      <div class="r1">
+        ${D.merge?`<div class="mpick ${D.picks.has(s.id)?'on':''}" data-pick="${s.id}">✓</div>`:''}
+        <span class="cglyph" style="color:${catColor(s.category)}">${CAT[s.category]?.g||'●'}</span>
+        <span class="cname">${w?`“${esc(w)}”`:esc(s.category.replace(/_/g,' '))}</span>
+        <span class="rtime">${fmtShort(s.startMs)}</span>
+      </div>
+      <div class="rdesc">${friendly(s)}</div>
+      <div class="r3">
+        <button class="qd cut ${st==='cut'?'on':''}" data-qd="cut" data-id="${s.id}">✂ Cut out</button>
+        <button class="qd leave ${st==='leave'?'on':''}" data-qd="leave" data-id="${s.id}">👁 Leave in</button>
+      </div>
     </div>`;
+  }).join('');
+  list.querySelectorAll('.drow').forEach(el=>{
+    const id=+el.dataset.id;
+    el.addEventListener('click',e=>{
+      if(e.target.closest('[data-qd]')||e.target.closest('[data-pick]'))return;
+      D_select(id);
+    });
+  });
+  list.querySelectorAll('[data-qd]').forEach(b=>b.onclick=e=>{e.stopPropagation();
+    const s=D_get(+b.dataset.id), want=b.dataset.qd==='cut';
+    D_setApproved(s,(D_state(s)===b.dataset.qd)?null:want);});
+  list.querySelectorAll('[data-pick]').forEach(b=>b.onclick=e=>{e.stopPropagation();
+    const id=+b.dataset.pick; D.picks.has(id)?D.picks.delete(id):D.picks.add(id); D_render();});
+}
 
-  const wrap = box.querySelector('.wavewrap');
-  const wbox = box.querySelector('.wavebox');
-  const canvas = box.querySelector('canvas');
-  const hStart = box.querySelector('.handle.start');
-  const hEnd = box.querySelector('.handle.end');
-  const region = box.querySelector('.region');
-  const rStart = box.querySelector('#tstart-' + s.id);
-  const rEnd = box.querySelector('#tend-' + s.id);
-  const rDur = box.querySelector('#tdur-' + s.id);
+function D_select(id){D.sel=id;const s=D_get(id);if(s){D.playMs=s.startMs;D_centerView(s);}D_render();}
 
-  const xOf = t => (t - winStart) / span * W;
-  const tOf = x => Math.round((winStart + x / W * span) / SNAP) * SNAP;
+// ---------- monitor (real frame at the playhead via the thumbnail endpoint) ----------
+function D_loadFrame(){
+  const img=document.getElementById('D-mframe');if(!img)return;
+  const key=Math.round(D.playMs/500)*500;
+  if(key===D.frameKey)return;
+  D.frameKey=key;
+  img.src=`/api/thumbnail?path=${encodeURIComponent(MEDIA)}&ms=${Math.max(0,key)}`;
+}
+function D_scheduleFrame(){
+  if(D.frameTimer)clearTimeout(D.frameTimer);
+  D.frameTimer=setTimeout(D_loadFrame,160);
+}
+function D_monitor(){
+  const s=D_nearest(D.playMs), mon=document.getElementById('D-monitor');
+  // Video mode is an explicit reveal (you chose the real picture); Visual mode
+  // keeps the parent-private path — discreet still blurs the frames.
+  const videomode=D.picMode==='video';
+  mon.classList.toggle('videomode',videomode);
+  // Video mode reveals (you chose the real picture); Visual mode stays private.
+  const hide=D.discreet&&!D.held&&!videomode;
+  mon.classList.toggle('discreet',hide);
+  document.getElementById('D-veil').style.display=hide?'grid':'none';
+  // The colour gradient is only the *stand-in* for a hidden picture; when the
+  // real frame or video is showing it would just darken it — show only when hidden.
+  const grad=document.getElementById('D-mgrad');
+  grad.style.background=gradFor(s);
+  grad.style.display=hide?'block':'none';
+  // The frame image is the picture in Visual mode, and in Video mode *until you
+  // press play* (so scrubbing shows frames); once playing in Video mode the
+  // moving <video> underneath is the picture, so hide the frame.
+  const showVideoPicture=videomode&&D.playing;
+  const img=document.getElementById('D-mframe');
+  img.style.display=(hide||showVideoPicture)?'none':'block';
+  if(!hide&&!showVideoPicture)D_scheduleFrame();
+  const inside=s&&D.playMs>=s.startMs&&D.playMs<=s.endMs;
+  // In discreet mode the centred note is the navigation aid (there's no
+  // picture); when a picture is up, keep it clear — the transport line below
+  // carries "now: #id category", so nothing overlays the picture.
+  document.getElementById('D-mnote').innerHTML = !hide||!s ? '' :
+    `<div class="glyph">${CAT[s.category]?.g||'●'}</div>
+     <div class="lab">${inside?(word(s)?`“${esc(word(s))}”`:esc(s.category.replace(/_/g,' '))):'between findings — plays normally'}</div>
+     <div class="sub">${inside?friendly(s).replace(/<[^>]+>/g,''):'nearest: '+esc(s.category.replace(/_/g,' '))+' @ '+fmtShort(s.startMs)}</div>`;
+  mon.classList.toggle('scrubbing',D.scrubbing);
+  mon.classList.toggle('loadingclip',D.loadingClip);
+  document.getElementById('D-tt').innerHTML=`<b>${fmtHMS(D.playMs)}</b> / ${fmtShort(RUNTIME_MS)}`;
+  document.getElementById('D-now').textContent = inside
+    ? `now: #${s.id} ${s.category.replace(/_/g,' ')}` : 'now: clear';
+  document.getElementById('D-pp').textContent=D.playing?'❚❚':'▶';
+}
 
-  // Waveform: one bar per peak (audio findings only; visual show the filmstrip).
-  if (canvas && mode.peaks) {{
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, W, H);
-    ctx.fillStyle = '#3a4650';
-    const n = mode.peaks.length, bw = W / n;
-    for (let i = 0; i < n; i++) {{
-      const h = mode.peaks[i] * (H - 8);
-      ctx.fillRect(i * bw, (H - h) / 2, Math.max(1, bw - 0.5), h);
-    }}
-  }}
+// ---------- editor ----------
+const HEAVY_MS=180000;  // beyond this window, skip the ffmpeg strip/peaks fetch
+function D_editor(){
+  const s=D_get(D.sel);
+  if(!s){document.getElementById('D-edcard').innerHTML='<div style="color:var(--dim2);font-size:12.5px">Select a finding, or add one with <b>A</b>.</div>';return;}
+  const vs=D.viewStart, ve=D.viewEnd, span=Math.max(1,ve-vs), W=D_edW();
+  const ex=ms=>(ms-vs)/span*W;
+  const regions=SEGS.filter(r=>r.endMs>vs&&r.startMs<ve&&D_visible(r));
+  const acts=['skip','mute','voice','blur'].map(a=>`<option value="${a}" ${s.recommendedAction===a?'selected':''}>${actLabels[a]}</option>`).join('');
+  const cats=CATEGORIES.map(c=>`<option value="${c}" ${s.category===c?'selected':''}>${c.replace(/_/g,' ')}</option>`).join('');
+  const st=D_state(s);
+  const heavy=span>HEAVY_MS;
+  // filmstrip: a single tiled JPEG for the viewport window (any scene), stacked over the waveform.
+  const strip = heavy
+    ? '<div style="position:absolute;inset:0;display:grid;place-items:center;color:var(--dim2);font-size:11px">zoom in to load frames</div>'
+    : `<img class="edfilmimg" src="/api/filmstrip?path=${encodeURIComponent(MEDIA)}&startMs=${Math.round(vs)}&endMs=${Math.round(ve)}&pad=0" alt="">`;
+  // shot marks: the boundaries of the analysed (visual) findings inside the view.
+  let shots='';
+  SEGS.filter(r=>isVisual(r)&&r.startMs>vs&&r.startMs<ve).forEach(r=>{
+    shots+=`<div class="shotmark" style="left:${ex(r.startMs)}px"></div>`;});
 
-  // A typed time can fall outside the drawn window, so clamp only the handle's
-  // pixel position — the value stays whatever was entered and is what gets saved.
-  const cx = t => Math.max(0, Math.min(W, xOf(t)));
-  function upd() {{
-    hStart.style.left = cx(st) + 'px';
-    hEnd.style.left = cx(en) + 'px';
-    region.style.left = cx(st) + 'px';
-    region.style.width = Math.max(0, cx(en) - cx(st)) + 'px';
-    // Don't overwrite the field being typed in.
-    if (document.activeElement !== rStart) rStart.value = fmtHMS(st);
-    if (document.activeElement !== rEnd) rEnd.value = fmtHMS(en);
-    rDur.textContent = (en - st) + 'ms';
-  }}
+  document.getElementById('D-edcard').innerHTML=`
+    <div class="edhead">${cchip(s)}<span class="mono" style="color:var(--dim2);font-size:12px">#${s.id} · detected by ${esc(engineName[s.engine]||s.engine)}</span>
+      <span class="zoomhint">scroll = zoom · drag the box on the map to pan · showing ${fmtShort(vs)}–${fmtShort(ve)}</span></div>
+    <div class="edscroll" id="D-edscroll">
+      <div class="edtrack" style="width:${W}px" id="D-edtrack">
+        <div class="edfilm" style="width:${W}px">${strip}${shots}</div>
+        <canvas class="edwave" width="${W}" height="46" style="width:${W}px"></canvas>
+        <div class="edlane" style="width:${W}px" id="D-edlane"><div class="keeplane">plays normally where no region covers</div></div>
+        <div class="edsel" id="D-edsel"></div>
+        <div class="edph" id="D-edph"></div>
+      </div>
+    </div>
+    <div class="edbarrow">
+      <button class="edstep" id="D-edleft" title="Scrub a little left (hold to repeat)">◀</button>
+      <div class="edbar" id="D-edbar" title="Drag to pan the film · click to jump"><div class="edthumb" id="D-edthumb"></div></div>
+      <button class="edstep" id="D-edright" title="Scrub a little right (hold to repeat)">▶</button>
+    </div>
+    <div class="edtools">
+      <button class="add" id="D-add">＋ Cut at playhead<kbd>A</kbd></button>
+      <button class="split" id="D-split">⁄ Split<kbd>S</kbd></button>
+      <button id="D-delregion">✕ Delete region<kbd>Del</kbd></button>
+      <span class="note" id="D-ednote"></span>
+    </div>
+    <div class="edform" id="D-edform">
+      <label>Start</label><div class="val">
+        <input class="time" id="D-start" value="${fmtHMS(s.startMs)}">
+        <button class="nudge" data-edit="start" data-d="-1000">◀1s</button>
+        <button class="nudge" data-edit="start" data-d="-25">◀25ms</button>
+        <button class="nudge" data-edit="start" data-d="25">25ms▶</button>
+        <button class="nudge" data-edit="start" data-d="1000">1s▶</button></div>
+      <label>End</label><div class="val">
+        <input class="time" id="D-end" value="${fmtHMS(s.endMs)}">
+        <button class="nudge" data-edit="end" data-d="-1000">◀1s</button>
+        <button class="nudge" data-edit="end" data-d="-25">◀25ms</button>
+        <button class="nudge" data-edit="end" data-d="25">25ms▶</button>
+        <button class="nudge" data-edit="end" data-d="1000">1s▶</button>
+        <span class="dur" id="D-dur">${((s.endMs-s.startMs)/1000).toFixed(2)}s</span></div>
+      <label>Category</label><div class="val"><select id="D-cat">${cats}</select>
+        <label style="margin-left:6px">Action</label><select id="D-act">${acts}</select>
+        ${s.recommendedAction!=='skip'?'<span class="ro">render-only</span>':''}</div>
+      <label>Description</label><div class="val"><textarea id="D-desc">${esc(s.reasoning||'')}</textarea></div>
+    </div>
+    <div class="eddecide">
+      <button class="big cut ${st==='cut'?'on':''}" id="D-cut">✂ Cut it out <kbd>C</kbd></button>
+      <button class="big leave ${st==='leave'?'on':''}" id="D-leave">👁 Leave it in <kbd>L</kbd></button>
+      <button class="trash" id="D-trash">🗑 Delete finding</button>
+    </div>
+    <div class="edresult" id="D-edresult"></div>`;
 
-  // Type any time into the fields (H:MM:SS.mmm). Unlike drag/nudge, this is not
-  // clamped to the window — so a duplicated or added finding can be moved
-  // anywhere. Preview and Save use these values.
-  rStart.addEventListener('change', () => {{
-    const v = parseTime(rStart.value); if (v !== null) st = v; upd();
-  }});
-  rEnd.addEventListener('change', () => {{
-    const v = parseTime(rEnd.value); if (v !== null) en = v; upd();
-  }});
-  upd();
-  // Centre the finding in the scroll view.
-  wrap.scrollLeft = xOf((st + en) / 2) - wrap.clientWidth / 2;
+  // waveform — real peaks for the viewport, cached by window so only a real
+  // pan/zoom refetches (decisions and edits redraw from the cache).
+  D_drawWave(W);
 
-  function drag(handle, isStart) {{
-    handle.querySelector('.grip').addEventListener('mousedown', e => {{
-      e.preventDefault();
-      const move = ev => {{
-        const x = ev.clientX - wbox.getBoundingClientRect().left;
-        const t = Math.max(winStart, Math.min(winEnd, tOf(x)));
-        if (isStart) st = Math.min(t, en - SNAP); else en = Math.max(t, st + SNAP);
-        upd();
-      }};
-      const up = () => {{ document.removeEventListener('mousemove', move);
-                          document.removeEventListener('mouseup', up); }};
-      document.addEventListener('mousemove', move);
-      document.addEventListener('mouseup', up);
-    }});
-  }}
-  drag(hStart, true); drag(hEnd, false);
+  // regions (clipped to the viewport edges so a finding wider than the view still shows)
+  const lane=document.getElementById('D-edlane');
+  regions.forEach(r=>{const a=C_ACT[r.recommendedAction]||C_ACT.skip;
+    const L=Math.max(0,ex(r.startMs)), R=Math.min(W,ex(r.endMs));
+    const el=document.createElement('div');el.className='region'+(r.id===D.sel?' sel':'')+(r.approved===false?' leave':'');
+    el.style.cssText=`left:${L}px;width:${Math.max(4,R-L)}px;background:${a.bg};border-color:${a.c}`;
+    el.innerHTML=`<div class="redge l"></div><div class="redge r"></div><div class="rlabel">${a.lbl}</div>`
+      +`<div class="rlen mono">${((r.endMs-r.startMs)/1000).toFixed(1)}s</div>`
+      +(r.recommendedAction!=='skip'?'<div class="rotag">render-only</div>':'');
+    el.addEventListener('mousedown',e=>{
+      if(e.target.classList.contains('redge'))D_dragEdge(e,r,e.target.classList.contains('l'),el);
+      else D_dragBody(e,r,el);});
+    lane.appendChild(el);});
+  const edph=document.getElementById('D-edph');
+  if(D.playMs>=vs&&D.playMs<=ve){edph.style.display='block';edph.style.left=ex(D.playMs)+'px';}else edph.style.display='none';
 
-  // Audition a spot: drag across the waveform/filmstrip background to select a
-  // region and play just that on release, so you can hear/see what is there
-  // before moving the handles. The segment's own start/end bars stay put — this
-  // selection is a separate scratch overlay, not the saved bounds.
-  const selEl = box.querySelector('.selregion');
-  const selRead = box.querySelector('#tsel-' + s.id);
-  let selA = null, selB = null;
-  function drawSel() {{
-    if (selA === null || selB === null) {{
-      selEl.style.display = 'none';
-      if (selRead) selRead.textContent = '';
-      return;
-    }}
-    const a = Math.min(selA, selB), b = Math.max(selA, selB);
-    // Explicit 'block': the class sets display:none, so '' would revert to that.
-    selEl.style.display = 'block';
-    selEl.style.left = cx(a) + 'px';
-    selEl.style.width = Math.max(0, cx(b) - cx(a)) + 'px';
-    // Live time of the selection, so a reviewer can read the exact spot they
-    // watched and set the finding's bounds to it.
-    if (selRead) {{
-      selRead.textContent = 'selection ' + fmtHMS(a) + ' – ' + fmtHMS(b)
-        + ' (' + ((b - a) / 1000).toFixed(2) + 's)';
-    }}
-  }}
-  wbox.addEventListener('mousedown', e => {{
-    if (e.target.closest('.handle')) return;  // let handle drags win
-    e.preventDefault();
-    const originX = wbox.getBoundingClientRect().left;
-    selA = Math.max(winStart, Math.min(winEnd, tOf(e.clientX - originX)));
-    selB = selA;
-    drawSel();
-    const move = ev => {{
-      selB = Math.max(winStart, Math.min(winEnd, tOf(ev.clientX - originX)));
-      drawSel();
-    }};
-    const up = () => {{
-      document.removeEventListener('mousemove', move);
-      document.removeEventListener('mouseup', up);
-      const a = Math.min(selA, selB), b = Math.max(selA, selB);
-      if (b - a >= 100) {{  // a real drag (>=100ms), not a stray click
-        playClip(cell.querySelector('.shot'), {{startMs: a, endMs: b}}, false, false, 0.15);
-        // Offer the selection as the finding's bounds — one click sets both.
-        if (selRead) {{
-          selRead.innerHTML = 'selection <b>' + fmtHMS(a) + '</b> – <b>' + fmtHMS(b)
-            + '</b> (' + ((b - a) / 1000).toFixed(2) + 's)';
-          const use = document.createElement('button');
-          use.className = 'seluse';
-          use.textContent = 'Use as bounds';
-          use.onclick = () => {{ st = a; en = b; upd(); selA = selB = null; drawSel(); }};
-          selRead.appendChild(use);
-        }}
-      }} else {{
-        selA = selB = null; drawSel();  // a click clears any selection
-      }}
-    }};
-    document.addEventListener('mousemove', move);
-    document.addEventListener('mouseup', up);
-  }});
+  // horizontal scrollbar: thumb = viewport over the whole film; drag to pan,
+  // click the track to jump. Lets you move without reaching for the minimap.
+  const edbar=document.getElementById('D-edbar'), edthumb=document.getElementById('D-edthumb');
+  const placeThumb=()=>{const L=Math.max(0,Math.min(1,D.viewStart/RUNTIME_MS));
+    const wf=Math.max(0.02,Math.min(1,(D.viewEnd-D.viewStart)/RUNTIME_MS));
+    edthumb.style.left=(L*100)+'%'; edthumb.style.width=(wf*100)+'%';};
+  placeThumb();
+  edthumb.addEventListener('mousedown',e=>{e.preventDefault();e.stopPropagation();
+    const rect=edbar.getBoundingClientRect(), sp=D.viewEnd-D.viewStart, sx=e.clientX, vs0=D.viewStart;
+    const move=ev=>{D.viewStart=vs0+(ev.clientX-sx)/rect.width*RUNTIME_MS;D.viewEnd=D.viewStart+sp;D_clampView();D_filmtl();D_editor();};
+    const up=()=>{document.removeEventListener('mousemove',move);document.removeEventListener('mouseup',up);D_render();};
+    document.addEventListener('mousemove',move);document.addEventListener('mouseup',up);});
+  edbar.addEventListener('mousedown',e=>{if(e.target===edthumb)return;
+    const rect=edbar.getBoundingClientRect(), sp=D.viewEnd-D.viewStart;
+    const c=(e.clientX-rect.left)/rect.width*RUNTIME_MS;   // center the viewport where you clicked
+    D.viewStart=c-sp/2;D.viewEnd=D.viewStart+sp;D_clampView();D_filmtl();D_editor();});
+  // ◀/▶ step buttons: nudge the playhead a little bit; hold to repeat (fine scrub)
+  const holdStep=(id,dir)=>{const b=document.getElementById(id);if(!b)return;
+    b.addEventListener('mousedown',e=>{e.preventDefault();if(D.playing)D_stop();
+      D.scrubbing=true; D_saCtx(); D_scrubStep(dir);
+      const iv=setInterval(()=>D_scrubStep(dir),120);
+      const stop=()=>{clearInterval(iv);D.scrubbing=false;D_saStop();
+        document.removeEventListener('mouseup',stop);document.removeEventListener('mouseleave',stop);
+        const n=D_nearest(D.playMs);if(n)D.sel=n.id;D_render();};
+      document.addEventListener('mouseup',stop);document.addEventListener('mouseleave',stop);});};
+  holdStep('D-edleft',-1); holdStep('D-edright',1);
 
-  box.querySelectorAll('.tctrls [data-h]').forEach(b => b.onclick = () => {{
-    const d2 = parseInt(b.dataset.d, 10);
-    if (b.dataset.h === 'start') st = clamp(Math.min(st + d2, en - SNAP));
-    else en = clamp(Math.max(en + d2, st + SNAP));
-    upd();
-  }});
+  // wheel = zoom the viewport around the cursor (the minimap box shrinks/grows to match)
+  const track=document.getElementById('D-edtrack');
+  document.getElementById('D-edscroll').addEventListener('wheel',e=>{e.preventDefault();
+    const cursorT=vs+(e.clientX-track.getBoundingClientRect().left)/W*span;
+    const factor=e.deltaY<0?0.82:1.22;
+    const newSpan=Math.max(3000,Math.min(RUNTIME_MS,span*factor));
+    const frac=(cursorT-vs)/span;
+    D.viewStart=cursorT-frac*newSpan;D.viewEnd=D.viewStart+newSpan;D_clampView();
+    D_editor();D_filmtl();},{passive:false});
 
-  box.querySelector('.tprev').onclick = () =>
-    playClip(cell.querySelector('.shot'), {{startMs: st, endMs: en}}, canMute, canVoice);
+  // scrub (plain drag on film/wave/lane bg); shift+drag = audition
+  const cv=document.querySelector('#D-edcard canvas');
+  const tOf=cx=>Math.max(vs,Math.min(ve,Math.round((vs+(cx-track.getBoundingClientRect().left)/W*span)/25)*25));
+  [document.querySelector('#D-edcard .edfilm'),cv,lane].forEach(bg=>{ if(!bg)return;
+    bg.addEventListener('mousedown',e=>{
+      if(e.target.closest('.region'))return; e.preventDefault();
+      if(e.shiftKey){D_audition(e);return;}
+      if(D.playing)D_stop();   // seeking wins over playback — else ontimeupdate fights the scrub
+      D.scrubbing=true; D_saCtx();   // prime the audio context on this gesture
+      const move=ev=>{D.playMs=tOf(ev.clientX);edph.style.display='block';edph.style.left=ex(D.playMs)+'px';D_scrubAudio(D.playMs);D_monitor();D_filmtl();D_highlightNearest();};
+      move(e);
+      const up=()=>{D.scrubbing=false;D_saStop();document.removeEventListener('mousemove',move);document.removeEventListener('mouseup',up);
+        const n=D_nearest(D.playMs);if(n)D.sel=n.id;D_render();};
+      document.addEventListener('mousemove',move);document.addEventListener('mouseup',up);
+    });
+  });
 
-  // Re-anchor the strip around the current bounds — for when a finding has been
-  // typed/nudged to a spot the drawn window doesn't cover.
-  box.querySelector('.trecenter').onclick = () => openTimingAt(cell, s, box, st, en);
+  document.getElementById('D-add').onclick=()=>D_add();
+  document.getElementById('D-split').onclick=D_split;
+  document.getElementById('D-delregion').onclick=D_delRegion;
+  document.getElementById('D-cut').onclick=()=>D_decide(s,true);
+  document.getElementById('D-leave').onclick=()=>D_decide(s,false);
+  document.getElementById('D-trash').onclick=()=>{if(confirm('Delete finding #'+s.id+'?'))D_deleteFinding(s);};
+  document.getElementById('D-cat').onchange=e=>{s.category=e.target.value;patchSeg(s.id,{category:s.category});D_render();};
+  document.getElementById('D-act').onchange=e=>{s.recommendedAction=e.target.value;patchSeg(s.id,{recommendedAction:s.recommendedAction});D_render();};
+  document.getElementById('D-desc').onchange=e=>{s.reasoning=e.target.value;patchSeg(s.id,{reasoning:s.reasoning});D_render();};
+  document.getElementById('D-start').onchange=e=>{const v=parseTime(e.target.value);if(v!=null){s.startMs=v;D_fixOrder(s);D_saveTiming(s);D_render();}};
+  document.getElementById('D-end').onchange=e=>{const v=parseTime(e.target.value);if(v!=null){s.endMs=v;D_fixOrder(s);D_saveTiming(s);D_render();}};
+  document.querySelectorAll('#D-edcard .nudge').forEach(b=>b.onclick=()=>{
+    const d=+b.dataset.d;if(b.dataset.edit==='start')s.startMs=Math.max(0,s.startMs+d);else s.endMs=Math.max(0,s.endMs+d);
+    D_fixOrder(s);D_saveTiming(s);D_render();});
+  D_edresult(s,D.viewStart,D.viewEnd);
+}
+function D_fixOrder(s){if(s.endMs<s.startMs){const t=s.startMs;s.startMs=s.endMs;s.endMs=t;}}
+function D_saveTiming(s){patchSeg(s.id,{startMs:s.startMs,endMs:s.endMs});}
 
-  box.querySelector('.tcancel').onclick = () => toggleTiming(cell, s, box);
+function D_drawWave(W){
+  const cv=document.querySelector('#D-edcard canvas');if(!cv)return;
+  const vs=D.viewStart, ve=D.viewEnd, span=Math.max(1,ve-vs);
+  const draw=peaks=>{
+    const ctx=cv.getContext('2d');ctx.clearRect(0,0,W,46);ctx.fillStyle='#3a4650';
+    if(!peaks||!peaks.length)return;
+    const n=peaks.length, bw=W/n;
+    for(let i=0;i<n;i++){const h=Math.max(2,peaks[i]*42);ctx.fillRect(i*bw,(46-h)/2,Math.max(1,bw-0.4),h);}
+  };
+  const key=Math.round(vs)+'-'+Math.round(ve);
+  if(key===D.peaksKey){draw(D.peaks);return;}
+  draw(null);
+  if(span>HEAVY_MS)return;
+  const tok=key;D.peaksKey=key;
+  fetch(`/api/peaks?path=${encodeURIComponent(MEDIA)}&startMs=${Math.round(vs)}&endMs=${Math.round(ve)}&pad=0`)
+    .then(r=>r.json()).then(d=>{
+      if(D.peaksKey!==tok)return;   // a newer window won the race
+      D.peaks=d.peaks||[];
+      const cv2=document.querySelector('#D-edcard canvas');
+      if(cv2){const w2=cv2.width;const ctx=cv2.getContext('2d');ctx.clearRect(0,0,w2,46);ctx.fillStyle='#3a4650';
+        const n=D.peaks.length,bw=w2/(n||1);
+        for(let i=0;i<n;i++){const h=Math.max(2,D.peaks[i]*42);ctx.fillRect(i*bw,(46-h)/2,Math.max(1,bw-0.4),h);}}
+    }).catch(()=>{D.peaksKey=null;});
+}
 
-  box.querySelector('.tsave').onclick = () => {{
-    fetch(`/api/segments/${{s.id}}?path=${{encodeURIComponent(MEDIA)}}`, {{
-      method: 'PATCH', headers: {{'Content-Type':'application/json'}},
-      body: JSON.stringify({{startMs: st, endMs: en}})
-    }}).then(() => {{
-      // Did the finding move out of the window we were showing? Only then is a
-      // reset worth the reload — a small in-window nudge shouldn't flash.
-      const moved = st < winStart || en > winEnd || en < winStart || st > winEnd;
-      s.startMs = st; s.endMs = en;
-      // Rebuild the card (updates the displayed times/badges); if it moved, reopen
-      // the editor anchored on the NEW bounds so the strip and preview reset to
-      // 15s either side of where the finding now is, not where it was.
-      const fresh = card(s);
-      cell.replaceWith(fresh); apply(); tally();
-      if (moved) fresh.querySelector('.edit-timing').click();
-    }});
-  }};
-}}
+function D_edresult(s,winStart,winEnd){
+  const el=document.getElementById('D-edresult');if(!el)return;
+  const inWin=SEGS.filter(r=>r.endMs>winStart&&r.startMs<winEnd&&(r.approved===true));
+  const cov=C_merge(inWin.map(r=>[r.startMs,r.endMs]));
+  const cut=cov.reduce((a,[x,y])=>a+(y-x),0);
+  el.innerHTML=`In this ${((winEnd-winStart)/1000)|0}s window: <b style="color:var(--ink)">${inWin.length}</b> region(s) set to cut, `
+    +`removing <span class="warn">${(cut/1000).toFixed(1)}s</span>. Gaps between them play normally — split a region and delete the middle to keep a beat.`;
+}
 
-function visible(s) {{
-  if (typeFilter !== 'all' && typeOf(s) !== typeFilter) return false;
-  if (filter === 'undecided') return s.approved === null || s.approved === undefined;
-  if (filter === 'approved') return s.approved === true;
-  if (filter === 'rejected') return s.approved === false;
-  return true;
-}}
-function apply() {{
-  [...grid.children].forEach((el, i) =>
-    el.classList.toggle('hidden', !visible(segs[i])));
-}}
-function tally() {{
-  const a = segs.filter(s => s.approved === true).length;
-  const r = segs.filter(s => s.approved === false).length;
-  document.getElementById('summary').textContent =
-    `${{segs.length}} finding(s) — ${{a}} approved, ${{r}} rejected, ${{segs.length-a-r}} undecided`;
-  const shown = segs.filter(visible).length;
-  document.getElementById('shownCount').textContent = shown;
-  document.querySelectorAll('#bulk button').forEach(b => b.disabled = shown === 0);
-}}
+// ---------- carve ops (real create / patch / delete against the sidecar) ----------
+function D_ednote(m){const n=document.getElementById('D-ednote');if(!n)return;n.textContent=m;setTimeout(()=>{if(n)n.textContent='';},1700);}
+function D_add(){
+  const st=D.playMs,en=Math.min(st+1500,D.viewEnd);
+  if(en-st<200){D_ednote('playhead at edge');return;}
+  const src=D_get(D.sel);
+  createSeg({startMs:Math.round(st),endMs:Math.round(en),category:src?src.category:'manual',
+    recommendedAction:'skip',approved:true,reasoning:'added by hand'})
+    .then(seg=>refetch().then(()=>{D.sel=seg.id;D_render();}))
+    .catch(()=>D_ednote('could not add'));
+}
+function D_split(){
+  const r=SEGS.find(x=>D.playMs>x.startMs+100&&D.playMs<x.endMs-100);
+  if(!r){D_ednote('put the playhead inside a region to split');return;}
+  const cut=Math.round(D.playMs), origEnd=r.endMs;
+  // Second half becomes a new finding carrying the original's category/action/decision;
+  // the original is shortened to the playhead. Two findings, gap-free — delete the
+  // middle piece later to keep a beat.
+  createSeg({startMs:cut,endMs:origEnd,category:r.category,recommendedAction:r.recommendedAction,
+    approved:r.approved,reasoning:r.reasoning||''})
+    .then(()=>patchSeg(r.id,{endMs:cut}))
+    .then(()=>refetch().then(()=>{const keep=D_get(r.id);if(keep)D.sel=keep.id;D_render();}))
+    .catch(()=>D_ednote('could not split'));
+}
+function D_delRegion(){
+  const r=D_get(D.sel);if(!r){D_ednote('select a region');return;}
+  D_deleteFinding(r);
+}
+function D_deleteFinding(r){
+  deleteSeg(r.id).then(()=>refetch().then(()=>{const n=D_nearest(D.playMs);D.sel=n?n.id:null;D_render();}))
+    .catch(()=>D_ednote('could not delete'));
+}
 
-const grid = document.getElementById('grid');
-function renderGrid() {{
-  grid.innerHTML = '';
-  segs.forEach(s => grid.appendChild(card(s)));
-  apply(); tally();
-}}
+// Retiming a region is a scrub: move the playhead to the edge you're dragging and
+// sound + show it (grains + frame), so you can place the bound by ear and eye —
+// scrubbing with the segment landing right where you want.
+function D_dragScrub(ms){
+  D.playMs=Math.max(0,Math.min(RUNTIME_MS,ms));
+  const edph=document.getElementById('D-edph');
+  if(edph){edph.style.display='block';edph.style.left=D_ex(D.playMs)+'px';}
+  D_scrubAudio(D.playMs); D_monitor(); D_filmtl();
+}
+// Nudge the playhead a little bit (the ◀/▶ on the scrollbar) — a fine scrub with
+// audio + frame, panning the view to keep the playhead in sight.
+const SCRUB_STEP=250;
+function D_scrubStep(dir){
+  D.playMs=Math.max(0,Math.min(RUNTIME_MS,D.playMs+dir*SCRUB_STEP));
+  const span=D.viewEnd-D.viewStart, m=span*0.08;
+  let panned=false;
+  if(D.playMs<D.viewStart+m){D.viewStart=D.playMs-m;D.viewEnd=D.viewStart+span;D_clampView();panned=true;}
+  else if(D.playMs>D.viewEnd-m){D.viewEnd=D.playMs+m;D.viewStart=D.viewEnd-span;D_clampView();panned=true;}
+  if(panned)D_editor();       // redraw the strip for the new window
+  D_dragScrub(D.playMs);      // playhead + grain + frame (no editor rebuild if not panned)
+}
+function D_dragBody(e,r,el){e.preventDefault();if(D.playing)D_stop();D.sel=r.id;
+  D.scrubbing=true; D_saCtx();
+  const W=D_edW(),span=D.viewEnd-D.viewStart;const sx=e.clientX,s0=r.startMs,dur=r.endMs-r.startMs;
+  const move=ev=>{let ns=Math.round((s0+(ev.clientX-sx)/W*span)/25)*25;ns=Math.max(0,ns);r.startMs=ns;r.endMs=ns+dur;
+    el.style.left=D_ex(r.startMs)+'px';D_dragScrub(r.startMs);};   // follow the leading edge
+  const up=()=>{D.scrubbing=false;D_saStop();document.removeEventListener('mousemove',move);document.removeEventListener('mouseup',up);
+    D_saveTiming(r);SEGS.sort((a,b)=>a.startMs-b.startMs);D_render();};
+  document.addEventListener('mousemove',move);document.addEventListener('mouseup',up);}
+function D_dragEdge(e,r,isLeft,el){e.preventDefault();if(D.playing)D_stop();D.sel=r.id;
+  D.scrubbing=true; D_saCtx();
+  const W=D_edW(),span=D.viewEnd-D.viewStart,track=document.getElementById('D-edtrack');
+  // Capture the track's left ONCE. Calling D_render() mid-drag (as this used to)
+  // rebuilds the editor and detaches this track element, so a fresh
+  // getBoundingClientRect() on the stale node returns 0 and the edge leaps to the
+  // right on the next move. Instead: resize the element in place, D_render on up.
+  const rectLeft=track.getBoundingClientRect().left;
+  const move=ev=>{const x=ev.clientX-rectLeft;let t=Math.round((D.viewStart+x/W*span)/25)*25;
+    if(isLeft)r.startMs=Math.min(Math.max(0,t),r.endMs-200);else r.endMs=Math.max(t,r.startMs+200);
+    if(el){el.style.left=D_ex(r.startMs)+'px';el.style.width=Math.max(4,D_ex(r.endMs)-D_ex(r.startMs))+'px';
+      const rl=el.querySelector('.rlen');if(rl)rl.textContent=((r.endMs-r.startMs)/1000).toFixed(1)+'s';}
+    D_dragScrub(isLeft?r.startMs:r.endMs);};   // follow the edge under the cursor
+  const up=()=>{D.scrubbing=false;D_saStop();document.removeEventListener('mousemove',move);document.removeEventListener('mouseup',up);D_saveTiming(r);D_render();};
+  document.addEventListener('mousemove',move);document.addEventListener('mouseup',up);}
 
-// One chip per type present, most-common first, each carrying its own count.
-function buildTypeFilters() {{
-  const counts = {{}};
-  segs.forEach(s => {{ const t = typeOf(s); counts[t] = (counts[t] || 0) + 1; }});
-  const row = document.getElementById('typeFilters');
-  const order = Object.keys(counts).sort((a, b) => counts[b] - counts[a] || a.localeCompare(b));
-  const chip = (key, label, n) => {{
-    const b = document.createElement('button');
-    b.dataset.t = key;
-    b.classList.toggle('on', key === typeFilter);
-    b.innerHTML = `${{label}} <span class=count>${{n}}</span>`;
-    b.onclick = () => {{
-      typeFilter = key;
-      row.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
-      apply(); tally();
-    }};
-    return b;
-  }};
-  row.appendChild(chip('all', 'All types', segs.length));
-  order.forEach(t => row.appendChild(chip(t, t.replace(/</g, '&lt;'), counts[t])));
-}}
+function D_audition(e){const sel=document.getElementById('D-edsel'),track=document.getElementById('D-edtrack');
+  const W=D_edW(),span=D.viewEnd-D.viewStart,ox=track.getBoundingClientRect().left;
+  const tOf=cx=>D.viewStart+(cx-ox)/W*span;
+  let a=tOf(e.clientX),b=a;
+  const draw=()=>{const lo=Math.min(a,b),hi=Math.max(a,b);sel.style.display='block';
+    sel.style.left=D_ex(lo)+'px';sel.style.width=Math.max(0,D_ex(hi)-D_ex(lo))+'px';};
+  draw();
+  const move=ev=>{b=tOf(ev.clientX);draw();};
+  const up=()=>{document.removeEventListener('mousemove',move);document.removeEventListener('mouseup',up);
+    const lo=Math.min(a,b),hi=Math.max(a,b);
+    if(hi-lo<120){sel.style.display='none';return;}   // a stray click, not a drag
+    D_ednote('▶ auditioning '+fmtShort(lo)+'–'+fmtShort(hi));
+    D_auditionPlay(lo,hi,()=>{sel.style.display='none';});};
+  document.addEventListener('mousemove',move);document.addEventListener('mouseup',up);}
 
-document.querySelectorAll('.filters button[data-f]').forEach(b => b.onclick = () => {{
-  filter = b.dataset.f;
-  document.querySelectorAll('.filters button[data-f]').forEach(x => x.classList.toggle('on', x===b));
-  apply(); tally();
-}});
+// Play just the selected span through the shared clip element (real audio),
+// so a reviewer can hear what's there before moving a handle.
+function D_auditionPlay(lo,hi,done){
+  const v=document.getElementById('D-clip');
+  const clipStart=Math.max(0,lo/1000-0.25);
+  v.onloadedmetadata=v.ontimeupdate=v.onplay=v.onpause=v.onended=v.onerror=null;
+  v.src=`/api/clip?path=${encodeURIComponent(MEDIA)}&startMs=${Math.round(lo)}&endMs=${Math.round(hi)}&pad=0.25`;
+  v.muted=D.audioMode==='muted';
+  v.onloadedmetadata=()=>{v.currentTime=Math.max(0,lo/1000-clipStart);v.play().catch(()=>{});};
+  v.ontimeupdate=()=>{D.playMs=(clipStart+v.currentTime)*1000;D.scrubbing=true;D_monitor();D_filmtl();D_highlightNearest();};
+  const end=()=>{D.scrubbing=false;D_monitor();if(done)done();};
+  v.onended=end;v.onerror=()=>{D_ednote&&D_ednote('could not load clip');end();};
+  v.load();}
 
-// Bulk decision on exactly the findings currently shown — so a reviewer who
-// filtered to one word can settle the whole group at once. One request, one
-// sidecar write; the server echoes the timeline back and the grid re-renders.
-function bulkSet(v) {{
-  const ids = segs.filter(visible).map(s => s.id);
-  if (!ids.length) return;
-  fetch(`/api/segments?path=${{encodeURIComponent(MEDIA)}}`, {{
-    method: 'PATCH', headers: {{'Content-Type':'application/json'}},
-    body: JSON.stringify({{ids, approved: v}})
-  }}).then(r => r.json()).then(tl => {{
-    const byId = {{}}; tl.segments.forEach(x => byId[x.id] = x);
-    segs.forEach(s => {{ if (byId[s.id]) s.approved = byId[s.id].approved; }});
-    renderGrid();
-  }});
-}}
-document.querySelector('#bulk .set-yes').onclick   = () => bulkSet(true);
-document.querySelector('#bulk .set-no').onclick    = () => bulkSet(false);
-document.querySelector('#bulk .set-clear').onclick = () => bulkSet(null);
+// ---------- decisions ----------
+function D_setApproved(s,v){s.approved=v;patchSeg(s.id,{approved:v});D_render();}
+function D_decide(s,cut){D_setApproved(s,(D_state(s)===(cut?'cut':'leave'))?null:cut);}
 
-// Merge the ticked findings into one segment spanning the earliest start to
-// the latest end. The originals are replaced by a single approved skip (or the
-// chosen action), so a scene flagged shot by shot becomes one clean skip. The
-// timeline changes shape (ids, counts), so reload rather than patch in place.
-function updateMergeBtn() {{
-  const n = selected.size;
-  const b = document.getElementById('mergeBtn');
-  b.textContent = 'Merge selected (' + n + ')';
-  b.disabled = n < 2;
-}}
-function doMerge() {{
-  const ids = [...selected];
-  if (ids.length < 2) return;
-  const action = document.getElementById('mergeAction').value;
-  const b = document.getElementById('mergeBtn');
-  b.disabled = true; b.textContent = 'Merging&hellip;';
-  fetch(`/api/segments/merge?path=${{encodeURIComponent(MEDIA)}}`, {{
-    method: 'POST', headers: {{'Content-Type':'application/json'}},
-    body: JSON.stringify({{ids, recommendedAction: action, approved: true}})
-  }}).then(r => {{ if (!r.ok) throw new Error('merge failed'); return r.json(); }})
-    .then(() => location.reload())
-    .catch(() => {{ updateMergeBtn(); }});
-}}
-document.getElementById('mergeBtn').onclick = doMerge;
+// ---------- merge ----------
+function D_mergebar(){
+  const bar=document.getElementById('D-mergebar');
+  document.getElementById('D-mergemode').classList.toggle('on',D.merge);
+  bar.classList.toggle('hidden',!D.merge);
+  if(!D.merge)return;
+  const picked=[...D.picks].map(D_get).filter(Boolean);
+  const cats=new Set(picked.map(p=>p.category));
+  document.getElementById('D-mergecount').textContent=picked.length;
+  const ok=picked.length>=2&&cats.size===1;
+  document.getElementById('D-mergehint').textContent=
+    picked.length<2?'tick 2+ findings of the same type':cats.size>1?'pick findings of ONE type to merge':'ready — '+[...cats][0].replace(/_/g,' ');
+  document.getElementById('D-mergego').disabled=!ok;
+}
+function D_doMerge(){
+  const picked=[...D.picks].map(D_get).filter(Boolean);
+  const cats=new Set(picked.map(p=>p.category));
+  if(picked.length<2||cats.size!==1)return;
+  const ids=picked.map(p=>p.id);
+  mergeSeg(ids,'skip').then(()=>refetch().then(()=>{
+    D.picks.clear();D.merge=false;const n=D_nearest(D.playMs);D.sel=n?n.id:null;D_render();}))
+    .catch(()=>D_ednote('could not merge'));
+}
 
-// Add a finding by hand: type a start and end (any time) and it's created as an
-// approved manual segment. Reloading shows it, and its Play clip loads the video
-// from that time. Duplicate (per card) uses the same create path.
-const addForm = document.getElementById('addform');
-document.getElementById('addToggle').onclick = () => {{
-  addForm.style.display = addForm.style.display === 'none' ? '' : 'none';
-}};
-document.getElementById('addCancel').onclick = () => {{ addForm.style.display = 'none'; }};
-document.getElementById('addSave').onclick = () => {{
-  const a = parseTime(document.getElementById('addStart').value);
-  const b = parseTime(document.getElementById('addEnd').value);
-  if (a === null || b === null) {{ alert('Enter start and end times as H:MM:SS.mmm'); return; }}
-  const st = Math.min(a, b), en = Math.max(a, b);
-  const btn = document.getElementById('addSave');
-  btn.disabled = true;
-  fetch(`/api/segments?path=${{encodeURIComponent(MEDIA)}}`, {{
-    method: 'POST', headers: {{'Content-Type':'application/json'}},
-    body: JSON.stringify({{startMs: st, endMs: en, category: 'manual',
-      recommendedAction: document.getElementById('addAction').value,
-      reasoning: document.getElementById('addNote').value}})
-  }}).then(r => {{ if (!r.ok) throw new Error('add failed'); return r.json(); }})
-    .then(() => location.reload())
-    .catch(() => {{ btn.disabled = false; alert('Could not add the segment.'); }});
-}};
+// ---------- playback (Phase 1: per-window clip, with real audio) ----------
+// The clip endpoint returns a seekable transcoded MP4 *with audio* for the
+// selected finding's window (±PAD). Audio mode maps onto the endpoint flags;
+// picture mode decides whether the moving video or the frame image is on screen.
+// (Whole-film continuous playback is Phase 2 — the streaming endpoint.)
+// A tight lead/tail for playback: on a real (MPEG-2) film the clip is transcoded
+// on demand, and the pad is dead weight to encode — 3 s is enough run-up to hear
+// a word's onset without making a 2-hour source's clip take 15 s to build.
+const PLAY_PAD=3;
+// The findings a Cleaned preview applies over the selected finding's window:
+// every finding you've CUT OUT (approved) plus the one you're working on, so you
+// hear the window as the viewer will — all the cuts, not just the highlighted one.
+function D_cleanedPlan(s){
+  const winStart=Math.max(0,Math.round(s.startMs-PLAY_PAD*1000)), winEnd=Math.round(s.endMs+PLAY_PAD*1000);
+  const apply=SEGS.filter(x=>(x.approved===true||x.id===s.id)&&x.endMs>winStart&&x.startMs<winEnd);
+  const span=x=>[Math.max(winStart,Math.round(x.startMs)),Math.min(winEnd,Math.round(x.endMs))];
+  const cuts=apply.filter(x=>x.recommendedAction==='skip').map(span);
+  const mutes=apply.filter(x=>x.recommendedAction==='mute'||x.recommendedAction==='voice').map(span);
+  const blurs=apply.filter(x=>x.recommendedAction==='blur').map(span);
+  return {winStart,winEnd,cuts,mutes,blurs};
+}
+// clip-time → film-time for a cleaned clip: the skips are gone, so time is
+// compressed; walk the kept spans to map where in the film a clip position is.
+function D_buildKeeps(winStart,winEnd,cuts){
+  const dur=winEnd-winStart;
+  const rel=cuts.map(([a,b])=>[Math.max(0,a-winStart),Math.min(dur,b-winStart)]).sort((x,y)=>x[0]-y[0]);
+  const merged=[];rel.forEach(([a,b])=>{if(merged.length&&a<=merged[merged.length-1][1])merged[merged.length-1][1]=Math.max(merged[merged.length-1][1],b);else merged.push([a,b]);});
+  const keeps=[];let prev=0;merged.forEach(([a,b])=>{if(a>prev)keeps.push([prev,a]);prev=Math.max(prev,b);});if(prev<dur)keeps.push([prev,dur]);
+  let acc=0;return keeps.map(([a,b])=>{const k={rel:a,clip:acc,len:b-a};acc+=b-a;return k;});
+}
+function D_clipToFilm(keeps,winStart,clipMs){
+  if(!keeps||!keeps.length)return winStart+clipMs;
+  for(const k of keeps){if(clipMs<=k.clip+k.len+1)return winStart+k.rel+Math.max(0,clipMs-k.clip);}
+  const last=keeps[keeps.length-1];return winStart+last.rel+last.len;
+}
+function D_clipSrc(s){
+  if(D.audioMode==='cleaned'){
+    // Cleaned → a windowed render (skips cut out, mutes silenced) via the
+    // preview endpoint, so the skipped footage is never transcoded.
+    const p=D_cleanedPlan(s);
+    const enc=spans=>spans.map(([a,b])=>a+'-'+b).join(',');
+    return `/api/preview_clip?path=${encodeURIComponent(MEDIA)}&startMs=${p.winStart}&endMs=${p.winEnd}`
+      +`&cut=${enc(p.cuts)}&mute=${enc(p.mutes)}&blur=${enc(p.blurs)}`;
+  }
+  // Normal / Muted → the plain window clip (audio as-is; Muted mutes the element).
+  return `/api/clip?path=${encodeURIComponent(MEDIA)}&startMs=${Math.round(s.startMs)}&endMs=${Math.round(s.endMs)}&pad=${PLAY_PAD}`;
+}
+function D_playFollow(){
+  const v=document.getElementById('D-clip');
+  D.playMs=D.keeps?D_clipToFilm(D.keeps,D.playWinStart,v.currentTime*1000):D.clipStartAbs+v.currentTime*1000;
+  const n=D_nearest(D.playMs);if(n)D.sel=n.id;
+  let panned=false;
+  if(D.playMs>D.viewEnd||D.playMs<D.viewStart){const span=D.viewEnd-D.viewStart;
+    D.viewStart=D.playMs-span*0.2;D.viewEnd=D.viewStart+span;D_clampView();panned=true;}
+  D_monitor();D_filmtl();D_highlightNearest();
+  if(panned)D_editor();
+  else{const ph=document.getElementById('D-edph');if(ph){
+    if(D.playMs>=D.viewStart&&D.playMs<=D.viewEnd){ph.style.display='block';ph.style.left=D_ex(D.playMs)+'px';}else ph.style.display='none';}}
+}
+// ---------- live scrub audio (WebAudio grains) ----------
+// Dragging the playhead pauses the <video>, so there's no stream audio while you
+// scrub. To let a reviewer FIND an edit point by ear, we decode a compact WAV of
+// a window around the cursor once, then play a short faded grain at the drag
+// position on every move — continuous "scrub" sound, DAW-style, at any playhead.
+const SA_CAP=90000;        // window we buffer for scrubbing (ms) — ±45s of the cursor
+const SA_GRAIN=0.2;        // max grain length (s); the next grain usually stops it first
+function D_saCtx(){
+  const sa=D.sa;
+  if(!sa.ctx){const AC=window.AudioContext||window.webkitAudioContext;if(!AC)return null;sa.ctx=new AC();}
+  if(sa.ctx.state==='suspended')sa.ctx.resume();   // must be called from a gesture (scrub mousedown)
+  return sa.ctx;
+}
+function D_saLoad(winStart,winEnd){
+  winStart=Math.max(0,Math.round(winStart)); winEnd=Math.min(RUNTIME_MS,Math.round(winEnd));
+  if(winEnd-winStart<1000)return;
+  const key=winStart+'-'+winEnd;
+  const sa=D.sa;
+  if(sa.key===key&&(sa.buf||sa.loading))return;    // already have (or fetching) this window
+  const ctx=D_saCtx(); if(!ctx)return;
+  sa.key=key; sa.buf=null; sa.loading=true; sa.winStart=winStart; sa.winEnd=winEnd;
+  fetch(`/api/scrub_audio?path=${encodeURIComponent(MEDIA)}&startMs=${winStart}&endMs=${winEnd}`)
+    .then(r=>r.ok?r.arrayBuffer():Promise.reject())
+    .then(ab=>ctx.decodeAudioData(ab))
+    .then(buf=>{if(D.sa.key===key){D.sa.buf=buf;D.sa.loading=false;}})
+    .catch(()=>{if(D.sa.key===key)D.sa.loading=false;});
+}
+// Load a fresh window only when the cursor nears/leaves the buffered one, so a
+// slow drag reuses the buffer and only a big jump refetches.
+function D_saEnsureAround(ms){
+  const sa=D.sa;
+  if(sa.buf&&ms>=sa.winStart+3000&&ms<=sa.winEnd-3000)return;
+  D_saLoad(ms-SA_CAP/2,ms+SA_CAP/2);
+}
+// Stop the currently-sounding grain with a tiny fade (no click). Overlapping
+// grains are what caused the echo, so a new grain always kills the old first —
+// one voice follows the cursor.
+function D_saKill(now){
+  const sa=D.sa; if(!sa.node)return; const p=sa.node;
+  try{p.g.gain.cancelScheduledValues(now);p.g.gain.setValueAtTime(Math.max(0.0001,p.g.gain.value),now);
+      p.g.gain.linearRampToValueAtTime(0,now+0.02);p.src.stop(now+0.035);}catch(e){}
+  sa.node=null;
+}
+function D_saStop(){const sa=D.sa;if(sa.ctx&&sa.node)D_saKill(sa.ctx.currentTime);}
+function D_saGrain(ms){
+  const sa=D.sa,ctx=sa.ctx;
+  if(D.audioMode==='muted'||!ctx||!sa.buf)return;
+  if(ms<sa.winStart||ms>sa.winEnd)return;
+  const now=ctx.currentTime;
+  if(now-sa.last<0.05)return;                        // ~20 grains/s
+  sa.last=now;
+  D_saKill(now);                                     // single voice → no overlap, no echo
+  const off=Math.max(0,Math.min(sa.buf.duration-SA_GRAIN,(ms-sa.winStart)/1000));
+  const src=ctx.createBufferSource(); src.buffer=sa.buf;
+  const g=ctx.createGain(); src.connect(g); g.connect(ctx.destination);
+  g.gain.setValueAtTime(0,now); g.gain.linearRampToValueAtTime(0.85,now+0.012);
+  g.gain.setValueAtTime(0.85,now+SA_GRAIN-0.04); g.gain.linearRampToValueAtTime(0,now+SA_GRAIN);
+  try{src.start(now,off,SA_GRAIN);}catch(e){}
+  sa.node={src,g};
+}
+// One call per scrub move: keep a window buffered around the cursor and sound it.
+function D_scrubAudio(ms){D_saEnsureAround(ms);D_saGrain(ms);}
 
-buildTypeFilters();
-renderGrid();
+// Phase 2 — whole-film continuous stream from the playhead. `/api/stream`
+// transcodes the film [playMs, end] into a fragmented MP4 the <video> plays
+// across scenes; Cleaned cuts every approved skip out and silences mutes live
+// over the whole remaining film (time-compressed, mapped back through keeps).
+function D_filmPlan(){
+  const start=Math.max(0,Math.round(D.playMs));
+  const base=`/api/stream?path=${encodeURIComponent(MEDIA)}&startMs=${start}`;
+  if(D.audioMode==='cleaned'){
+    const apply=SEGS.filter(x=>x.approved===true&&x.endMs>start);
+    const span=x=>[Math.max(start,Math.round(x.startMs)),Math.round(x.endMs)];
+    const cuts=apply.filter(x=>x.recommendedAction==='skip').map(span);
+    const mutes=apply.filter(x=>x.recommendedAction==='mute'||x.recommendedAction==='voice').map(span);
+    const blurs=apply.filter(x=>x.recommendedAction==='blur').map(span);
+    const enc=sp=>sp.map(([a,b])=>a+'-'+b).join(',');
+    return {src:base+`&cut=${enc(cuts)}&mute=${enc(mutes)}&blur=${enc(blurs)}`,
+      keeps:D_buildKeeps(start,RUNTIME_MS,cuts), playWinStart:start, clipStartAbs:start};
+  }
+  return {src:base, keeps:null, playWinStart:0, clipStartAbs:start}; // t=0 == playMs
+}
+// Scene — the fast, cached per-window clip (Phase 1).
+function D_scenePlan(s){
+  if(D.audioMode==='cleaned'){
+    const p=D_cleanedPlan(s);
+    return {src:D_clipSrc(s), keeps:D_buildKeeps(p.winStart,p.winEnd,p.cuts),
+      playWinStart:p.winStart, clipStartAbs:0};
+  }
+  return {src:D_clipSrc(s), keeps:null, playWinStart:0,
+    clipStartAbs:Math.max(0,s.startMs-PLAY_PAD*1000)}; // clip t=0 in film ms
+}
+// Where the <video> currently sits, in film-time — used to tell a pause/resume
+// (element still at the playhead) from a seek (playhead moved away → re-stream).
+function D_elFilmMs(v){return D.keeps?D_clipToFilm(D.keeps,D.playWinStart,v.currentTime*1000):D.clipStartAbs+v.currentTime*1000;}
+function D_play(){
+  const v=document.getElementById('D-clip');
+  if(D.loadingClip)return;                  // a build is already in flight — don't restart it
+  if(D.playing){v.pause();return;}          // onpause flips state + repaints
+  const film=D.range==='film';
+  const s=D_get(D.sel);
+  if(!film&&!s){D_ednote&&D_ednote('select a finding to play');return;}
+  // Cheap resume: element already loaded at the playhead (paused, not seeked) —
+  // just play, no rebuild/transcode. Scene keys on the src; film keys on whether
+  // the element still sits where the playhead is (a click moves the playhead).
+  if(v.readyState>=2&&v.paused){
+    const resume=film?Math.abs(D_elFilmMs(v)-D.playMs)<500:(D.clipKey===D_scenePlan(s).src);
+    if(resume){v.muted=D.audioMode==='muted';v.play().catch(()=>{});return;}
+  }
+  const plan=film?D_filmPlan():D_scenePlan(s);
+  const src=plan.src;
+  D.keeps=plan.keeps; D.playWinStart=plan.playWinStart; D.clipStartAbs=plan.clipStartAbs;
+  D.clipKey=src; D.loadingClip=true;
+  const cl=document.getElementById('D-cliploading');
+  if(cl)cl.innerHTML='<span class="spin"></span> '+(film?'starting stream… (transcoding the film live)':'building clip… (transcoding this scene)');
+  D_monitor();       // show the "building…" state
+  v.src=src;
+  v.muted=D.audioMode==='muted';
+  v.onloadedmetadata=()=>{
+    let t=0;
+    if(!D.keeps&&!film){                                 // linear scene clip: resume from the playhead if in-window
+      t=(D.playMs-D.clipStartAbs)/1000;
+      if(!(t>0&&t<v.duration))t=Math.max(0,s.startMs/1000-D.clipStartAbs/1000-2);
+    }
+    try{v.currentTime=t;}catch(e){}                       // film stream begins at t=0 (== playMs)
+    v.play().catch(()=>{});
+  };
+  v.oncanplay=()=>{D.loadingClip=false;D_monitor();};
+  // Only follow while actually playing and not mid-seek: a trailing timeupdate
+  // fired just after a pause/seek would otherwise yank the playhead back to the
+  // clip position (why a timeline click "didn't take" until you paused).
+  v.ontimeupdate=()=>{if(!D.playing||D.scrubbing)return;D_playFollow();};
+  v.onplay=()=>{D.playing=true;D.loadingClip=false;D_monitor();};
+  v.onpause=()=>{D.playing=false;D_monitor();};
+  v.onended=()=>{D.playing=false;D_monitor();};
+  v.onerror=()=>{D.playing=false;D.loadingClip=false;D.clipKey=null;D_ednote&&D_ednote('could not load clip');D_monitor();};
+  v.load();   // kick the resource-selection algorithm so onloadedmetadata fires
+}
+function D_stop(){const v=document.getElementById('D-clip');if(v&&!v.paused)v.pause();D.playing=false;D_monitor();}
+// Seek during (or into) playback; keeps the video in sync with the playhead.
+function D_seek(d){
+  D.playMs=Math.max(0,Math.min(RUNTIME_MS,D.playMs+d));
+  const v=document.getElementById('D-clip');
+  // While playing a *linear* clip we can seek the element to stay in sync; a
+  // cleaned clip's time is compressed (skips removed), so a linear seek would
+  // land wrong — just stop and move the playhead there instead.
+  if(D.playing){
+    if(!D.keeps&&v&&isFinite(v.duration)){const t=(D.playMs-D.clipStartAbs)/1000;
+      if(t>=0&&t<=v.duration){v.currentTime=t;D_monitor();D_filmtl();D_editor();return;}}
+    D_stop();
+  }
+  D_monitor();D_filmtl();D_editor();
+}
+
+// ---------- keyboard ----------
+function D_key(e){const k=e.key.toLowerCase();const s=D_get(D.sel);
+  if(k===' '){e.preventDefault();D_play();return;}
+  if(k==='j'||k==='k'){if(!SEGS.length)return;const i=SEGS.findIndex(x=>x.id===D.sel);
+    const n=SEGS[(i+(k==='j'?1:-1)+SEGS.length)%SEGS.length];D_select(n.id);return;}
+  if(k==='a'){e.preventDefault();D_add();return;}
+  if(k==='s'){e.preventDefault();D_split();return;}
+  if(e.key==='Delete'||e.key==='Backspace'){e.preventDefault();D_delRegion();return;}
+  if(k==='c'){if(s)D_decide(s,true);return;}
+  if(k==='l'){if(s)D_decide(s,false);return;}
+}
+document.addEventListener('keydown',e=>{
+  const tag=(document.activeElement?.tagName||'').toLowerCase();
+  if(tag==='input'||tag==='textarea'||tag==='select')return;
+  D_key(e);
+});
+
+// ---------- init ----------
+function D_init(){
+  document.getElementById('D-discreet').onclick=()=>{D.discreet=!D.discreet;
+    document.getElementById('D-discreet').classList.toggle('on',D.discreet);D_monitor();};
+  const rev=document.getElementById('D-reveal');
+  rev.onmousedown=()=>{D.held=true;D_monitor();};
+  ['mouseup','mouseleave'].forEach(ev=>rev.addEventListener(ev,()=>{D.held=false;D_monitor();}));
+  document.getElementById('D-pp').onclick=D_play;
+  document.getElementById('D-back1').onclick=()=>D_seek(-1000);
+  document.getElementById('D-fwd1').onclick=()=>D_seek(1000);
+  // picture mode (Visual ↔ Video) and audio mode (Normal / Cleaned / Muted)
+  document.querySelectorAll('#D-picmode button').forEach(b=>b.onclick=()=>{
+    D.picMode=b.dataset.pic;
+    document.querySelectorAll('#D-picmode button').forEach(x=>x.classList.toggle('on',x===b));
+    D_monitor();});
+  document.querySelectorAll('#D-audmode button').forEach(b=>b.onclick=()=>{
+    D.audioMode=b.dataset.aud;
+    document.querySelectorAll('#D-audmode button').forEach(x=>x.classList.toggle('on',x===b));
+    const v=document.getElementById('D-clip');
+    v.muted=D.audioMode==='muted';
+    if(D.playing)D_stop();   // the clip's flags change with the mode; press play to hear it anew
+  });
+  // range (Scene ↔ Film): Scene plays the selected finding's window (fast,
+  // cached); Film streams the whole film continuously from the playhead.
+  document.querySelectorAll('#D-range button').forEach(b=>b.onclick=()=>{
+    D.range=b.dataset.range;
+    document.querySelectorAll('#D-range button').forEach(x=>x.classList.toggle('on',x===b));
+    D.clipKey=null;          // a new range means a different source — don't reuse the old clip
+    if(D.playing)D_stop();
+  });
+  document.getElementById('D-bulkcut').onclick=()=>D_bulk(true);
+  document.getElementById('D-bulkleave').onclick=()=>D_bulk(false);
+  // minimap background = seek; recenter the viewport if you land outside it.
+  document.getElementById('D-ftrack').addEventListener('mousedown',e=>{
+    if(e.target.id==='D-fbox')return;
+    if(D.playing)D_stop();   // a click on the full-film bar seeks — it must win over playback
+    const track=e.currentTarget, at=cx=>{const r=track.getBoundingClientRect();return Math.max(0,Math.min(RUNTIME_MS,(cx-r.left)/r.width*RUNTIME_MS));};
+    D.scrubbing=true; D_saCtx();   // prime the audio context on this gesture
+    D.playMs=at(e.clientX);D_scrubAudio(D.playMs);D_monitor();D_filmtl();D_highlightNearest();
+    const move=ev=>{D.playMs=at(ev.clientX);D_scrubAudio(D.playMs);D_monitor();D_filmtl();D_highlightNearest();};
+    const up=()=>{D.scrubbing=false;D_saStop();document.removeEventListener('mousemove',move);document.removeEventListener('mouseup',up);
+      if(D.playMs<D.viewStart||D.playMs>D.viewEnd){const span=D.viewEnd-D.viewStart;D.viewStart=D.playMs-span/2;D.viewEnd=D.viewStart+span;D_clampView();}
+      const n=D_nearest(D.playMs);if(n)D.sel=n.id;D_render();};
+    document.addEventListener('mousemove',move);document.addEventListener('mouseup',up);});
+  // drag the viewport box to pan the editor below
+  document.getElementById('D-fbox').addEventListener('mousedown',e=>{e.stopPropagation();e.preventDefault();
+    const track=document.getElementById('D-ftrack'),rect=track.getBoundingClientRect();
+    const span=D.viewEnd-D.viewStart, sx=e.clientX, vs0=D.viewStart;
+    const move=ev=>{D.viewStart=vs0+(ev.clientX-sx)/rect.width*RUNTIME_MS;D.viewEnd=D.viewStart+span;D_clampView();D_filmtl();D_editor();};
+    const up=()=>{document.removeEventListener('mousemove',move);document.removeEventListener('mouseup',up);D_render();};
+    document.addEventListener('mousemove',move);document.addEventListener('mouseup',up);});
+  document.getElementById('D-mergemode').onclick=()=>{D.merge=!D.merge;if(!D.merge)D.picks.clear();D_render();};
+  document.getElementById('D-mergego').onclick=D_doMerge;
+  document.getElementById('D-mergeclear').onclick=()=>{D.picks.clear();D_render();};
+}
+
+D_init();
+D_render();
 </script>
 """
 
 
 def render_page(media: Path, timeline: Timeline) -> str:
-    return PAGE.format(
-        title=media.stem,
-        count=len(timeline.segments),
-        media=str(media),
-        pad=CLIP_PAD_S,
-        segments=json.dumps([s.model_dump() for s in timeline.segments]),
+    return (
+        PAGE.replace("__TITLE__", _html_escape(media.stem))
+        .replace("__PATH_DISPLAY__", _html_escape(str(media)))
+        .replace("__MEDIA_JSON__", json.dumps(str(media)))
+        .replace("__PAD__", f"{CLIP_PAD_S:.0f}")
+        .replace("__RUNTIME_MS__", str(media_runtime_ms(media, timeline)))
+        .replace(
+            "__SEGS_JSON__",
+            json.dumps([s.model_dump() for s in timeline.segments]),
+        )
+    )
+
+
+def _html_escape(text: str) -> str:
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
     )

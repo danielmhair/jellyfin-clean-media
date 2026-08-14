@@ -401,34 +401,43 @@ a stronger model's run.
 scripts/review.sh "movies/Some Film (2010).mkv"
 ```
 
-Opens a page listing every finding with a thumbnail and **a playable clip
-padded 15 seconds either side**, seeking to where the flagged part begins —
-a still frame cannot show whether a scene is objectionable, motion and
-context decide it. Two buttons per finding: **Bad — act on it** and
-**Fine — ignore**.
+Opens the **Studio** — a single review workspace, not a list of clips. A
+continuous **monitor** follows a **playhead**; a full-film **minimap** shows
+every finding and drives a zoomable **editor** below (filmstrip + waveform
+stacked); and a left rail lists each finding with its description inline. You
+work the playhead and everything follows it.
 
-Findings start undecided. **Nothing is skipped in Jellyfin or written into
-a render until you approve it.** Decisions save straight to the
-`.cleanmedia.json` sidecar, which is what the plugin reads — so approving
-here *is* what makes Jellyfin skip a scene.
+**Discreet mode is on by default.** The picture is blurred and hidden, so a
+parent can review objectionable content — by description, waveform, and position
+— without others in the room seeing it. Hold **👁 Reveal** to check a frame.
 
-Findings marked **"needs your call"** are the `suggestive` category: a body
-shown without explicit nudity, which is objectionable or not depending on
-how the film frames it. Those are surfaced as questions, not verdicts.
+**Decisions read the way the viewer experiences them:** **✂ Cut out** (red — the
+content is removed) and **👁 Leave in** (green — it plays normally), on each rail
+row or in the editor. Findings start undecided. **Nothing is skipped in Jellyfin
+or written into a render until you cut it out.** Decisions save straight to the
+`.cleanmedia.json` sidecar the plugin reads — so cutting one out here *is* what
+makes Jellyfin skip it. Deleting a finding is a separate, explicit action.
 
-Each finding carries a `reasoning` string with the offending word and its
-surrounding dialogue, or the model's description of what it saw, so you can
-usually judge without opening the film.
+**Playback with sound.** A **Visual / Video** toggle (audio plays in both —
+Visual keeps the moving picture off for private review) and a **Normal / Cleaned
+/ Muted** audio mode. **Cleaned** applies your approved decisions live — skips
+jumped, mutes silenced, blurs blurred — so you see and hear exactly what the
+viewer will get before approving. A **Scene ↔ Film** toggle plays either the
+scene you're editing or the **whole film continuously** from the playhead.
 
-**Seeing exactly what gets cut.** Every preview draws a marker strip over the
-video highlighting the flagged span — the part that will be cut, muted or
-blurred — with a playhead, so it's clear what a finding covers rather than just
-playing the scene. A **Preview skip** button plays the run-up and then *jumps
-over* the span the way Jellyfin skips it during playback, so you can watch the
-skip, not just the scene. For fine timing there's a waveform (audio) or
-filmstrip (visual) editor with draggable handles, ±25 ms / ±1 s nudges, typed
-`H:MM:SS.mmm` times, and a looped muted/voice-removed preview — to place a mute
-on the exact word by eye and ear.
+**Finding an edit point by ear and eye.** Drag the playhead (or a region's edge)
+and the audio **scrubs** under your cursor while the frame follows — so you place
+a mute or a cut on the exact word without replaying the scene. The editor zooms
+with the scroll wheel; a scrollbar with **◀/▶ fine-scrub** buttons pans the film.
+Carve a scene into pieces (**add cut**, **split**, keep a story beat by deleting
+the middle), retime by dragging or typing `H:MM:SS.mmm` or nudging ±25 ms / ±1 s,
+correct a finding's category or description, and **merge** shot-by-shot detections
+into one — all persist immediately. Filter the whole workspace to one type and
+**cut out / leave in the whole group** at once.
+
+Each finding carries a `reasoning` string — the offending word with its
+surrounding dialogue, or the model's description of what it saw — shown inline, so
+you can usually decide without displaying the scene at all.
 
 ---
 
@@ -542,6 +551,10 @@ warning — a sleeping GPU box never breaks playback or a library scan.
 | `PATCH /api/jobs/{id}/segments/{n}` | approve, reject, change action |
 | `POST /api/jobs/{id}/render` | render a clean copy |
 | `GET /api/segments?path=...` | **used by the plugin** — merged approved findings for a file |
+| `GET /api/review?path=...` | the **Studio** review workspace (HTML) for a film |
+| `GET /api/stream?path=...&startMs=...` | whole-film continuous playback (live fragmented MP4; `cut`/`mute`/`blur` spans apply the Cleaned mix) |
+| `GET /api/clip` · `/api/preview_clip` | a scene clip / a cleaned windowed preview, for review playback |
+| `GET /api/scrub_audio` · `/api/peaks` · `/api/filmstrip` · `/api/thumbnail` | audio for live scrub, waveform, frame strip, and single frame for the editor |
 
 ---
 

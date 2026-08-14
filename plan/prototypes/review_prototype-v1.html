@@ -1,0 +1,728 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Review UI prototype — Some Film (2011)</title>
+<!--
+  THROWAWAY PROTOTYPE — not wired to the worker. Fake findings, no persistence.
+  Answers: "what should the review page look like?"
+  Two variants, switch with the floating bar (or ← / → keys), or ?variant=A|B.
+    A — focus-mode workspace (two-pane inbox, keyboard-driven triage)
+    B — polished grid (the current layout, re-hierarchised)
+  Fold the winner into worker/review.py; bin the rest.
+-->
+<style>
+:root{
+  --bg:#0d1013; --panel:#16191d; --panel2:#1d2126; --line:#2a2f36;
+  --ink:#e6edf3; --dim:#9aa5b1; --dim2:#6e7681;
+  --pos:#2ea043; --pos-d:#12361f; --neg:#da3633; --neg-d:#3d1517;
+  --pick:#3b82f6; --undecided:#c9a227;
+  --radius:12px;
+  /* one colour + one glyph per category, severity-ranked (mirrors _MERGE_SEVERITY) */
+  --c-nudity:#ff5c8a; --c-sexual_activity:#ff6b6b; --c-intense_kissing:#ff9f45;
+  --c-suggestive:#e0b341; --c-violence:#a78bfa; --c-gore:#e5484d; --c-profanity:#4aa3ff;
+  --c-manual:#8b98a5;
+  font-family:system-ui,-apple-system,Segoe UI,sans-serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  -webkit-font-smoothing:antialiased}
+button{font:inherit;cursor:pointer;border:0;border-radius:8px;
+  background:var(--panel2);color:var(--ink);padding:8px 12px}
+button:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--pick);outline-offset:2px}
+.hidden{display:none!important}
+.mono{font-variant-numeric:tabular-nums}
+
+/* ---------- shared header ---------- */
+.top{padding:18px 22px 14px;border-bottom:1px solid var(--line);
+  position:sticky;top:0;background:linear-gradient(#0d1013,#0d1013e6);backdrop-filter:blur(6px);z-index:20}
+.top h1{margin:0;font-size:18px;font-weight:650;letter-spacing:.1px}
+.top .path{color:var(--dim2);font-size:12px;margin-top:2px}
+.prog{margin-top:12px;display:flex;align-items:center;gap:14px}
+.progbar{flex:1;height:12px;border-radius:99px;background:#22262c;overflow:hidden;display:flex}
+.progbar>span{display:block;height:100%;transition:width .3s}
+.progbar .p-pos{background:var(--pos)} .progbar .p-neg{background:var(--neg)}
+.progbar .p-un{background:repeating-linear-gradient(45deg,#3a4048 0 7px,#31373e 7px 14px)}
+.progstats{display:flex;gap:16px;font-size:12.5px;color:var(--dim)}
+.progstats b{color:var(--ink);font-weight:650}
+.progstats .dot{display:inline-block;width:8px;height:8px;border-radius:99px;margin-right:6px;vertical-align:1px}
+
+/* category chip (shared) */
+.cchip{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;
+  padding:3px 9px 3px 7px;border-radius:99px;line-height:1;white-space:nowrap}
+.cchip .g{font-size:13px}
+.tentative-flag{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;
+  color:#0d1013;background:var(--undecided);padding:2px 6px;border-radius:5px}
+
+/* status pill */
+.status{font-size:11px;font-weight:700;padding:2px 8px;border-radius:99px}
+.status.approved{background:var(--pos-d);color:#5ee27f}
+.status.rejected{background:var(--neg-d);color:#ff7b72}
+.status.undecided{background:#2a2f36;color:var(--dim)}
+
+/* ===================================================================
+   VARIANT A — focus-mode workspace
+   =================================================================== */
+#A .work{display:grid;grid-template-columns:340px 1fr;height:calc(100vh - 118px)}
+#A .rail{border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+#A .timeline{padding:14px 16px 10px;border-bottom:1px solid var(--line)}
+#A .tl-track{position:relative;height:34px;background:#1a1e23;border-radius:7px;overflow:hidden}
+#A .tl-mark{position:absolute;top:0;bottom:0;width:4px;border-radius:2px;transform:translateX(-2px);cursor:pointer;opacity:.85}
+#A .tl-mark:hover{opacity:1;width:6px}
+#A .tl-mark.cur{outline:2px solid #fff;z-index:2;opacity:1}
+#A .tl-lbl{display:flex;justify-content:space-between;font-size:10.5px;color:var(--dim2);margin-top:5px}
+#A .list{overflow-y:auto;flex:1;padding:6px}
+#A .row{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;
+  padding:9px 10px;border-radius:9px;cursor:pointer;border:1px solid transparent}
+#A .row:hover{background:var(--panel)}
+#A .row.cur{background:var(--panel2);border-color:#33404e}
+#A .row .bar{width:4px;height:34px;border-radius:2px}
+#A .row .r-main{min-width:0}
+#A .row .r-t{font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#A .row .r-sub{font-size:11px;color:var(--dim2);margin-top:1px}
+#A .row .tick{width:18px;height:18px;border-radius:99px;display:grid;place-items:center;font-size:11px;font-weight:800}
+#A .tick.approved{background:var(--pos);color:#04220d}
+#A .tick.rejected{background:var(--neg);color:#fff}
+#A .tick.undecided{border:2px dashed #40474f}
+
+#A .stage{overflow-y:auto;padding:26px 30px}
+#A .stage-inner{max-width:760px;margin:0 auto}
+#A .frame{position:relative;aspect-ratio:16/9;border-radius:var(--radius);overflow:hidden;
+  background:#000;display:grid;place-items:center}
+#A .frame .grad{position:absolute;inset:0;opacity:.85}
+#A .frame .play{position:relative;z-index:2;display:flex;flex-direction:column;align-items:center;gap:8px;
+  color:#fff;text-shadow:0 2px 8px #000}
+#A .frame .play .glyph{width:64px;height:64px;border-radius:99px;background:#0009;display:grid;place-items:center;font-size:24px;border:2px solid #fff8}
+#A .frame .cutstrip{position:absolute;left:0;right:0;top:0;height:22px;z-index:3;background:#0007;font-size:11px}
+#A .frame .cutband{position:absolute;top:0;bottom:0;background:rgba(248,81,73,.35);border-left:2px solid #f85149;border-right:2px solid #f85149}
+#A .frame .cutlbl{position:absolute;left:8px;top:3px;color:#ffd0cb;font-weight:600;text-shadow:0 1px 2px #000}
+#A .clipbtns{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+#A .clipbtns button{background:var(--panel2);font-size:12.5px}
+#A .stagehead{display:flex;align-items:center;gap:12px;margin:20px 0 4px}
+#A .stagehead .id{color:var(--dim2);font-size:13px;font-weight:600}
+#A .times{font-size:22px;font-weight:600;letter-spacing:.3px;margin:6px 0 2px}
+#A .times .dur{font-size:14px;color:var(--dim);font-weight:500;margin-left:8px}
+#A .reason{color:var(--dim);font-size:14px;line-height:1.55;margin:12px 0 0;max-width:60ch}
+#A .reason .word{color:#ffd479;font-weight:600}
+#A .provenance{margin-top:10px;font-size:12px;color:var(--dim2)}
+#A .timing-note{font-size:12px;margin-top:8px}
+#A .timing-note.exact{color:#5ee27f} #A .timing-note.est{color:#ffb877}
+#A .decide{position:sticky;bottom:0;margin-top:26px;padding:16px 0 8px;
+  background:linear-gradient(#0d101300,#0d1013 26%);display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+#A .decide .big{flex:1;min-width:150px;padding:15px;font-size:15px;font-weight:650;border-radius:10px;
+  display:flex;align-items:center;justify-content:center;gap:9px;border:1.5px solid var(--line);background:var(--panel)}
+#A .decide .big.approve.on{background:var(--pos);border-color:var(--pos);color:#04220d}
+#A .decide .big.reject.on{background:var(--neg);border-color:var(--neg);color:#fff}
+#A .decide .big kbd{font-size:11px;opacity:.6}
+#A .decide .actwrap{display:flex;flex-direction:column;gap:3px}
+#A .decide label.lil{font-size:10.5px;color:var(--dim2);text-transform:uppercase;letter-spacing:.4px}
+#A select{background:var(--panel2);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:11px 10px;font:inherit;font-size:13px}
+#A .khint{color:var(--dim2);font-size:12px;padding:10px 22px;border-top:1px solid var(--line);display:flex;gap:18px;flex-wrap:wrap}
+#A .khint kbd{background:var(--panel2);border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:1px 6px;font-family:inherit;font-size:11px;color:var(--ink)}
+
+kbd{font-family:ui-monospace,monospace}
+
+/* ===================================================================
+   VARIANT B — polished grid
+   =================================================================== */
+#B .controls{padding:12px 22px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap;
+  position:sticky;top:118px;background:#0d1013ee;z-index:15}
+#B .chips{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+#B .chip{padding:6px 11px 6px 9px;background:var(--panel2);color:var(--dim);font-size:12px;font-weight:600;
+  border-radius:99px;display:inline-flex;align-items:center;gap:6px}
+#B .chip.on{background:#243244;color:#cfe3ff;box-shadow:inset 0 0 0 1px #3b6ea5}
+#B .chip .n{opacity:.6;font-weight:500}
+#B .chip .g{font-size:12px}
+#B .spacer{flex:1}
+#B .addbtn{background:#243244;color:#cfe3ff;font-weight:600;font-size:12.5px}
+/* selection-driven bulk bar — only shows when things are picked */
+#B .bulkbar{padding:11px 22px;background:#151b24;border-bottom:1px solid #24344a;display:flex;gap:10px;align-items:center;
+  position:sticky;top:171px;z-index:14;font-size:13px}
+#B .bulkbar b{color:#cfe3ff}
+#B .bulkbar .grow{flex:1}
+#B .bulkbar button.b-yes{background:var(--pos);color:#04220d;font-weight:600}
+#B .bulkbar button.b-no{background:var(--neg);color:#fff;font-weight:600}
+#B .bulkbar button.b-merge{background:#3b6ea5;color:#fff;font-weight:600}
+#B .bulkbar button.b-clear{background:transparent;color:var(--dim)}
+
+#B .grid{display:flex;flex-wrap:wrap;gap:18px;align-items:flex-start;padding:20px 22px}
+#B .card{width:340px;background:var(--panel);border-radius:var(--radius);overflow:hidden;
+  border:1px solid var(--line);transition:border-color .15s,box-shadow .15s}
+#B .card.approved{border-color:#215d34;box-shadow:0 0 0 1px #215d34}
+#B .card.rejected{border-color:#5a2626;opacity:.62}
+#B .card.picked{border-color:var(--pick);box-shadow:0 0 0 1px var(--pick)}
+#B .card .shot{position:relative;aspect-ratio:16/9;background:#000;cursor:pointer;display:grid;place-items:center}
+#B .card .shot .grad{position:absolute;inset:0;opacity:.8}
+#B .card .shot .play{position:relative;z-index:2;width:48px;height:48px;border-radius:99px;background:#0009;
+  display:grid;place-items:center;color:#fff;font-size:19px;border:2px solid #fff8}
+#B .card .shot .sel{position:absolute;top:9px;left:9px;z-index:3;width:22px;height:22px;border-radius:6px;
+  background:#0009;border:1.5px solid #fff9;display:grid;place-items:center;color:#fff;font-size:12px;font-weight:800}
+#B .card .shot .sel.on{background:var(--pick);border-color:var(--pick)}
+#B .card .shot .badge{position:absolute;top:9px;right:9px;z-index:3}
+#B .card .shot .tstamp{position:absolute;bottom:8px;right:9px;z-index:3;font-size:11px;font-weight:600;
+  background:#000a;padding:2px 7px;border-radius:5px;color:#fff}
+#B .card .body{padding:12px 13px 13px}
+#B .card .btitle{display:flex;align-items:baseline;gap:8px;justify-content:space-between}
+#B .card .btitle .t{font-size:15px;font-weight:650}
+#B .card .btitle .st{font-size:11px;color:var(--dim2)}
+#B .card .word{color:#ffd479;font-weight:600}
+#B .card .rz{color:var(--dim);font-size:12.5px;line-height:1.5;margin-top:6px}
+#B .card .prov{color:var(--dim2);font-size:11px;margin-top:7px;display:flex;align-items:center;gap:8px}
+#B .card .prov .exact{color:#5ee27f} #B .card .prov .est{color:#ffb877}
+#B .card .actions{display:flex;gap:7px;margin-top:11px}
+#B .card .actions button{font-size:12px;background:var(--panel2)}
+#B .card .actions .more{margin-left:auto;padding:8px 10px}
+#B .card .decide{display:flex;gap:8px;margin-top:9px}
+#B .card .decide .d{flex:1;font-size:13px;font-weight:600;padding:10px;border:1px solid var(--line);background:var(--panel2)}
+#B .card .decide .d.approve.on{background:var(--pos);border-color:var(--pos);color:#04220d}
+#B .card .decide .d.reject.on{background:var(--neg);border-color:var(--neg);color:#fff}
+#B .card .decide select{background:var(--panel2);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:0 8px;font:inherit;font-size:12px}
+
+/* ===================================================================
+   VARIANT C — scene editor (carve one scene into keep/cut regions)
+   =================================================================== */
+#C .cwrap{padding:20px 24px;max-width:1240px;margin:0 auto}
+#C .chead{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:4px}
+#C .chead h2{margin:0;font-size:16px;font-weight:650}
+#C .chead .win{color:var(--dim2);font-size:12.5px}
+#C .presets{display:flex;gap:8px;margin-left:auto}
+#C .presets button{font-size:12px;background:var(--panel2)}
+#C .presets button.on{background:#243244;color:#cfe3ff;box-shadow:inset 0 0 0 1px #3b6ea5}
+#C .modehint{color:var(--dim);font-size:13px;margin:8px 0 14px;line-height:1.6;max-width:90ch}
+#C .modehint b{color:var(--ink)} #C .modehint kbd{background:var(--panel2);border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:1px 6px;font-size:11px;color:var(--ink)}
+#C .editor{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
+#C .scroll{overflow-x:auto;padding-bottom:4px}
+#C .track{position:relative;user-select:none}
+#C .filmstrip{display:flex;height:60px;border-radius:6px 6px 0 0;overflow:hidden;cursor:crosshair}
+#C .filmstrip .f{flex:1;border-right:1px solid #0006}
+#C .wave{display:block;background:#0c0c0d;cursor:crosshair}
+#C .lane{position:relative;height:60px;margin-top:6px;background:#14181d;border-radius:6px;overflow:hidden;cursor:crosshair}
+#C .keeplane{position:absolute;inset:0;display:grid;place-items:center;color:#3f6d4e;font-size:11px;letter-spacing:.5px;text-transform:uppercase;pointer-events:none}
+#C .region{position:absolute;top:4px;bottom:4px;border-radius:6px;cursor:grab;overflow:hidden;border:1px solid;box-shadow:0 2px 6px #0006}
+#C .region.sel{outline:2px solid #fff;z-index:5}
+#C .region .rlabel{position:absolute;top:4px;left:7px;font-size:10.5px;font-weight:800;color:#fff;text-shadow:0 1px 2px #000;pointer-events:none;letter-spacing:.4px}
+#C .region .rlen{position:absolute;bottom:4px;left:7px;font-size:10px;color:#fffd;text-shadow:0 1px 2px #000;pointer-events:none}
+#C .region .redge{position:absolute;top:0;bottom:0;width:9px;cursor:ew-resize;z-index:4}
+#C .region .redge.l{left:0} #C .region .redge.r{right:0}
+#C .region .rotag{position:absolute;top:4px;right:7px;font-size:9px;font-weight:700;color:#ffdcae;text-shadow:0 1px 2px #000;pointer-events:none}
+#C .playhead{position:absolute;top:0;bottom:0;width:2px;background:#fff;box-shadow:0 0 5px #000,0 0 2px #fff;z-index:8;pointer-events:none}
+#C .playhead::before{content:'';position:absolute;top:-1px;left:-5px;border:6px solid transparent;border-top-color:#fff}
+#C .beat{position:absolute;top:0;bottom:0;background:repeating-linear-gradient(45deg,#2e7d5526 0 6px,#2e7d5508 6px 12px);border-left:1px dashed #34d17e;border-right:1px dashed #34d17e;z-index:1;pointer-events:none}
+#C .beat .bl{position:absolute;top:3px;left:5px;font-size:9.5px;color:#5ee2a0;white-space:nowrap;font-weight:600}
+#C .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:14px}
+#C .toolbar button{font-size:12.5px}
+#C .toolbar .add{background:var(--pos);color:#04220d;font-weight:650}
+#C .toolbar .split{background:#3b6ea5;color:#fff;font-weight:600}
+#C .toolbar .del{background:var(--panel2);color:#ff9a91}
+#C .toolbar kbd{font-size:11px;opacity:.7;margin-left:4px}
+#C .toolbar .sep{width:1px;height:24px;background:var(--line);margin:0 2px}
+#C .toolbar .ph{color:var(--dim2);font-size:12px}
+#C .toolbar .note{margin-left:auto;font-size:12px;color:#ffb877;min-height:16px}
+#C .inspector{margin-top:14px;padding:12px 14px;background:#101418;border:1px solid var(--line);border-radius:10px;
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap;font-size:12.5px;min-height:44px}
+#C .inspector .ihint{color:var(--dim2)}
+#C .inspector .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+#C .inspector .seg button{border-radius:0;background:var(--panel2);color:var(--dim);font-size:12px;padding:7px 12px;font-weight:600}
+#C .inspector .seg button.on{background:#cfe3ff;color:#0d1013}
+#C .inspector .times{color:var(--dim);font-variant-numeric:tabular-nums}
+#C .inspector .times b{color:var(--ink)}
+#C .inspector .idel{background:var(--neg-d);color:#ff7b72;font-weight:600;margin-left:auto}
+#C .inspector .ro{color:#ffb877}
+#C .result{margin-top:14px;padding:12px 14px;background:#101418;border:1px solid var(--line);border-radius:10px;font-size:12.5px;color:var(--dim);line-height:1.7}
+#C .result b{color:var(--ink)} #C .result .keep{color:#5ee27f;font-weight:600} #C .result .warn{color:#ffb877;font-weight:600}
+
+/* ---------- floating variant switcher (prototype only) ---------- */
+#switch{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:999;
+  display:flex;align-items:center;gap:2px;background:#000d;border:1px solid #3a4048;border-radius:99px;
+  padding:5px 6px;box-shadow:0 8px 30px #000a;backdrop-filter:blur(8px)}
+#switch button{background:transparent;color:#fff;padding:6px 12px;font-size:16px;line-height:1}
+#switch .lab{font-size:12.5px;color:#cfe3ff;font-weight:600;padding:0 8px;min-width:190px;text-align:center}
+#switch .lab small{color:#8b98a5;font-weight:400}
+</style>
+
+<!-- ========================= VARIANT A ========================= -->
+<section id="A" class="hidden">
+  <div class="top">
+    <h1>Some Film (2011)</h1>
+    <div class="path mono">\\Nas\Movies\Some Film (2011)\Some Film (2011).mkv</div>
+    <div class="prog">
+      <div class="progbar" id="A-progbar"></div>
+      <div class="progstats" id="A-progstats"></div>
+    </div>
+  </div>
+  <div class="work">
+    <aside class="rail">
+      <div class="timeline">
+        <div class="tl-track" id="A-tltrack"></div>
+        <div class="tl-lbl"><span>0:00</span><span id="A-runtime">1:52:00</span></div>
+      </div>
+      <div class="list" id="A-list"></div>
+    </aside>
+    <main class="stage"><div class="stage-inner" id="A-stage"></div></main>
+  </div>
+  <div class="khint">
+    <span><kbd>J</kbd> <kbd>K</kbd> move</span>
+    <span><kbd>A</kbd> approve</span>
+    <span><kbd>R</kbd> reject</span>
+    <span><kbd>Space</kbd> play</span>
+    <span><kbd>E</kbd> edit timing</span>
+    <span><kbd>M</kbd> merge-select</span>
+  </div>
+</section>
+
+<!-- ========================= VARIANT B ========================= -->
+<section id="B" class="hidden">
+  <div class="top">
+    <h1>Some Film (2011)</h1>
+    <div class="path mono">\\Nas\Movies\Some Film (2011)\Some Film (2011).mkv</div>
+    <div class="prog">
+      <div class="progbar" id="B-progbar"></div>
+      <div class="progstats" id="B-progstats"></div>
+    </div>
+  </div>
+  <div class="controls">
+    <div class="chips" id="B-chips"></div>
+    <div class="spacer"></div>
+    <button class="addbtn">＋ Add segment</button>
+  </div>
+  <div class="bulkbar hidden" id="B-bulkbar">
+    <b><span id="B-selcount">0</span> selected</b>
+    <button class="b-yes">Approve all</button>
+    <button class="b-no">Reject all</button>
+    <button class="b-merge">Merge into one</button>
+    <div class="grow"></div>
+    <button class="b-clear">Clear selection</button>
+  </div>
+  <div class="grid" id="B-grid"></div>
+</section>
+
+<!-- ========================= VARIANT C ========================= -->
+<section id="C" class="hidden">
+  <div class="top">
+    <h1>Some Film (2011) — scene editor</h1>
+    <div class="path">One flagged scene with a story beat in the middle. Carve around the beat; keep it.</div>
+  </div>
+  <div class="cwrap">
+    <div class="chead">
+      <h2>Bad scene</h2><span class="win mono" id="C-win"></span>
+      <div class="presets">
+        <button data-preset="one">Start: one cut ▸ <b>subtractive</b></button>
+        <button data-preset="empty">Start: empty ▸ <b>additive</b></button>
+      </div>
+    </div>
+    <div class="modehint" id="C-hint"></div>
+    <div class="editor">
+      <div class="scroll">
+        <div class="track" id="C-track">
+          <div class="filmstrip" id="C-film"></div>
+          <canvas class="wave" id="C-wave" height="46"></canvas>
+          <div class="lane" id="C-lane"><div class="keeplane">plays normally where no region covers</div></div>
+          <div class="playhead" id="C-ph" style="left:0"></div>
+        </div>
+      </div>
+      <div class="toolbar">
+        <button class="add">＋ Cut at playhead<kbd>A</kbd></button>
+        <button class="split">⁄ Split at playhead<kbd>S</kbd></button>
+        <button class="del">✕ Delete selected<kbd>Del</kbd></button>
+        <div class="sep"></div>
+        <button data-nudge="-500">◀ 0.5s</button>
+        <button data-nudge="500">0.5s ▶</button>
+        <span class="ph mono" id="C-phlbl"></span>
+        <span class="note" id="C-note"></span>
+      </div>
+      <div class="inspector" id="C-insp"></div>
+    </div>
+    <div class="result" id="C-result"></div>
+  </div>
+</section>
+
+<!-- ========================= switcher ========================= -->
+<div id="switch">
+  <button id="sw-prev" title="Previous (←)">‹</button>
+  <div class="lab" id="sw-lab"></div>
+  <button id="sw-next" title="Next (→)">›</button>
+</div>
+
+<script>
+// ---------- fake findings (real segment shape) ----------
+// reasoning carries the machine tokens the real page emits: [word] and (tier)
+const RUNTIME_MS = 112*60*1000;
+const CAT = {
+  nudity:{g:'●',sev:5}, sexual_activity:{g:'●',sev:4}, intense_kissing:{g:'♥',sev:4},
+  suggestive:{g:'◐',sev:2}, violence:{g:'⚔',sev:3}, gore:{g:'✦',sev:5},
+  profanity:{g:'“”',sev:1}, manual:{g:'✎',sev:0},
+};
+const catColor = c => getComputedStyle(document.documentElement).getPropertyValue('--c-'+c).trim() || '#8b98a5';
+
+let SEGS = [
+  {id:3, startMs:611000, endMs:611900, category:'profanity', confidence:1.0, engine:'subtitle', recommendedAction:'mute', approved:true, reasoning:'[hell] (single-word-cue)'},
+  {id:4, startMs:734400, endMs:735100, category:'profanity', confidence:0.9, engine:'subtitle', recommendedAction:'mute', approved:null, reasoning:'[damn] (cached-asr)'},
+  {id:5, startMs:1290500, endMs:1291600, category:'profanity', confidence:0.8, engine:'subtitle', recommendedAction:'mute', approved:null, reasoning:'[damn] (estimated)'},
+  {id:6, startMs:1522000, endMs:1523000, category:'profanity', confidence:1.0, engine:'whisper', recommendedAction:'voice', approved:false, reasoning:'[a-word] (retranscribed)'},
+  {id:9, startMs:2041000, endMs:2049000, category:'intense_kissing', confidence:0.72, engine:'vlm', recommendedAction:'skip', approved:null, reasoning:'kissing observed across 4 consecutive shots; policy: intense_kissing'},
+  {id:10, startMs:2050500, endMs:2058000, category:'suggestive', confidence:0.61, engine:'vlm', recommendedAction:'skip', approved:null, reasoning:'partial undress, no explicit nudity — raised for your call'},
+  {id:11, startMs:2061000, endMs:2072000, category:'nudity', confidence:0.98, engine:'vlm', recommendedAction:'skip', approved:null, reasoning:'female_topless=true across 6 shots; policy: nudity'},
+  {id:14, startMs:3380000, endMs:3384000, category:'violence', confidence:0.55, engine:'pureframe', recommendedAction:'skip', approved:null, reasoning:'high motion + blood-tone frames; policy: violence'},
+  {id:15, startMs:3388000, endMs:3399000, category:'gore', confidence:0.83, engine:'vlm', recommendedAction:'blur', approved:null, reasoning:'blood/wound detail across 5 shots; policy: gore'},
+  {id:18, startMs:4501000, endMs:4501800, category:'profanity', confidence:0.7, engine:'subtitle', recommendedAction:'mute', approved:null, reasoning:'[bastard] (whole-cue)'},
+  {id:19, startMs:5102000, endMs:5108000, category:'sexual_activity', confidence:0.91, engine:'vlm', recommendedAction:'skip', approved:null, reasoning:'sexual_activity=true across 3 shots; policy: sexual_activity'},
+  {id:22, startMs:6033000, endMs:6039000, category:'manual', confidence:1.0, engine:'manual', recommendedAction:'skip', approved:true, reasoning:'added by hand — background nudity on a poster'},
+];
+
+// ---------- shared helpers ----------
+const pad=(n,l=2)=>String(n).padStart(l,'0');
+const fmtHMS=ms=>{const t=Math.floor(ms/1000);return `${Math.floor(t/3600)}:${pad(Math.floor(t%3600/60))}:${pad(t%60)}.${pad(Math.floor(ms%1000),3)}`;};
+const fmtShort=ms=>{const t=Math.floor(ms/1000);return `${Math.floor(t/60)}:${pad(t%60)}`;};
+const word=s=>{const m=/^\[([^\]]+)\]/.exec(s.reasoning||'');return m?m[1]:null;};
+const timing=s=>{const m=/\((single-word-cue|cached-asr|retranscribed|estimated|whole-cue)\)/.exec(s.reasoning||'');
+  if(!m)return null;const exact=m[1]!=='estimated';return{exact,label:exact?'exact timing':'approx — ASR could not place the word'};};
+const TENTATIVE=['suggestive'];
+const label=s=>{const w=word(s);if(w)return `“${w}”`;return s.category.replace(/_/g,' ');};
+// a friendly, reviewer-facing reason (strip machine tokens; keep the human bit)
+const friendly=s=>{
+  const w=word(s);
+  if(w) return `Muted word <span class="word">“${w}”</span> in the dialogue.`;
+  return (s.reasoning||'').replace(/;?\s*policy:.*$/,'').replace(/</g,'&lt;').trim()||'—';
+};
+const engineName={subtitle:'subtitle text',whisper:'speech (Whisper)',vlm:'vision AI',pureframe:'frame heuristics',manual:'added by hand'};
+const actLabels={mute:'Mute (silence all)',voice:'Voice-only mute',blur:'Blur',skip:'Skip'};
+const stateOf=s=>s.approved===true?'approved':s.approved===false?'rejected':'undecided';
+function gradFor(s){const c=catColor(s.category);return `radial-gradient(120% 120% at 30% 20%, ${c}44, #000 60%), linear-gradient(135deg, ${c}22, #000)`;}
+function cchip(s){const c=catColor(s.category);const t=TENTATIVE.includes(s.category);
+  return `<span class="cchip" style="background:${c}22;color:${c}">
+    <span class="g">${CAT[s.category]?.g||'●'}</span>${s.category.replace(/_/g,' ')}</span>`
+    + (t?` <span class="tentative-flag">needs your call</span>`:'');}
+
+function progHTML(prefix){
+  const a=SEGS.filter(s=>s.approved===true).length, r=SEGS.filter(s=>s.approved===false).length, u=SEGS.length-a-r;
+  const pct=n=>SEGS.length?100*n/SEGS.length:0;
+  document.getElementById(prefix+'-progbar').innerHTML=
+    `<span class="p-pos" style="width:${pct(a)}%"></span>`+
+    `<span class="p-neg" style="width:${pct(r)}%"></span>`+
+    `<span class="p-un" style="width:${pct(u)}%"></span>`;
+  document.getElementById(prefix+'-progstats').innerHTML=
+    `<span><span class="dot" style="background:var(--pos)"></span><b>${a}</b> approved</span>`+
+    `<span><span class="dot" style="background:var(--neg)"></span><b>${r}</b> rejected</span>`+
+    `<span><span class="dot" style="background:#3a4048"></span><b>${u}</b> to review</span>`;
+}
+
+// ===================================================================
+// VARIANT A
+// ===================================================================
+let curId = SEGS[0].id;
+function A_render(){
+  progHTML('A');
+  document.getElementById('A-runtime').textContent=fmtShort(RUNTIME_MS);
+  // timeline markers
+  document.getElementById('A-tltrack').innerHTML=SEGS.map(s=>{
+    const left=100*(s.startMs+s.endMs)/2/RUNTIME_MS;
+    return `<div class="tl-mark ${s.id===curId?'cur':''}" data-id="${s.id}"
+      style="left:${left}%;background:${catColor(s.category)}" title="${label(s)} @ ${fmtShort(s.startMs)}"></div>`;
+  }).join('');
+  // list
+  document.getElementById('A-list').innerHTML=SEGS.map(s=>{
+    const st=stateOf(s), tk=st==='approved'?'✓':st==='rejected'?'✕':'';
+    return `<div class="row ${s.id===curId?'cur':''}" data-id="${s.id}">
+      <div class="bar" style="background:${catColor(s.category)}"></div>
+      <div class="r-main">
+        <div class="r-t">${CAT[s.category]?.g||''} ${label(s)}</div>
+        <div class="r-sub mono">#${s.id} · ${fmtShort(s.startMs)} · ${engineName[s.engine]}</div>
+      </div>
+      <div class="tick ${st}">${tk}</div>
+    </div>`;
+  }).join('');
+  A_stage();
+  document.querySelectorAll('#A .row,#A .tl-mark').forEach(el=>el.onclick=()=>{curId=+el.dataset.id;A_render();});
+}
+function A_stage(){
+  const s=SEGS.find(x=>x.id===curId); if(!s)return;
+  const tm=timing(s), t=TENTATIVE.includes(s.category);
+  const canMute=s.recommendedAction==='mute', canVoice=s.recommendedAction==='voice';
+  const acts=['mute','voice','blur','skip'].map(a=>`<option value="${a}" ${s.recommendedAction===a?'selected':''}>${actLabels[a]}</option>`).join('');
+  document.getElementById('A-stage').innerHTML=`
+    <div class="frame">
+      <div class="grad" style="background:${gradFor(s)}"></div>
+      <div class="cutstrip"><div class="cutband" style="left:34%;width:22%"></div>
+        <div class="cutlbl mono">${s.recommendedAction==='skip'?'skips':'flagged'} ${fmtShort(s.startMs)}–${fmtShort(s.endMs)}</div></div>
+      <div class="play"><div class="glyph">▶</div><div>Play scene</div></div>
+    </div>
+    <div class="clipbtns">
+      <button>▶ Play scene</button>
+      <button>⏭ Preview skip</button>
+      ${canMute?'<button>▶ Play muted</button>':''}
+      ${canVoice?'<button>▶ Play voice-removed</button>':''}
+      <button>✎ Edit timing</button>
+    </div>
+    <div class="stagehead">${cchip(s)}<span class="id mono">#${s.id}</span></div>
+    <div class="times mono">${fmtHMS(s.startMs)} <span style="color:var(--dim2)">→</span> ${fmtHMS(s.endMs)}
+      <span class="dur">${((s.endMs-s.startMs)/1000).toFixed(1)}s</span></div>
+    <p class="reason">${friendly(s)}</p>
+    ${tm?`<div class="timing-note ${tm.exact?'exact':'est'}">${tm.exact?'◆ ':'◈ '}${tm.label}</div>`:''}
+    <div class="provenance">Detected by ${engineName[s.engine]}${t?' · flagged as a weak signal, deliberately left for you to judge':''}</div>
+    <div class="decide">
+      <button class="big approve ${s.approved===true?'on':''}" data-act="approve">✓ Act on it <kbd>A</kbd></button>
+      <button class="big reject ${s.approved===false?'on':''}" data-act="reject">✕ Ignore it <kbd>R</kbd></button>
+      <div class="actwrap"><label class="lil">When acted on</label>
+        <select id="A-act">${acts}</select></div>
+    </div>`;
+  document.querySelector('#A .approve').onclick=()=>A_decide(s.approved===true?null:true);
+  document.querySelector('#A .reject').onclick=()=>A_decide(s.approved===false?null:false);
+  document.getElementById('A-act').onchange=e=>{s.recommendedAction=e.target.value;A_stage();};
+}
+function A_decide(v){const s=SEGS.find(x=>x.id===curId);s.approved=v;
+  // auto-advance to next undecided, the triage flow
+  const idx=SEGS.findIndex(x=>x.id===curId);
+  const nxt=SEGS.slice(idx+1).find(x=>x.approved===null);
+  if(nxt&&v!==null)curId=nxt.id;
+  A_render();}
+
+// ===================================================================
+// VARIANT B
+// ===================================================================
+let typeFilter='all';
+const picked=new Set();
+function B_render(){
+  progHTML('B');
+  B_chips(); B_bulk();
+  const grid=document.getElementById('B-grid');
+  grid.innerHTML=SEGS.filter(B_visible).map(B_card).join('');
+  grid.querySelectorAll('.card').forEach(el=>B_wire(el));
+}
+function B_visible(s){return typeFilter==='all'||s.category===typeFilter;}
+function B_chips(){
+  const counts={}; SEGS.forEach(s=>counts[s.category]=(counts[s.category]||0)+1);
+  const order=Object.keys(counts).sort((a,b)=>(CAT[b]?.sev||0)-(CAT[a]?.sev||0));
+  const chip=(k,lbl,n,col)=>`<button class="chip ${k===typeFilter?'on':''}" data-t="${k}">
+    ${col?`<span class="g" style="color:${col}">${CAT[k]?.g||''}</span>`:''}${lbl} <span class="n">${n}</span></button>`;
+  document.getElementById('B-chips').innerHTML=
+    chip('all','All',SEGS.length,'')+order.map(c=>chip(c,c.replace(/_/g,' '),counts[c],catColor(c))).join('');
+  document.querySelectorAll('#B-chips .chip').forEach(b=>b.onclick=()=>{typeFilter=b.dataset.t;B_render();});
+}
+function B_card(s){
+  const tm=timing(s), w=word(s), st=stateOf(s);
+  const canMute=s.recommendedAction==='mute', canVoice=s.recommendedAction==='voice';
+  const acts=['mute','voice','blur','skip'].map(a=>`<option value="${a}" ${s.recommendedAction===a?'selected':''}>${actLabels[a]}</option>`).join('');
+  return `<div class="card ${st} ${picked.has(s.id)?'picked':''}" data-id="${s.id}">
+    <div class="shot">
+      <div class="grad" style="background:${gradFor(s)}"></div>
+      <div class="sel ${picked.has(s.id)?'on':''}" title="Select for bulk / merge">✓</div>
+      <div class="badge">${cchip(s)}</div>
+      <div class="play">▶</div>
+      <div class="tstamp mono">${fmtShort(s.startMs)}</div>
+    </div>
+    <div class="body">
+      <div class="btitle">
+        <span class="t">${w?`“${w}”`:s.category.replace(/_/g,' ')}</span>
+        <span class="st mono">#${s.id} · ${((s.endMs-s.startMs)/1000).toFixed(1)}s</span>
+      </div>
+      <div class="rz">${friendly(s)}</div>
+      <div class="prov">
+        <span>${engineName[s.engine]}</span>
+        ${tm?`<span class="${tm.exact?'exact':'est'}">• ${tm.exact?'exact timing':'approx timing'}</span>`:''}
+      </div>
+      <div class="actions">
+        <button>▶ Play</button>
+        <button>⏭ Preview</button>
+        <button>✎ Timing</button>
+        <button class="more" title="Duplicate · Delete">⋯</button>
+      </div>
+      <div class="decide">
+        <button class="d approve ${s.approved===true?'on':''}">Act on it</button>
+        <button class="d reject ${s.approved===false?'on':''}">Ignore</button>
+        <select title="Action when acted on">${acts}</select>
+      </div>
+    </div>
+  </div>`;
+}
+function B_wire(el){
+  const id=+el.dataset.id, s=SEGS.find(x=>x.id===id);
+  el.querySelector('.sel').onclick=e=>{e.stopPropagation();picked.has(id)?picked.delete(id):picked.add(id);B_render();};
+  el.querySelector('.approve').onclick=()=>{s.approved=s.approved===true?null:true;B_render();};
+  el.querySelector('.reject').onclick=()=>{s.approved=s.approved===false?null:false;B_render();};
+  el.querySelector('.decide select').onchange=e=>{s.recommendedAction=e.target.value;B_render();};
+}
+function B_bulk(){
+  const bar=document.getElementById('B-bulkbar');
+  bar.classList.toggle('hidden',picked.size===0);
+  document.getElementById('B-selcount').textContent=picked.size;
+  bar.querySelector('.b-yes').onclick=()=>{picked.forEach(id=>SEGS.find(s=>s.id===id).approved=true);B_render();};
+  bar.querySelector('.b-no').onclick=()=>{picked.forEach(id=>SEGS.find(s=>s.id===id).approved=false);B_render();};
+  bar.querySelector('.b-clear').onclick=()=>{picked.clear();B_render();};
+  bar.querySelector('.b-merge').onclick=()=>{alert('(prototype) would merge '+picked.size+' findings into one span');};
+}
+
+// ===================================================================
+// VARIANT C — scene editor
+// ===================================================================
+const C_sceneStart=2020000, C_sceneEnd=2130000;      // 33:40 → 35:30 (the bad scene)
+const C_beat={startMs:2071000,endMs:2078000};        // story beat to keep (34:31–34:38)
+const C_pad=3000, C_winStart=C_sceneStart-C_pad, C_winEnd=C_sceneEnd+C_pad, C_winDur=C_winEnd-C_winStart;
+const C_PXPS=10.5, C_W=Math.round(C_winDur/1000*C_PXPS), C_SNAP=100;
+const C_ACT={
+  skip:{c:'#f85149',bg:'repeating-linear-gradient(45deg,#f8514977 0 8px,#f8514922 8px 16px)',lbl:'SKIP'},
+  mute:{c:'#4aa3ff',bg:'#4aa3ff44',lbl:'MUTE'},
+  voice:{c:'#2dd4bf',bg:'#2dd4bf44',lbl:'VOICE'},
+  blur:{c:'#a78bfa',bg:'#a78bfa44',lbl:'BLUR'}};
+let C={regions:[],playMs:C_beat.startMs,sel:null,preset:'one',nextId:1};
+const C_x=t=>(t-C_winStart)/C_winDur*C_W;
+const C_t=x=>{let v=Math.round((C_winStart+x/C_W*C_winDur)/C_SNAP)*C_SNAP;return Math.max(C_winStart,Math.min(C_winEnd,v));};
+const fmtC=ms=>{const t=ms/1000;return `${Math.floor(t/60)}:${pad(Math.floor(t%60))}.${Math.floor((t%1)*10)}`;};
+let C_noteTimer=null;
+function C_flash(msg){const n=document.getElementById('C-note');n.textContent=msg;clearTimeout(C_noteTimer);
+  C_noteTimer=setTimeout(()=>n.textContent='',1800);}
+
+function C_preset(p){
+  C.preset=p; C.sel=null; C.playMs=C_beat.startMs;
+  C.regions = p==='one' ? [{id:C.nextId++,startMs:C_sceneStart,endMs:C_sceneEnd,action:'skip'}] : [];
+  document.querySelectorAll('#C .presets button').forEach(b=>b.classList.toggle('on',b.dataset.preset===p));
+  document.getElementById('C-hint').innerHTML = p==='one'
+    ? `<b>Subtractive.</b> The whole scene is one <span style="color:#f85149">skip</span>. Move the playhead into the green beat, press <kbd>S</kbd> to split just before it and <kbd>S</kbd> again just after — then select the middle piece and press <kbd>Del</kbd>. The gap you leave is what viewers keep.`
+    : `<b>Additive.</b> Nothing is cut yet. Move the playhead to each bad part and press <kbd>A</kbd> to drop a skip, leaving the green beat untouched. Drag edges to fit; click a region to change skip→mute etc.`;
+  C_render();
+}
+
+function C_render(){
+  document.getElementById('C-win').textContent=`${fmtC(C_sceneStart)} → ${fmtC(C_sceneEnd)} · ${((C_sceneEnd-C_sceneStart)/1000)|0}s`;
+  document.getElementById('C-track').style.width=C_W+'px';
+  // filmstrip (fake frames)
+  let film=''; const cols=26;
+  for(let i=0;i<cols;i++){const h=(i*41+18)%360;
+    film+=`<div class="f" style="background:linear-gradient(135deg,hsl(${h} 22% 24%),hsl(${(h+50)%360} 26% 12%))"></div>`;}
+  const F=document.getElementById('C-film'); F.innerHTML=film; F.style.width=C_W+'px';
+  // waveform (deterministic fake peaks)
+  const cv=document.getElementById('C-wave'); cv.width=C_W; cv.style.width=C_W+'px';
+  const ctx=cv.getContext('2d'); ctx.clearRect(0,0,C_W,46); ctx.fillStyle='#3a4650';
+  for(let x=0;x<C_W;x+=3){const t=x/C_W;
+    const a=(0.4+0.32*Math.sin(t*38)+0.22*Math.sin(t*127)+0.16*Math.sin(t*9))*Math.abs(Math.sin(t*84));
+    const hh=Math.max(2,Math.abs(a)*42); ctx.fillRect(x,(46-hh)/2,2,hh);}
+  // lane: beat ghost + regions
+  const lane=document.getElementById('C-lane'); lane.style.width=C_W+'px';
+  lane.innerHTML='<div class="keeplane">plays normally where no region covers</div>'
+    +`<div class="beat" style="left:${C_x(C_beat.startMs)}px;width:${C_x(C_beat.endMs)-C_x(C_beat.startMs)}px"><span class="bl">▲ keep: story beat</span></div>`;
+  C.regions.forEach(r=>{
+    const a=C_ACT[r.action]; const el=document.createElement('div');
+    el.className='region'+(C.sel===r.id?' sel':'');
+    el.style.cssText=`left:${C_x(r.startMs)}px;width:${Math.max(6,C_x(r.endMs)-C_x(r.startMs))}px;background:${a.bg};border-color:${a.c}`;
+    el.innerHTML=`<div class="redge l"></div><div class="redge r"></div>
+      <div class="rlabel">${a.lbl}</div><div class="rlen mono">${((r.endMs-r.startMs)/1000).toFixed(1)}s</div>
+      ${r.action!=='skip'?'<div class="rotag">render-only</div>':''}`;
+    el.addEventListener('mousedown',e=>{
+      if(e.target.classList.contains('redge'))C_dragEdge(e,r,e.target.classList.contains('l'));
+      else C_dragBody(e,r,el);
+    });
+    lane.appendChild(el);
+  });
+  // playhead
+  document.getElementById('C-ph').style.left=C_x(C.playMs)+'px';
+  document.getElementById('C-phlbl').textContent='▮ '+fmtC(C.playMs);
+  C_inspector(); C_result();
+}
+
+function C_inspector(){
+  const insp=document.getElementById('C-insp');
+  const r=C.regions.find(x=>x.id===C.sel);
+  if(!r){insp.innerHTML='<span class="ihint">Click a region to set its action — <b style="color:#f85149">skip</b> (works live), or mute / voice / blur (render-only) — or delete it.</span>';return;}
+  const seg=['skip','mute','voice','blur'].map(k=>`<button data-act="${k}" class="${r.action===k?'on':''}">${k}</button>`).join('');
+  insp.innerHTML=`<div class="seg">${seg}</div>
+    <span class="times">Region <b>${fmtC(r.startMs)}</b> → <b>${fmtC(r.endMs)}</b> · ${((r.endMs-r.startMs)/1000).toFixed(1)}s</span>
+    ${r.action!=='skip'?'<span class="ro">• applies only in a rendered clean copy</span>':''}
+    <button class="idel">✕ Delete region</button>`;
+  insp.querySelectorAll('.seg button').forEach(b=>b.onclick=()=>{r.action=b.dataset.act;C_render();});
+  insp.querySelector('.idel').onclick=C_del;
+}
+
+function C_merge(iv){const s=iv.map(x=>x.slice()).sort((a,b)=>a[0]-b[0]);const o=[];
+  for(const v of s){if(o.length&&v[0]<=o[o.length-1][1])o[o.length-1][1]=Math.max(o[o.length-1][1],v[1]);else o.push(v.slice());}return o;}
+function C_result(){
+  const el=document.getElementById('C-result');
+  const covered=C_merge(C.regions.map(r=>[r.startMs,r.endMs]));
+  const gaps=[]; let cur=C_sceneStart;
+  for(const [a,b] of covered){const aa=Math.max(a,C_sceneStart),bb=Math.min(b,C_sceneEnd);
+    if(bb<=C_sceneStart||aa>=C_sceneEnd)continue; if(aa>cur)gaps.push([cur,aa]); cur=Math.max(cur,bb);}
+  if(cur<C_sceneEnd)gaps.push([cur,C_sceneEnd]);
+  const byAct={}; C.regions.forEach(r=>byAct[r.action]=(byAct[r.action]||0)+1);
+  const mix=Object.keys(byAct).map(k=>`${byAct[k]} ${k}`).join(', ')||'none';
+  const beatCut=C.regions.some(r=>r.startMs<C_beat.endMs&&r.endMs>C_beat.startMs);
+  const keptStr=gaps.length?gaps.map(g=>`${fmtC(g[0])}–${fmtC(g[1])}`).join(', '):'nothing — the whole scene is covered';
+  el.innerHTML=`<b>${C.regions.length}</b> region(s) (${mix}). `
+    +`Viewers keep <b>${gaps.length}</b> gap(s): <span class="keep">${keptStr}</span>.<br>`
+    +(beatCut
+      ? `<span class="warn">⚠ the story beat is partly cut</span> — split around it and delete the covering piece to protect it.`
+      : `<span class="keep">✓ the story beat (34:31–34:38) is kept</span> — no region covers it.`);
+}
+
+function C_dragBody(e,r,el){
+  e.preventDefault(); C.sel=r.id; el.classList.add('sel'); C_inspector();
+  const sx=e.clientX, s0=r.startMs, dur=r.endMs-r.startMs; let moved=false;
+  const move=ev=>{moved=true; let ns=C_t(C_x(s0)+(ev.clientX-sx));
+    ns=Math.max(C_winStart,Math.min(C_winEnd-dur,ns)); r.startMs=ns; r.endMs=ns+dur;
+    el.style.left=C_x(r.startMs)+'px'; document.getElementById('C-phlbl').textContent='▮ '+fmtC(C.playMs);};
+  const up=()=>{document.removeEventListener('mousemove',move);document.removeEventListener('mouseup',up);C_render();};
+  document.addEventListener('mousemove',move);document.addEventListener('mouseup',up);
+}
+function C_dragEdge(e,r,isLeft){
+  e.preventDefault(); C.sel=r.id;
+  const move=ev=>{const rect=document.getElementById('C-lane').getBoundingClientRect();
+    const t=C_t(ev.clientX-rect.left);
+    if(isLeft)r.startMs=Math.min(t,r.endMs-200); else r.endMs=Math.max(t,r.startMs+200); C_render();};
+  const up=()=>{document.removeEventListener('mousemove',move);document.removeEventListener('mouseup',up);};
+  document.addEventListener('mousemove',move);document.addEventListener('mouseup',up);
+}
+function C_add(){const s=C.playMs, en=Math.min(s+1500,C_winEnd); if(en-s<200){C_flash('playhead is at the end');return;}
+  const r={id:C.nextId++,startMs:s,endMs:en,action:'skip'}; C.regions.push(r); C.sel=r.id; C_render();}
+function C_split(){const r=C.regions.find(x=>C.playMs>x.startMs+100&&C.playMs<x.endMs-100);
+  if(!r){C_flash('move the playhead inside a region, then Split');return;}
+  C.regions.push({id:C.nextId++,startMs:C.playMs,endMs:r.endMs,action:r.action}); r.endMs=C.playMs; C.sel=null; C_render();}
+function C_del(){if(C.sel==null){C_flash('click a region to select it first');return;}
+  C.regions=C.regions.filter(x=>x.id!==C.sel); C.sel=null; C_render();}
+function C_key(e){const k=e.key.toLowerCase();
+  if(k==='a'){e.preventDefault();C_add();}
+  else if(k==='s'){e.preventDefault();C_split();}
+  else if(e.key==='Delete'||e.key==='Backspace'){e.preventDefault();C_del();}
+  else if(k===','){e.preventDefault();C.playMs=Math.max(C_winStart,C.playMs-500);C_render();}
+  else if(k==='.'){e.preventDefault();C.playMs=Math.min(C_winEnd,C.playMs+500);C_render();}}
+function C_init(){
+  document.querySelectorAll('#C .presets button').forEach(b=>b.onclick=()=>C_preset(b.dataset.preset));
+  document.querySelector('#C .add').onclick=C_add;
+  document.querySelector('#C .split').onclick=C_split;
+  document.querySelector('#C .del').onclick=C_del;
+  document.querySelectorAll('#C [data-nudge]').forEach(b=>b.onclick=()=>{
+    C.playMs=Math.max(C_winStart,Math.min(C_winEnd,C.playMs+ +b.dataset.nudge));C_render();});
+  document.getElementById('C-lane').addEventListener('mousedown',e=>{
+    if(e.target.closest('.region'))return;
+    C.playMs=C_t(e.clientX-e.currentTarget.getBoundingClientRect().left);C.sel=null;C_render();});
+  ['C-film','C-wave'].forEach(id=>document.getElementById(id).addEventListener('mousedown',e=>{
+    const rect=document.getElementById('C-lane').getBoundingClientRect();
+    C.playMs=C_t(e.clientX-rect.left);C_render();}));
+  C_preset('one');
+}
+
+// ===================================================================
+// switcher + keyboard
+// ===================================================================
+const VARIANTS=[['A','Focus-mode workspace'],['B','Polished grid'],['C','Scene editor — carve one scene']];
+function curVariant(){const p=new URLSearchParams(location.search).get('variant');return VARIANTS.some(v=>v[0]===p)?p:'A';}
+function showVariant(k){
+  ['A','B','C'].forEach(x=>document.getElementById(x).classList.toggle('hidden',k!==x));
+  const v=VARIANTS.find(x=>x[0]===k);
+  document.getElementById('sw-lab').innerHTML=`${k} — <small>${v[1]}</small>`;
+  if(k==='A')A_render(); else if(k==='B')B_render(); else C_render();
+}
+function setVariant(k){const u=new URL(location);u.searchParams.set('variant',k);history.replaceState({},'',u);showVariant(k);}
+function cycle(d){const i=VARIANTS.findIndex(v=>v[0]===curVariant());setVariant(VARIANTS[(i+d+VARIANTS.length)%VARIANTS.length][0]);}
+document.getElementById('sw-prev').onclick=()=>cycle(-1);
+document.getElementById('sw-next').onclick=()=>cycle(1);
+document.addEventListener('keydown',e=>{
+  const tag=(document.activeElement?.tagName||'').toLowerCase();
+  if(tag==='input'||tag==='textarea'||tag==='select')return;
+  if(e.key==='ArrowLeft')return cycle(-1);
+  if(e.key==='ArrowRight')return cycle(1);
+  if(curVariant()==='C')return C_key(e);
+  if(curVariant()!=='A')return;
+  const k=e.key.toLowerCase();
+  if(k==='j'||k==='k'){const i=SEGS.findIndex(s=>s.id===curId);
+    curId=SEGS[(i+(k==='j'?1:-1)+SEGS.length)%SEGS.length].id;A_render();}
+  if(k==='a')A_decide(SEGS.find(s=>s.id===curId).approved===true?null:true);
+  if(k==='r')A_decide(SEGS.find(s=>s.id===curId).approved===false?null:false);
+});
+C_init();
+showVariant(curVariant());
+</script>
