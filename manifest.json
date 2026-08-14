@@ -9,8 +9,16 @@
     "imageUrl": "",
     "versions": [
       {
+        "version": "0.2.4.0",
+        "changelog": "Flag a moment during playback. A new flag button on the Jellyfin video player captures a short window around the current time (now +/- 1.5s, configurable) as an unapproved finding, so you can mark a bad word or scene while watching instead of hunting for it later in the review page. It appears in the review page as a manual finding to confirm, retime or classify — nothing acts during playback. Admin-only. The button is added by injecting a small script into the web client on startup; if the web directory is read-only the plugin log explains the one-line manual step. Also folds the old separate settings page into the tabbed Studio dashboard.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.4.0.zip",
+        "checksum": "684b98dc5bb9c8e61a5e1eb1a15d42b7",
+        "timestamp": "2026-08-14T18:24:13"
+      },
+      {
         "version": "0.2.3.0",
-        "changelog": "Analysis schedule: restrict library analysis to chosen hours so it doesn't use the GPU while you're watching. A new Analysis schedule editor on the settings page sets a per-weekday allowed window (with a live allowed/paused status). The worker enforces it — queued passes wait for the window, and the long visual pass pauses at a checkpoint and resumes when it reopens; short profanity passes finish, and rendering is never delayed. Requires a worker restart to take effect. Builds on 0.2.2.0.",
+        "changelog": "Analysis schedule: restrict library analysis to chosen hours so it doesn't use the GPU while you're watching. A new Analysis schedule editor on the settings page sets a per-weekday allowed window (with a live allowed/paused status). The worker enforces it \u2014 queued passes wait for the window, and the long visual pass pauses at a checkpoint and resumes when it reopens; short profanity passes finish, and rendering is never delayed. Requires a worker restart to take effect. Builds on 0.2.2.0.",
         "targetAbi": "10.11.0.0",
         "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.3.0.zip",
         "checksum": "68fc03ebc2f8032e73ac5a6e57585d92",
