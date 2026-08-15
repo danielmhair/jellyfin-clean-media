@@ -1,0 +1,83 @@
+name: Release plugin
+
+# Auto-release the Jellyfin plugin whenever its source changes on main.
+#
+# You just push to main. This bumps the version (patch of the 3rd segment),
+# builds the plugin, writes the release zip into plugin/releases/, updates
+# manifest.json, and commits it all back — so Jellyfin (which installs from the
+# raw manifest URL) sees the new version with no manual step.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'plugin/Jellyfin.Plugin.CleanMedia/**'
+
+permissions:
+  contents: write
+
+# Serialize releases so two quick pushes can't both bump to the same version.
+concurrency:
+  group: release-plugin
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Don't loop on the workflow's own release commit. (GITHUB_TOKEN pushes don't
+    # retrigger workflows anyway — this is belt-and-suspenders.)
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}   # be on the branch (not detached) so we can push
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Compute next version
+        id: ver
+        run: |
+          proj=plugin/Jellyfin.Plugin.CleanMedia/Jellyfin.Plugin.CleanMedia.csproj
+          cur=$(sed -n 's#.*<AssemblyVersion>\([^<]*\)</AssemblyVersion>.*#\1#p' "$proj")
+          IFS=. read -r a b c d <<< "$cur"
+          next="${a}.${b}.$((c + 1)).0"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+          echo "Releasing $cur -> $next"
+
+      - name: Gather change context (merged PR + commits since last release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          last=$(git log --grep='^Release plugin' -n1 --format=%H 2>/dev/null || true)
+          range=HEAD
+          [ -n "$last" ] && range="$last..HEAD"
+          log=$(git log "$range" --format='- %s%n%b' -- plugin/ worker/ 2>/dev/null | head -n 80)
+          # If this push came from a merged PR, its title/body is the best summary.
+          pr=$(gh pr list --state merged --search "$HEAD_SHA" \
+                 --json title,body --jq '.[0] | select(. != null) | "PR: \(.title)\n\(.body)"' \
+               2>/dev/null || true)
+          { echo "CONTEXT<<CTX_EOF"; printf '%s\n\n%s\n' "$pr" "$log"; echo "CTX_EOF"; } >> "$GITHUB_ENV"
+
+      - name: Write changelog with Claude (falls back to the commit subject)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MSG: ${{ github.event.head_commit.message }}
+        run: python3 scripts/ci_changelog.py
+
+      - name: Build plugin & update manifest
+        run: scripts/release-plugin.sh "${{ steps.ver.outputs.next }}"   # uses $CHANGELOG
+
+      - name: Commit & push the release
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add manifest.json plugin/releases \
+            plugin/Jellyfin.Plugin.CleanMedia/Jellyfin.Plugin.CleanMedia.csproj
+          git commit -m "Release plugin ${{ steps.ver.outputs.next }} [skip ci]"
+          git push origin "${{ github.ref_name }}"

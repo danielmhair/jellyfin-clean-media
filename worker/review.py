@@ -987,6 +987,9 @@ PAGE = r"""<!doctype html>
   --pos:#2ea043; --pos-d:#12361f; --neg:#da3633; --neg-d:#3d1517;
   --pick:#3b82f6; --undecided:#c9a227;
   --radius:12px;
+  /* Discreet-mode blur: enough to lose detail, not so much you can't tell what's
+     happening. Tune this one value. */
+  --discreet-blur:20px;
   /* one colour + one glyph per category, severity-ranked (mirrors _MERGE_SEVERITY) */
   --c-nudity:#ff5c8a; --c-sexual_activity:#ff6b6b; --c-intense_kissing:#ff9f45;
   --c-suggestive:#e0b341; --c-violence:#a78bfa; --c-gore:#e5484d; --c-profanity:#4aa3ff;
@@ -1107,7 +1110,7 @@ kbd{font-family:ui-monospace,monospace}
 /* Discreet = the picture (frame OR moving video) is heavily blurred but still
    shown, so you can play through a bad scene to find/edit it without seeing the
    detail. Hold-to-reveal drops the blur for a clean peek. */
-#D .monitor.discreet .mframe,#D .monitor.discreet .grad,#D .monitor.discreet .mvideo{filter:blur(42px) brightness(.62) saturate(.85);transform:scale(1.18)}
+#D .monitor.discreet .mframe,#D .monitor.discreet .grad,#D .monitor.discreet .mvideo{filter:blur(var(--discreet-blur)) brightness(.75) saturate(.9);transform:scale(1.06)}
 #D .monitor .mnote{position:relative;z-index:3;text-align:center;color:#fff;text-shadow:0 2px 10px #000;pointer-events:none;padding:0 12px}
 #D .monitor .mnote .glyph{font-size:34px}
 #D .monitor .mnote .lab{margin-top:6px;font-size:13px;font-weight:600}

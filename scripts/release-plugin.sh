@@ -83,10 +83,11 @@ print(hashlib.md5(open(sys.argv[1],'rb').read()).hexdigest())
 " "$zip_path")
 
 echo "==> writing manifest.json"
-"$UV" run python - "$version" "$checksum" "$raw/$releases/$zip_name" <<'PY'
+"$UV" run python - "$version" "$checksum" "$raw/$releases/$zip_name" \
+  "${CHANGELOG:-See the repository for changes.}" <<'PY'
 import datetime, json, os, sys
 
-version, checksum, source_url = sys.argv[1:4]
+version, checksum, source_url, changelog = sys.argv[1:5]
 path = "manifest.json"
 manifest = json.load(open(path, encoding="utf-8")) if os.path.exists(path) else []
 if not manifest:
@@ -103,7 +104,7 @@ if not manifest:
 
 entry = {
     "version": version,
-    "changelog": "See the repository for changes.",
+    "changelog": changelog,
     "targetAbi": "10.11.0.0",
     "sourceUrl": source_url,
     "checksum": checksum,
