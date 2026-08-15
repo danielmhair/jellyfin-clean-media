@@ -57,8 +57,10 @@ from .review import (
     create_segment,
     delete_segment,
     grab_thumbnail,
+    library_view,
     load_timeline,
     merge_into_one,
+    render_landing,
     render_page,
     media_runtime_ms,
     resolve_media,
@@ -329,13 +331,39 @@ def patch_segment(job_id: str, segment_id: int, patch: SegmentPatch) -> Segment:
     return seg
 
 
+@app.get("/api/library")
+def library(q: str = "", limit: int = 50, offset: int = 0) -> dict:
+    """The review switcher's library view. No ``q``: the work-list (analyzed
+    films, needs-review first, then reviewed). With ``q``: fuzzy search over every
+    video in every collection, including unanalyzed ones (which open for manual
+    review). Each item carries its review status and undecided count."""
+    return library_view(q, max(1, min(limit, 200)), max(0, offset))
+
+
 @app.get("/api/review", response_class=HTMLResponse)
-def review_page(path: str) -> HTMLResponse:
-    """Administrator review UI for one film."""
-    media = resolve_media(path) or Path(path)
+def review_page(path: str = "") -> HTMLResponse:
+    """Administrator review UI.
+
+    With no ``path`` it serves a landing page to browse/search the whole library
+    and open any film (the entry point the plugin links to). With a ``path`` it
+    opens the Studio for that film — for ANY existing video, even one with no
+    analysis yet, so it can be reviewed by hand: scrub, add cuts at the playhead,
+    set actions. The `.cleanmedia.json` sidecar is created on the first added
+    segment, so analysis is an optional head-start, not a prerequisite.
+    """
+    if not path.strip():
+        return HTMLResponse(render_landing())
+    media = resolve_media(path)
+    if media is None:
+        literal = Path(path)
+        media = literal if literal.is_file() else None
+    if media is None:
+        raise HTTPException(404, f"media not found: {path}")
     timeline = load_timeline(media)
     if timeline is None:
-        raise HTTPException(404, f"no analysis found for {media}")
+        # No analysis — open an empty Studio for manual review. The real
+        # fingerprint is written when the first segment is added (create_segment).
+        timeline = Timeline(mediaFingerprint="", segments=[])
     return HTMLResponse(render_page(media, timeline))
 
 

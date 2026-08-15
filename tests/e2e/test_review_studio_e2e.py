@@ -26,23 +26,29 @@ def _select(page, sid):
 # ---------------------------------------------------------------- discreet mode
 
 
-def test_discreet_mode_default_and_hold_to_reveal(page):
+def test_discreet_mode_default_blurs_and_hold_to_reveal_clears(page):
     monitor = page.locator("#D-monitor")
+    # Discreet on by default: the picture is BLURRED but still shown (you can play
+    # through a bad scene to find it), with a small badge; not hidden.
     assert "discreet" in (monitor.get_attribute("class") or "")
     assert page.locator("#D-veil").is_visible()
-    # The picture frame is hidden until revealed.
-    assert page.locator("#D-mframe").is_hidden()
+    assert page.locator("#D-mframe").is_visible()  # the (blurred) frame is up, not hidden
 
-    # Hold the reveal button: the picture comes up and a real frame loads.
+    # Hold the reveal button: the blur drops (the .discreet class comes off) and a
+    # real frame is loaded.
     page.dispatch_event("#D-reveal", "mousedown")
-    page.wait_for_selector("#D-mframe:visible")
+    page.wait_for_function(
+        "() => !document.getElementById('D-monitor').classList.contains('discreet')"
+    )
     page.wait_for_function(
         "() => { const i=document.getElementById('D-mframe');"
         " return i && i.naturalWidth > 0; }"
     )
     page.dispatch_event("#D-reveal", "mouseup")
-    # Releasing hides it again.
-    page.wait_for_selector("#D-mframe", state="hidden")
+    # Releasing re-blurs (the class returns).
+    page.wait_for_function(
+        "() => document.getElementById('D-monitor').classList.contains('discreet')"
+    )
 
 
 # --------------------------------------------------------------- inline reasons
@@ -457,17 +463,20 @@ def test_bulk_leave_all_of_a_type(page, sidecar):
 # ------------------------------------------------------ playback (Phase 1)
 
 
-def test_video_mode_reveals_and_visual_mode_stays_private(page):
+def test_picture_mode_does_not_defeat_discreet_blur(page):
     monitor = page.locator("#D-monitor")
-    # Discreet on by default → private (Visual mode).
+    # Discreet on by default. The blur IS the privacy layer now — switching to
+    # Video mode (moving picture) does NOT reveal; the picture stays blurred.
     assert "discreet" in (monitor.get_attribute("class") or "")
     page.click('#D-picmode button[data-pic="video"]')
-    # Video mode is an explicit reveal even under discreet.
+    page.wait_for_timeout(150)
+    assert "discreet" in (monitor.get_attribute("class") or "")  # still blurred
+    # Only hold-to-reveal clears it, in any picture mode.
+    page.dispatch_event("#D-reveal", "mousedown")
     page.wait_for_function(
         "() => !document.getElementById('D-monitor').classList.contains('discreet')"
     )
-    # Back to Visual → private again.
-    page.click('#D-picmode button[data-pic="visual"]')
+    page.dispatch_event("#D-reveal", "mouseup")
     page.wait_for_function(
         "() => document.getElementById('D-monitor').classList.contains('discreet')"
     )
@@ -607,6 +616,22 @@ def test_film_cleaned_stream_cuts_every_approved_skip_ahead(page, sidecar):
     assert any(s.startswith("20000-") for s in spans), spans  # the nudity cut
     assert any(s.startswith("60000-") for s in spans), spans  # the suggestive cut
     assert q.get("startMs", ["-1"])[0] == "8000"
+
+
+def test_library_switcher_lists_films_and_searches(page):
+    """The top-left combobox loads the library work-list from /api/library, shows
+    a status badge per film, and filters as you type (and empties on a miss)."""
+    page.click("#D-swtrigger")
+    page.wait_for_selector("#D-swpanel:not(.hidden)")
+    page.wait_for_function("() => document.querySelectorAll('#D-swlist .swrow').length >= 1")
+    assert page.locator("#D-swlist .swrow .swbadge").first.is_visible()
+
+    page.fill("#D-swinput", "some")  # the fixture film is "Some Film (2010)"
+    page.wait_for_function(
+        "() => [...document.querySelectorAll('#D-swlist .swn')].some(n => /some/i.test(n.textContent))"
+    )
+    page.fill("#D-swinput", "zzznotarealfilm")
+    page.wait_for_selector("#D-swlist .swempty")
 
 
 def test_the_workspace_fits_the_viewport_without_a_page_scrollbar(page):

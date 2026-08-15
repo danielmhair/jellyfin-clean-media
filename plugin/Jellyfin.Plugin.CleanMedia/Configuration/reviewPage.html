@@ -16,6 +16,7 @@
                         <span><span class="dot-live" id="CmLiveDot"></span><span id="CmLiveText">Checking worker…</span></span>
                         <span id="CmGpuStat" style="display:none;"><span class="k">GPU</span> <span id="CmGpuName"></span></span>
                     </div>
+                    <button class="cmbtn primary" id="CmReviewLibrary" title="Browse and review any film — analyzed or not">🎬 Review library</button>
                 </div>
 
                 <div class="tabbar" id="CmTabs">
@@ -1059,6 +1060,18 @@
     // ======================================================================
     //  WIRING
     // ======================================================================
+    // Open the worker's review Studio landing — browse/search the whole library
+    // and open any film (analyzed or not) for review.
+    var reviewLib = page.querySelector('#CmReviewLibrary');
+    if (reviewLib) {
+        reviewLib.onclick = function () {
+            if (state.workerUrl) {
+                window.open(state.workerUrl.replace(/\/+$/, '') + '/api/review', '_blank');
+            } else {
+                alert('Set the Worker URL in Settings first.');
+            }
+        };
+    }
     page.querySelectorAll('#CmTabs button').forEach(function (b) {
         b.onclick = function () {
             var t = b.dataset.t;

@@ -104,10 +104,10 @@ def test_page_is_the_studio_workspace(tmp_path):
     """The Studio page leads with discreet mode and the cut/leave language."""
     media, timeline = _film(tmp_path)
     html = render_page(media, timeline)
-    assert "Discreet mode" in html  # picture hidden by default (a parent reviews)
+    assert "Discreet mode" in html  # picture blurred by default (a parent reviews)
     assert "Hold to reveal" in html  # the escape hatch
     assert "Cut it out" in html and "Leave it in" in html  # decision language
-    assert "picture hidden" in html
+    assert "blurred · discreet" in html  # the corner badge (picture blurred, not hidden)
 
 
 def test_page_has_minimap_editor_and_merge(tmp_path):
@@ -244,6 +244,68 @@ def test_stream_command_cleaned_streams_a_playable_compressed_mp4(tmp_path):
         capture_output=True, text=True,
     ).stdout.strip())
     assert 14.0 < dur < 18.0  # 26s remaining window minus the 10s cut
+
+
+def _library_film(root, collection, name, segments=None):
+    """A film under root/collection, optionally with a sidecar of segments."""
+    coll = root / collection
+    coll.mkdir(exist_ok=True)
+    media = coll / name
+    media.write_bytes(b"video bytes")
+    if segments is not None:
+        sidecar_for(media).write_text(
+            json.dumps({"mediaFingerprint": "fp", "segments": segments}), encoding="utf-8"
+        )
+    return media
+
+
+def test_library_view_worklist_search_and_status(tmp_path, monkeypatch):
+    """The switcher's data: default = analyzed films, needs-review first then
+    reviewed; searching also finds unanalyzed films (which open for manual
+    review). Status is derived from the undecided count."""
+    monkeypatch.setenv("CLEANMEDIA_MEDIA_ROOTS", str(tmp_path))
+    from worker.review import library_view, warm_media_index
+
+    def seg(i, approved):
+        return {"id": i, "startMs": i, "endMs": i + 1, "category": "profanity",
+                "confidence": 1.0, "engine": "e", "recommendedAction": "mute",
+                "approved": approved}
+
+    _library_film(tmp_path, "Action", "Bang (2020).mkv", [seg(1, None), seg(2, None)])  # ready: 2 undecided
+    _library_film(tmp_path, "Action", "Boom (2019).mkv", [seg(1, True)])                # reviewed
+    _library_film(tmp_path, "Action", "Buzz (2021).mkv", [seg(1, True), seg(2, None)])  # in_progress
+    _library_film(tmp_path, "Drama", "Quiet Film (2021).mkv")                            # unanalyzed (no sidecar)
+    warm_media_index()
+
+    # Default work-list: analyzed only, ordered ready -> in_progress -> reviewed.
+    work = library_view()["items"]
+    assert [it["status"] for it in work] == ["ready", "in_progress", "reviewed"]
+    assert "Quiet Film (2021)" not in [it["name"] for it in work]  # untouched is search-only
+    assert work[0]["undecidedCount"] == 2 and work[0]["collection"] == "Action"
+
+    # Search finds the unanalyzed film (it opens for manual review).
+    hits = library_view("quiet")["items"]
+    assert [it["name"] for it in hits] == ["Quiet Film (2021)"]
+    assert hits[0]["status"] == "unanalyzed"
+
+
+def test_library_view_summary_refreshes_after_a_decision(tmp_path, monkeypatch):
+    """Deciding a finding must move a film out of 'ready' — the cached summary is
+    invalidated on the sidecar write, so the switcher isn't stale."""
+    monkeypatch.setenv("CLEANMEDIA_MEDIA_ROOTS", str(tmp_path))
+    from worker.review import library_view, set_approval, warm_media_index
+
+    def seg(i, approved):
+        return {"id": i, "startMs": i, "endMs": i + 1, "category": "profanity",
+                "confidence": 1.0, "engine": "e", "recommendedAction": "mute",
+                "approved": approved}
+
+    media = _library_film(tmp_path, "X", "One (2020).mkv", [seg(1, None)])
+    warm_media_index()
+    assert library_view()["items"][0]["status"] == "ready"
+
+    set_approval(media, 1, True)  # decide it -> sidecar rewritten -> summary invalidated
+    assert library_view()["items"][0]["status"] == "reviewed"
 
 
 def test_build_preview_clip_blurs_a_blur_finding(tmp_path):

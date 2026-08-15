@@ -141,6 +141,28 @@ def _scene_film(tmp_path):
     return media
 
 
+def test_review_opens_an_unanalyzed_film_for_manual_review(tmp_path, monkeypatch):
+    """Any existing video opens in the Studio — even with no analysis — so it can
+    be reviewed by hand (scrub + add cuts). It used to 404 "no analysis found";
+    manual add-at-playhead makes analysis a head-start, not a prerequisite."""
+    monkeypatch.setenv("CLEANMEDIA_MEDIA_ROOTS", str(tmp_path))
+    media = tmp_path / "Unwatched (2010).mkv"
+    media.write_bytes(b"exists but is not analyzed")
+    client = TestClient(app)
+
+    r = client.get("/api/review", params={"path": str(media)})
+    assert r.status_code == 200
+    assert "D-monitor" in r.text  # the Studio rendered, with an empty timeline
+    # A genuinely missing file still 404s.
+    assert client.get("/api/review", params={"path": "Nope.mkv"}).status_code == 404
+
+    # No path at all -> the library landing (browse/search any film), which the
+    # plugin's "Review library" button links to.
+    landing = client.get("/api/review")
+    assert landing.status_code == 200
+    assert "/api/library" in landing.text and "Search any video" in landing.text
+
+
 def test_scrub_audio_rejects_unknown_media(tmp_path, monkeypatch):
     monkeypatch.setenv("CLEANMEDIA_MEDIA_ROOTS", str(tmp_path))
     client = TestClient(app)

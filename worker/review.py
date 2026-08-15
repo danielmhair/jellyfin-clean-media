@@ -173,6 +173,112 @@ def save_timeline(media: Path, timeline: Timeline) -> None:
     sidecar_for(media).write_text(
         json.dumps(timeline.model_dump(), indent=2), encoding="utf-8"
     )
+    _invalidate_summary(media)  # its review counts changed
+
+
+# ---------- library view (the top-left video switcher) ----------
+
+#: Video containers we treat as reviewable films (the media index also holds
+#: sidecars, subtitles, artwork — filter to these).
+VIDEO_EXTS = {
+    ".mkv", ".mp4", ".m4v", ".avi", ".mov", ".ts", ".webm", ".wmv", ".mpg", ".mpeg",
+}
+
+# Per-film review summary {count, undecided}, cached in memory and dropped on any
+# write to that film's sidecar (save_timeline). Reading a small sidecar is cheap;
+# caching spares the (often NAS) share on every library refresh, without the
+# per-file stat that made the old status path slow.
+_summary_cache: dict[str, dict] = {}
+_summary_lock = threading.Lock()
+
+
+def _invalidate_summary(media: Path) -> None:
+    with _summary_lock:
+        _summary_cache.pop(str(media), None)
+
+
+def _film_summary(media: Path) -> dict:
+    key = str(media)
+    with _summary_lock:
+        cached = _summary_cache.get(key)
+    if cached is not None:
+        return cached
+    tl = load_timeline(media)
+    if tl is None:
+        summ = {"count": 0, "undecided": 0}
+    else:
+        summ = {
+            "count": len(tl.segments),
+            "undecided": sum(1 for s in tl.segments if s.approved is None),
+        }
+    with _summary_lock:
+        _summary_cache[key] = summ
+    return summ
+
+
+def _film_status(analyzed: bool, count: int, undecided: int) -> str:
+    if not analyzed:
+        return "unanalyzed"            # no sidecar — search-only, opens for manual review
+    if undecided <= 0:
+        return "reviewed"             # every finding decided (or analysis found none)
+    if undecided == count:
+        return "ready"                # analyzed, nothing decided yet
+    return "in_progress"              # part-way through
+
+
+def _subseq(q: str, s: str) -> bool:
+    """A loose fuzzy match: are q's chars an in-order subsequence of s?"""
+    it = iter(s)
+    return all(c in it for c in q)
+
+
+def _match_rank(q: str, name: str) -> int:
+    if name.startswith(q):
+        return 0
+    if q in name:
+        return 1
+    return 2  # subsequence (already filtered to matches)
+
+
+#: Order the default work-list puts statuses in: needs-your-attention first.
+_STATUS_ORDER = {"ready": 0, "in_progress": 1, "reviewed": 2, "unanalyzed": 3}
+
+
+def library_view(query: str = "", limit: int = 50, offset: int = 0) -> dict:
+    """The top-left switcher's data. With no ``query`` it is the review work-list
+    — analyzed films, needs-review first (most-undecided first), then reviewed.
+    With a ``query`` it fuzzy-matches **every** video in every collection
+    (including unanalyzed ones, which open for manual review), ranked by match.
+    Rendered (Clean) copies are excluded — they're outputs, not sources.
+    """
+    index, sidecars = _ensure_index()
+    q = query.strip().lower()
+    items: list[dict] = []
+    for name, path in index.items():
+        if path.suffix.lower() not in VIDEO_EXTS or "(clean)" in name:
+            continue
+        analyzed = sidecar_for(path).name.lower() in sidecars
+        if not q and not analyzed:
+            continue  # default list is analyzed-only; the untouched library is search-only
+        if q and q not in name and not _subseq(q, name):
+            continue
+        summ = _film_summary(path) if analyzed else {"count": 0, "undecided": 0}
+        status = _film_status(analyzed, summ["count"], summ["undecided"])
+        items.append({
+            "path": str(path),
+            "name": path.stem,
+            "collection": path.parent.name,
+            "status": status,
+            "findingCount": summ["count"],
+            "undecidedCount": summ["undecided"],
+        })
+    if q:
+        items.sort(key=lambda it: (_match_rank(q, it["name"].lower()), it["name"].lower()))
+    else:
+        items.sort(key=lambda it: (
+            _STATUS_ORDER[it["status"]], -it["undecidedCount"], it["name"].lower(),
+        ))
+    return {"total": len(items), "items": items[offset : offset + limit]}
 
 
 def next_segment_id(segments: list[Segment], floor: int = 0) -> int:
@@ -920,6 +1026,31 @@ kbd{font-family:ui-monospace,monospace}
 #D .dtoprow{display:flex;align-items:center;gap:16px}
 #D .dtop h1{margin:0;font-size:17px;font-weight:650}
 #D .dtop .path{color:var(--dim2);font-size:12px;margin-top:1px}
+/* Top-left library switcher: a combobox to jump to any video in any collection. */
+#D .switcher{position:relative}
+#D .swtrigger{display:flex;align-items:center;gap:10px;background:transparent;padding:3px 8px 3px 4px;border-radius:9px;text-align:left;max-width:min(58vw,640px)}
+#D .swtrigger:hover{background:var(--panel2)}
+#D .swtrigger h1{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:50vw}
+#D .swtrigger .path{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:50vw}
+#D .swcaret{color:var(--dim2);font-size:12px;flex:0 0 auto}
+#D .swpanel{position:absolute;top:calc(100% + 6px);left:0;z-index:40;width:min(560px,82vw);background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:0 16px 44px #000b;overflow:hidden}
+#D .swinput{width:100%;box-sizing:border-box;background:#0d1117;color:var(--ink);border:0;border-bottom:1px solid var(--line);padding:12px 14px;font:inherit;font-size:14px;outline:none}
+#D .swhead{padding:7px 14px;font-size:11px;color:var(--dim2);border-bottom:1px solid var(--line);background:#12161b}
+#D .swlist{max-height:min(56vh,460px);overflow-y:auto}
+#D .swrow{display:flex;align-items:center;gap:10px;padding:9px 14px;cursor:pointer;border-bottom:1px solid #ffffff08}
+#D .swrow:hover,#D .swrow.active{background:var(--panel2)}
+#D .swrow .swmeta{flex:1;min-width:0}
+#D .swrow .swn{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#D .swrow .swc{font-size:11px;color:var(--dim2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+#D .swrow .swcur-dot{color:var(--pick)}
+#D .swbadge{flex:0 0 auto;font-size:10.5px;font-weight:700;padding:3px 8px;border-radius:99px;letter-spacing:.2px}
+#D .swbadge.ready{background:#3a2c12;color:#f0c05a}
+#D .swbadge.in_progress{background:#152a3d;color:#7cc0ff}
+#D .swbadge.reviewed{background:#12331f;color:#5ee27f}
+#D .swbadge.unanalyzed{background:#22262c;color:var(--dim)}
+#D .swanalyze{flex:0 0 auto;font-size:10.5px;padding:3px 9px;background:#243244;color:#cfe3ff;border-radius:6px}
+#D .swanalyze:hover{background:#2d4054}
+#D .swempty{padding:16px 14px;color:var(--dim2);font-size:12.5px;line-height:1.5}
 #D .discreet-toggle{margin-left:auto;display:flex;align-items:center;gap:9px;font-size:12.5px;color:var(--dim);
   background:var(--panel2);border:1px solid var(--line);border-radius:99px;padding:6px 12px;cursor:pointer;user-select:none}
 #D .discreet-toggle.on{background:#2a2140;border-color:#6d4bb0;color:#d8c9ff}
@@ -973,12 +1104,17 @@ kbd{font-family:ui-monospace,monospace}
 #D .monitor .mvideo{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;z-index:0}
 #D .monitor .mframe{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;z-index:1}
 #D .monitor .grad{position:absolute;inset:0;z-index:1}
-#D .monitor.discreet .mframe,#D .monitor.discreet .grad,#D .monitor.discreet .mvideo{filter:blur(26px) brightness(.7);transform:scale(1.15)}
+/* Discreet = the picture (frame OR moving video) is heavily blurred but still
+   shown, so you can play through a bad scene to find/edit it without seeing the
+   detail. Hold-to-reveal drops the blur for a clean peek. */
+#D .monitor.discreet .mframe,#D .monitor.discreet .grad,#D .monitor.discreet .mvideo{filter:blur(42px) brightness(.62) saturate(.85);transform:scale(1.18)}
 #D .monitor .mnote{position:relative;z-index:3;text-align:center;color:#fff;text-shadow:0 2px 10px #000;pointer-events:none;padding:0 12px}
 #D .monitor .mnote .glyph{font-size:34px}
 #D .monitor .mnote .lab{margin-top:6px;font-size:13px;font-weight:600}
 #D .monitor .mnote .sub{font-size:11.5px;color:#d0d6dd;margin-top:2px}
-#D .monitor .veil{position:absolute;inset:0;z-index:2;display:grid;align-content:start;justify-items:center;padding-top:12px;background:#0b0d10cc;color:#c9b8ff;font-size:12.5px;letter-spacing:.3px}
+/* No longer a full cover — just a small corner badge saying privacy is on, so
+   the blurred picture you navigate by stays visible underneath. */
+#D .monitor .veil{position:absolute;top:10px;left:12px;z-index:4;display:flex;align-items:center;gap:6px;background:#0b0d10cc;color:#d8c9ff;font-size:11px;letter-spacing:.3px;padding:4px 9px;border-radius:7px;border:1px solid #6d4bb055;pointer-events:none}
 #D .monitor .reveal{position:absolute;bottom:10px;right:10px;z-index:4;font-size:11px;background:#000a;color:#fff;border:1px solid #fff4;padding:5px 10px;border-radius:7px}
 #D .monitor .scrub{position:absolute;top:10px;left:12px;z-index:4;font-size:11px;color:#9be7c8;background:#0008;padding:3px 9px;border-radius:6px;display:none}
 #D .monitor.scrubbing .scrub{display:block}
@@ -1077,9 +1213,19 @@ kbd{font-family:ui-monospace,monospace}
 <section id="D">
   <div class="dtop">
     <div class="dtoprow">
-      <div>
-        <h1>__TITLE__</h1>
-        <div class="path mono">__PATH_DISPLAY__</div>
+      <div class="switcher" id="D-switcher">
+        <button class="swtrigger" id="D-swtrigger" title="Switch to another video — search any collection (press /)">
+          <div class="swcur">
+            <h1>__TITLE__</h1>
+            <div class="path mono">__PATH_DISPLAY__</div>
+          </div>
+          <span class="swcaret">▾</span>
+        </button>
+        <div class="swpanel hidden" id="D-swpanel">
+          <input class="swinput" id="D-swinput" placeholder="Search any video in any collection…" autocomplete="off" spellcheck="false">
+          <div class="swhead" id="D-swhead"></div>
+          <div class="swlist" id="D-swlist"></div>
+        </div>
       </div>
       <div class="discreet-toggle on" id="D-discreet" title="Blur the picture so you can review without others seeing the content">
         <span class="sw"></span> Discreet mode
@@ -1119,7 +1265,7 @@ kbd{font-family:ui-monospace,monospace}
         <video class="mvideo" id="D-clip" playsinline preload="metadata"></video>
         <img class="mframe" id="D-mframe" alt="">
         <div class="grad" id="D-mgrad"></div>
-        <div class="veil" id="D-veil">picture hidden · discreet mode</div>
+        <div class="veil" id="D-veil">🔒 blurred · discreet</div>
         <div class="mnote" id="D-mnote"></div>
         <div class="scrub">♪ playing audio for this scene</div>
         <div class="cliploading" id="D-cliploading"><span class="spin"></span> building clip… (transcoding this scene)</div>
@@ -1414,34 +1560,25 @@ function D_scheduleFrame(){
 }
 function D_monitor(){
   const s=D_nearest(D.playMs), mon=document.getElementById('D-monitor');
-  // Video mode is an explicit reveal (you chose the real picture); Visual mode
-  // keeps the parent-private path — discreet still blurs the frames.
   const videomode=D.picMode==='video';
   mon.classList.toggle('videomode',videomode);
-  // Video mode reveals (you chose the real picture); Visual mode stays private.
-  const hide=D.discreet&&!D.held&&!videomode;
-  mon.classList.toggle('discreet',hide);
-  document.getElementById('D-veil').style.display=hide?'grid':'none';
-  // The colour gradient is only the *stand-in* for a hidden picture; when the
-  // real frame or video is showing it would just darken it — show only when hidden.
-  const grad=document.getElementById('D-mgrad');
-  grad.style.background=gradFor(s);
-  grad.style.display=hide?'block':'none';
-  // The frame image is the picture in Visual mode, and in Video mode *until you
-  // press play* (so scrubbing shows frames); once playing in Video mode the
-  // moving <video> underneath is the picture, so hide the frame.
+  // Discreet blurs the picture (frame OR moving video) but keeps it visible, so
+  // you can play through a bad scene to find and edit it without seeing detail.
+  // Hold-to-reveal (D.held) drops the blur for a clean peek. Picture mode just
+  // chooses frame vs moving video — blur applies to either.
+  const blur=D.discreet&&!D.held;
+  mon.classList.toggle('discreet',blur);
+  document.getElementById('D-veil').style.display=blur?'flex':'none';
+  document.getElementById('D-mgrad').style.display='none';   // real (blurred) picture shows; no colour stand-in
+  // The moving <video> is the picture once playing in Video mode; otherwise the
+  // frame image carries Visual playback + scrubbing. Both are blurred by the
+  // .discreet class when blur is on.
   const showVideoPicture=videomode&&D.playing;
   const img=document.getElementById('D-mframe');
-  img.style.display=(hide||showVideoPicture)?'none':'block';
-  if(!hide&&!showVideoPicture)D_scheduleFrame();
+  img.style.display=showVideoPicture?'none':'block';
+  if(!showVideoPicture)D_scheduleFrame();
   const inside=s&&D.playMs>=s.startMs&&D.playMs<=s.endMs;
-  // In discreet mode the centred note is the navigation aid (there's no
-  // picture); when a picture is up, keep it clear — the transport line below
-  // carries "now: #id category", so nothing overlays the picture.
-  document.getElementById('D-mnote').innerHTML = !hide||!s ? '' :
-    `<div class="glyph">${CAT[s.category]?.g||'●'}</div>
-     <div class="lab">${inside?(word(s)?`“${esc(word(s))}”`:esc(s.category.replace(/_/g,' '))):'between findings — plays normally'}</div>
-     <div class="sub">${inside?friendly(s).replace(/<[^>]+>/g,''):'nearest: '+esc(s.category.replace(/_/g,' '))+' @ '+fmtShort(s.startMs)}</div>`;
+  document.getElementById('D-mnote').innerHTML='';   // picture is always visible now; badge + transport carry context
   mon.classList.toggle('scrubbing',D.scrubbing);
   mon.classList.toggle('loadingclip',D.loadingClip);
   document.getElementById('D-tt').innerHTML=`<b>${fmtHMS(D.playMs)}</b> / ${fmtShort(RUNTIME_MS)}`;
@@ -1996,7 +2133,63 @@ function D_seek(d){
 }
 
 // ---------- keyboard ----------
+// ---------- library switcher (top-left combobox) ----------
+let SW={open:false,q:'',items:[],active:-1,timer:null,total:0};
+function D_swOpen(){SW.open=true;document.getElementById('D-swpanel').classList.remove('hidden');
+  const inp=document.getElementById('D-swinput');inp.value=SW.q;inp.focus();inp.select();D_swLoad(SW.q);}
+function D_swClose(){SW.open=false;document.getElementById('D-swpanel').classList.add('hidden');}
+function D_swToggle(){SW.open?D_swClose():D_swOpen();}
+function D_swLoad(q){
+  const tok=(SW.q=q);
+  fetch(`/api/library?q=${encodeURIComponent(q)}&limit=60`).then(r=>r.json()).then(d=>{
+    if(SW.q!==tok)return;                 // a newer keystroke already fired
+    SW.items=d.items||[];SW.total=d.total||0;SW.active=SW.items.length?0:-1;D_swRender();
+  }).catch(()=>{SW.items=[];SW.total=0;D_swRender();});
+}
+function D_swBadge(it){
+  const lbl={ready:it.undecidedCount+' to review',in_progress:it.undecidedCount+' left',
+    reviewed:'reviewed ✓',unanalyzed:'not analyzed'}[it.status]||it.status;
+  return `<span class="swbadge ${it.status}">${lbl}</span>`;
+}
+function D_swRender(){
+  const head=document.getElementById('D-swhead'),list=document.getElementById('D-swlist');
+  if(!SW.q){const rev=SW.items.filter(x=>x.status==='reviewed').length;
+    head.textContent=`${SW.items.length-rev} to review · ${rev} reviewed`;}
+  else head.textContent=`${SW.total} match${SW.total===1?'':'es'}`;
+  if(!SW.items.length){
+    list.innerHTML=`<div class="swempty">${SW.q?'No video matches “'+esc(SW.q)+'”.'
+      :'Nothing analyzed yet — search a title to open it for manual review.'}</div>`;return;}
+  list.innerHTML=SW.items.map((it,i)=>{
+    const cur=it.path===MEDIA;
+    const analyze=it.status==='unanalyzed'?`<span class="swanalyze" data-act="analyze">Analyze</span>`:'';
+    return `<div class="swrow ${i===SW.active?'active':''}" data-i="${i}">
+      <div class="swmeta"><div class="swn">${cur?'<span class="swcur-dot">● </span>':''}${esc(it.name)}</div>
+      <div class="swc">${esc(it.collection)}</div></div>${D_swBadge(it)}${analyze}</div>`;
+  }).join('');
+  list.querySelectorAll('.swrow').forEach(row=>row.onclick=e=>{
+    const i=+row.dataset.i;
+    if(e.target.closest('.swanalyze')){e.stopPropagation();D_swAnalyze(SW.items[i]);return;}
+    D_swPick(SW.items[i]);
+  });
+}
+// Open ANY video for review — even unanalyzed (empty Studio, review by hand).
+function D_swPick(it){location.href='/api/review?path='+encodeURIComponent(it.path);}
+function D_swAnalyze(it){
+  if(!confirm('Queue analysis (profanity + visual) for “'+it.name+'”?\nThe visual pass is GPU-heavy and can take hours.'))return;
+  Promise.all(['subtitles','vlm'].map(engine=>fetch('/api/jobs',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({mediaPath:it.path,engine})})))
+    .then(()=>D_swLoad(SW.q)).catch(()=>{});
+}
+function D_swScroll(){const el=document.querySelector('#D-swlist .swrow.active');if(el)el.scrollIntoView({block:'nearest'});}
+function D_swKey(e){
+  if(e.key==='ArrowDown'){e.preventDefault();SW.active=Math.min(SW.items.length-1,SW.active+1);D_swRender();D_swScroll();}
+  else if(e.key==='ArrowUp'){e.preventDefault();SW.active=Math.max(0,SW.active-1);D_swRender();D_swScroll();}
+  else if(e.key==='Enter'){e.preventDefault();if(SW.active>=0)D_swPick(SW.items[SW.active]);}
+  else if(e.key==='Escape'){e.preventDefault();D_swClose();document.getElementById('D-swtrigger').focus();}
+}
+
 function D_key(e){const k=e.key.toLowerCase();const s=D_get(D.sel);
+  if(e.key==='/'){e.preventDefault();D_swOpen();return;}
   if(k===' '){e.preventDefault();D_play();return;}
   if(k==='j'||k==='k'){if(!SEGS.length)return;const i=SEGS.findIndex(x=>x.id===D.sel);
     const n=SEGS[(i+(k==='j'?1:-1)+SEGS.length)%SEGS.length];D_select(n.id);return;}
@@ -2014,6 +2207,12 @@ document.addEventListener('keydown',e=>{
 
 // ---------- init ----------
 function D_init(){
+  // library switcher (top-left combobox)
+  document.getElementById('D-swtrigger').onclick=D_swToggle;
+  const swin=document.getElementById('D-swinput');
+  swin.oninput=()=>{clearTimeout(SW.timer);const q=swin.value;SW.timer=setTimeout(()=>D_swLoad(q),180);};
+  swin.onkeydown=D_swKey;
+  document.addEventListener('mousedown',e=>{if(SW.open&&!e.target.closest('#D-switcher'))D_swClose();});
   document.getElementById('D-discreet').onclick=()=>{D.discreet=!D.discreet;
     document.getElementById('D-discreet').classList.toggle('on',D.discreet);D_monitor();};
   const rev=document.getElementById('D-reveal');
@@ -2095,3 +2294,59 @@ def _html_escape(text: str) -> str:
         .replace(">", "&gt;")
         .replace('"', "&quot;")
     )
+
+
+# A path-less landing: browse/search the whole library and open any film in the
+# Studio. Served by GET /api/review with no ?path= — the entry point the plugin
+# links to so a reviewer can start from any video, analyzed or not.
+LANDING = r"""<!doctype html>
+<meta charset="utf-8"><title>Clean Media — review</title>
+<style>
+:root{--bg:#0d1013;--panel:#16191d;--panel2:#1d2126;--line:#2a2f36;--ink:#e6edf3;--dim:#9aa5b1;--dim2:#6e7681;--pick:#3b82f6;font-family:system-ui,-apple-system,Segoe UI,sans-serif}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:8vh 16px}
+h1{font-size:20px;margin:0 0 4px}.sub{color:var(--dim2);font-size:13px;margin-bottom:20px}
+.wrap{width:min(620px,94vw)}
+input{width:100%;box-sizing:border-box;background:#0d1117;color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:13px 15px;font:inherit;font-size:15px;outline:none}
+input:focus{border-color:var(--pick)}
+.head{padding:9px 4px;font-size:11.5px;color:var(--dim2)}
+.list{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;max-height:64vh;overflow-y:auto}
+.row{display:flex;align-items:center;gap:10px;padding:11px 14px;cursor:pointer;border-bottom:1px solid #ffffff08}
+.row:hover,.row.active{background:var(--panel2)}
+.meta{flex:1;min-width:0}.n{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.c{font-size:11.5px;color:var(--dim2);margin-top:1px}
+.badge{flex:0 0 auto;font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:99px}
+.badge.ready{background:#3a2c12;color:#f0c05a}.badge.in_progress{background:#152a3d;color:#7cc0ff}
+.badge.reviewed{background:#12331f;color:#5ee27f}.badge.unanalyzed{background:#22262c;color:var(--dim)}
+.empty{padding:18px 14px;color:var(--dim2);font-size:13px;line-height:1.5}
+::-webkit-scrollbar{width:12px}::-webkit-scrollbar-thumb{background:#39424e;border:3px solid transparent;background-clip:padding-box;border-radius:99px}
+</style>
+<div class="wrap">
+  <h1>Clean Media — review</h1>
+  <div class="sub">Pick a video to review. Search finds any film in any collection; unanalyzed ones open for manual review.</div>
+  <input id="q" placeholder="Search any video in any collection…" autocomplete="off" spellcheck="false" autofocus>
+  <div class="head" id="head"></div>
+  <div class="list" id="list"></div>
+</div>
+<script>
+let items=[],active=-1,q='',timer=null,total=0;
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function badge(it){const l={ready:it.undecidedCount+' to review',in_progress:it.undecidedCount+' left',reviewed:'reviewed ✓',unanalyzed:'not analyzed'}[it.status]||it.status;return `<span class="badge ${it.status}">${l}</span>`;}
+function load(query){const tok=(q=query);fetch(`/api/library?q=${encodeURIComponent(query)}&limit=80`).then(r=>r.json()).then(d=>{if(q!==tok)return;items=d.items||[];total=d.total||0;active=items.length?0:-1;render();}).catch(()=>{items=[];render();});}
+function render(){const head=document.getElementById('head'),list=document.getElementById('list');
+  head.textContent=q?`${total} match${total===1?'':'es'}`:`${items.filter(x=>x.status!=='reviewed').length} to review · ${items.filter(x=>x.status==='reviewed').length} reviewed`;
+  if(!items.length){list.innerHTML=`<div class="empty">${q?'No video matches “'+esc(q)+'”.':'Nothing analyzed yet — search a title to open it for manual review.'}</div>`;return;}
+  list.innerHTML=items.map((it,i)=>`<div class="row ${i===active?'active':''}" data-i="${i}"><div class="meta"><div class="n">${esc(it.name)}</div><div class="c">${esc(it.collection)}</div></div>${badge(it)}</div>`).join('');
+  list.querySelectorAll('.row').forEach(r=>r.onclick=()=>open(items[+r.dataset.i]));}
+function open(it){location.href='/api/review?path='+encodeURIComponent(it.path);}
+const inp=document.getElementById('q');
+inp.oninput=()=>{clearTimeout(timer);const v=inp.value;timer=setTimeout(()=>load(v),180);};
+inp.onkeydown=e=>{if(e.key==='ArrowDown'){e.preventDefault();active=Math.min(items.length-1,active+1);render();}
+  else if(e.key==='ArrowUp'){e.preventDefault();active=Math.max(0,active-1);render();}
+  else if(e.key==='Enter'){e.preventDefault();if(active>=0)open(items[active]);}};
+load('');
+</script>
+"""
+
+
+def render_landing() -> str:
+    return LANDING

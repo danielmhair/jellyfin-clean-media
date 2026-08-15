@@ -194,6 +194,29 @@ consistency. (The old layout used a stale fixed height and grid items that grew
 to their content, which pushed the page past the viewport and stacked an extra
 page scrollbar on top of the internal ones.)
 
+**Discreet mode = blur, not hide (2026-08-14, built)** — discreet mode now
+**heavily blurs the picture but keeps it visible** (frame or moving video), so a
+reviewer can play through a bad scene to find and edit it without seeing the
+detail — you navigate by blurred shapes + waveform + position. A small "blurred ·
+discreet" badge shows privacy is on; **hold 👁 Reveal** drops the blur for a
+clean peek. The Visual/Video toggle now just chooses frame vs moving picture —
+the blur is the privacy layer and applies to both.
+
+**Review any video — analysis is optional (2026-08-14, built)** — the Studio
+opens for **any existing video, even with no analysis**: scrub the whole film
+(with audio), add cuts at the playhead, set actions; the sidecar is created on
+the first add. Analysis is a recall head-start, not a prerequisite.
+
+**Library switcher (2026-08-14, built)** — a top-left **combobox** to jump to any
+video in any collection. Empty, it's the review **work-list** (analyzed films,
+needs-review first, then reviewed, from `GET /api/library` with mtime-free cached
+summaries); typing **fuzzy-searches the whole library** (including unanalyzed
+films, which open for manual review, or **Analyze** for a head-start). Selecting
+reloads the Studio for that film; press `/` to open it. A path-less
+`GET /api/review` serves a **landing** version of the switcher, which the
+plugin's **"🎬 Review library"** button opens so you can browse and review any
+film straight from Jellyfin.
+
 See the spec's [Follow-up spec — monitor playback + type filtering](../plan/prds/2026-08-13-review-page-studio-refactor.md#follow-up-spec--monitor-playback--type-filtering-agreed-not-yet-built)
 for the full requirements and the Phase-2 seams.
 
