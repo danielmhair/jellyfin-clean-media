@@ -20,7 +20,10 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
+import queue as queuelib
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -138,6 +141,32 @@ class VLMEngine(EngineAdapter):
     def _host(self, options: dict[str, Any]) -> str:
         return str(options.get("host", DEFAULT_HOST)).rstrip("/")
 
+    def _hosts(self, options: dict[str, Any]) -> list[str]:
+        """The Ollama endpoints to fan inference out across.
+
+        One film's samples are dispatched concurrently over this list, so two
+        machines' GPUs work the same pass at once. Precedence: an explicit
+        ``hosts`` option (list, or comma-separated string) wins; otherwise, if
+        no single ``host`` was given, the ``CLEANMEDIA_VLM_HOSTS`` env var lets
+        an operator set the pool once on the worker machine so both CLI and
+        plugin-triggered jobs use it; otherwise fall back to the single
+        ``host`` (default localhost). Duplicates and blanks are dropped, order
+        kept, so a one-host pool behaves exactly like the old serial path.
+        """
+        raw = options.get("hosts")
+        if raw:
+            candidates = raw if isinstance(raw, list) else str(raw).split(",")
+        elif options.get("host") is None and os.environ.get("CLEANMEDIA_VLM_HOSTS"):
+            candidates = os.environ["CLEANMEDIA_VLM_HOSTS"].split(",")
+        else:
+            candidates = [self._host(options)]
+        hosts: list[str] = []
+        for h in candidates:
+            h = str(h).strip().rstrip("/")
+            if h and h not in hosts:
+                hosts.append(h)
+        return hosts or [DEFAULT_HOST]
+
     def health(self) -> dict[str, Any]:
         try:
             with urllib.request.urlopen(f"{DEFAULT_HOST}/api/tags", timeout=3) as r:
@@ -162,6 +191,10 @@ class VLMEngine(EngineAdapter):
             "actions": ["skip", "blur"],
             "options": {
                 "host": "Ollama base URL (default http://localhost:11434)",
+                "hosts": "list (or comma-separated string) of Ollama base URLs "
+                "to fan one film's inference across — e.g. two machines' GPUs. "
+                "Falls back to CLEANMEDIA_VLM_HOSTS, then 'host'",
+                "concurrencyPerHost": "in-flight requests per host (default 1)",
                 "model": "vision model tag — must be an -instruct variant "
                 "(default qwen3-vl:4b-instruct; 2b-instruct is faster)",
                 "flagMaleShirtless": "bool — flag every bare male chest, not "
@@ -303,7 +336,11 @@ class VLMEngine(EngineAdapter):
         options: dict[str, Any],
         progress: ProgressCb,
     ) -> tuple[Timeline, Optional[Path]]:
-        host = self._host(options)
+        hosts = self._hosts(options)
+        # In-flight requests per host. One is right for a single small GPU (it
+        # can only run one inference at a time); a bigger card can sometimes
+        # overlap two. The real parallelism here is across hosts.
+        per_host = max(1, int(options.get("concurrencyPerHost", 1)))
         model = options.get("model", DEFAULT_MODEL)
         max_gap = float(options.get("maxGapS", 2.5))
         action = options.get("action", "skip")
@@ -344,7 +381,8 @@ class VLMEngine(EngineAdapter):
             for shot in shots
             for t in sample_times(shot, max_gap, min_samples)
         ]
-        progress(0.05, f"{len(plan)} samples across {len(shots)} shots")
+        pool = f" over {len(hosts)} vision hosts" if len(hosts) > 1 else ""
+        progress(0.05, f"{len(plan)} samples across {len(shots)} shots{pool}")
 
         # A full-film pass is hours long; checkpoint so an interruption
         # costs minutes rather than the whole run.
@@ -377,58 +415,143 @@ class VLMEngine(EngineAdapter):
             )
 
         by_shot: dict[int, Shot] = {s.index: s for s in shots}
-        consecutive_failures = 0
-        for n, (shot, when) in enumerate(plan, 1):
-            key = f"{shot.index}:{when:.2f}"
-            if key in done:
-                continue
-            jpeg = self._grab(media_path, when)
-            if not jpeg:
-                continue
-            try:
-                verdict = self._ask(host, model, jpeg, prompt, num_ctx, num_gpu)
-                consecutive_failures = 0
-            except (urllib.error.URLError, TimeoutError, OSError) as exc:
-                # One stalled request must not throw away a multi-hour film.
-                # Leave this sample un-done so a resume retries it, and only
-                # give up if Ollama is persistently unreachable — the
-                # checkpoint is already saved, so a resume picks up here.
-                consecutive_failures += 1
-                save_checkpoint()
-                progress(
-                    0.05 + 0.93 * n / len(plan),
-                    f"sample {n} failed ({consecutive_failures} in a row): {exc}",
-                )
-                if consecutive_failures >= 5:
-                    raise RuntimeError(
-                        f"Ollama unresponsive after {consecutive_failures} "
-                        f"samples; progress saved — rerun to resume"
-                    ) from exc
-                continue
 
-            done.add(key)
+        def fold(shot: Shot, when: float, verdict: dict) -> None:
+            """Record one answered sample. Runs only on the calling thread."""
+            done.add(f"{shot.index}:{when:.2f}")
             # Store the observations, not a verdict. Policy is applied below
             # and can be changed later without re-analyzing the film.
             observations = {k: bool(verdict.get(k)) for k in OBSERVATIONS}
             category = classify(observations, policy)
-            if category is not None:
-                prev = hits.get(shot.index)
-                # Prefer the more serious finding within a shot; ties keep
-                # the first, so a shot is described by its worst moment.
-                if not prev or _severity(category) > _severity(prev["category"]):
-                    hits[shot.index] = {
-                        "category": category,
-                        "confidence": 1.0 if category != "suggestive" else 0.5,
-                        "description": verdict.get("description", ""),
-                        "observations": observations,
-                        "at": when,
-                    }
-                    save_checkpoint()  # never lose a detection
-            if n % 25 == 0 or n == len(plan):
+            if category is None:
+                return
+            prev = hits.get(shot.index)
+            # Prefer the more serious finding within a shot; ties keep the
+            # first recorded, so a shot is described by its worst moment.
+            if not prev or _severity(category) > _severity(prev["category"]):
+                hits[shot.index] = {
+                    "category": category,
+                    "confidence": 1.0 if category != "suggestive" else 0.5,
+                    "description": verdict.get("description", ""),
+                    "observations": observations,
+                    "at": when,
+                }
+                save_checkpoint()  # never lose a detection
+
+        # Fan the remaining samples out across the host pool. The samples form a
+        # shared work queue; one worker thread per host slot pulls, grabs the
+        # frame and asks its host, and posts the answer back. Answers are folded
+        # in HERE, on the analyze() thread — so ``hits``/``done``/the checkpoint
+        # stay single-writer, and ``progress`` (which raises to cancel or pause)
+        # still unwinds the whole pass. A faster host simply pulls more, so the
+        # queue self-balances a 4 GB and a 6 GB card without any tuning.
+        pending = [
+            (shot, when)
+            for shot, when in plan
+            if f"{shot.index}:{when:.2f}" not in done
+        ]
+        already = len(plan) - len(pending)
+        if pending:
+            work_q: queuelib.Queue = queuelib.Queue()
+            for shot, when in pending:
+                work_q.put((shot, when, 0))
+            result_q: queuelib.Queue = queuelib.Queue()
+            stop = threading.Event()
+            state_lock = threading.Lock()
+            # Try a failed sample on another host before giving up on it, so a
+            # single dying machine fails over rather than dropping work.
+            max_attempts = len(hosts)
+            live = len(hosts) * per_host
+
+            def worker(host: str) -> None:
+                nonlocal live
+                fails = 0
+                while not stop.is_set():
+                    try:
+                        shot, when, attempt = work_q.get_nowait()
+                    except queuelib.Empty:
+                        break
+                    jpeg = self._grab(media_path, when)
+                    if not jpeg:
+                        result_q.put(("grab_fail", shot, when, None))
+                        continue
+                    try:
+                        verdict = self._ask(
+                            host, model, jpeg, prompt, num_ctx, num_gpu
+                        )
+                        fails = 0
+                        result_q.put(("ok", shot, when, verdict))
+                    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                        fails += 1
+                        if attempt + 1 < max_attempts:
+                            work_q.put((shot, when, attempt + 1))  # let a peer try
+                        else:
+                            result_q.put(("give_up", shot, when, exc))
+                        if fails >= 5:
+                            # This host is persistently down: evict it and let
+                            # the survivors carry the run. Its in-flight sample
+                            # was already requeued (or given up) above.
+                            result_q.put(("host_dead", host, None, exc))
+                            break
+                with state_lock:
+                    live -= 1
+                    if live == 0:
+                        result_q.put(("drained", None, None, None))
+
+            threads = [
+                threading.Thread(
+                    target=worker, args=(host,), daemon=True, name=f"vlm-{host}"
+                )
+                for host in hosts
+                for _ in range(per_host)
+            ]
+            for t in threads:
+                t.start()
+
+            resolved = 0
+            dead = 0
+            last_exc: Exception | None = None
+            try:
+                while resolved < len(pending):
+                    kind, a, b, extra = result_q.get()
+                    if kind == "drained":
+                        break  # every worker exited; if under target, all died
+                    if kind == "host_dead":
+                        dead += 1
+                        last_exc = extra
+                        progress(
+                            0.05 + 0.93 * (already + resolved) / len(plan),
+                            f"vision host {a} stopped responding "
+                            f"({dead}/{len(hosts)} down)",
+                        )
+                        continue
+                    resolved += 1
+                    if kind == "ok":
+                        fold(a, b, extra)
+                    elif kind == "give_up":
+                        last_exc = extra  # left un-done; a resume retries it
+                    # "grab_fail": frame unreadable — skip, as the serial path did
+                    completed = already + resolved
+                    if completed % 25 == 0 or completed == len(plan):
+                        save_checkpoint()
+                        progress(
+                            0.05 + 0.93 * completed / len(plan),
+                            f"{completed}/{len(plan)} samples, "
+                            f"{len(hits)} shots flagged",
+                        )
+            finally:
+                stop.set()
+                for t in threads:
+                    t.join(timeout=5)
                 save_checkpoint()
-                progress(
-                    0.05 + 0.93 * n / len(plan),
-                    f"{n}/{len(plan)} samples, {len(hits)} shots flagged",
+
+            if resolved < len(pending):
+                # Every worker exited before the queue drained: no host is
+                # answering. The checkpoint holds all progress, so a rerun
+                # resumes exactly here.
+                raise RuntimeError(
+                    f"all {len(hosts)} vision host(s) unresponsive; progress "
+                    f"saved — rerun to resume: {last_exc}"
                 )
 
         groups = self._group_into_scenes(

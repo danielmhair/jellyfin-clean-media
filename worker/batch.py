@@ -107,6 +107,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("paths", nargs="+", help="files, folders or globs")
     parser.add_argument("--engines", default=",".join(DEFAULT_ENGINES))
     parser.add_argument("--host", help="Ollama base URL for the vlm engine")
+    parser.add_argument(
+        "--hosts",
+        help="comma-separated Ollama base URLs to fan the visual pass across "
+        "(e.g. two machines' GPUs); overrides --host",
+    )
     parser.add_argument("--model", default="qwen3-vl:4b-instruct")
     parser.add_argument("--max-gap", type=float, default=6.0)
     parser.add_argument("--min-samples", type=int, default=1)
@@ -125,7 +130,11 @@ def main(argv: list[str] | None = None) -> int:
             "model": args.model,
             "maxGapS": args.max_gap,
             "minSamples": args.min_samples,
-            **({"host": args.host} if args.host else {}),
+            **(
+                {"hosts": [h.strip() for h in args.hosts.split(",") if h.strip()]}
+                if args.hosts
+                else {"host": args.host} if args.host else {}
+            ),
         },
     }
 
