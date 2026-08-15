@@ -21,6 +21,7 @@
                 <div class="tabbar" id="CmTabs">
                     <button class="on" data-t="settings">Settings</button>
                     <button data-t="queue">Queue</button>
+                    <button data-t="remote">Remote</button>
                 </div>
 
                 <!-- ===================== SETTINGS ===================== -->
@@ -154,6 +155,15 @@
                             <div class="rows recent" id="CmRecent"></div>
                         </div>
                     </div>
+                </div>
+
+                <!-- ===================== REMOTE ===================== -->
+                <div id="tab-remote" class="tabpanel" hidden>
+                    <div class="lede">Flag a moment on any device — including Roku and the mobile apps —
+                        while it plays. This captures a window at that device's current position as an
+                        unapproved finding for review, so you can mark a bad word or scene from your phone.</div>
+                    <h2>Now playing <span class="count" id="CmCPlaying">0</span></h2>
+                    <div class="rows" id="CmSessions"></div>
                 </div>
 
             </div>
@@ -360,7 +370,8 @@
         hidden: {},                 // type -> true when its rows are toggled off
         addEngine: 'subtitles',     // selected pass type in Add to queue
         addView: null,              // null = collections; else a collection {id,name}
-        collections: [], films: [], searchTerm: '', dirty: false
+        collections: [], films: [], searchTerm: '', dirty: false,
+        sessions: [], remotePoll: null, padMs: 1500  // Remote tab: what's playing
     };
 
     // ---- generic helpers -------------------------------------------------
@@ -953,15 +964,112 @@
     }
 
     // ======================================================================
+    //  REMOTE  — flag what's playing on any device (Roku, mobile, TV)
+    // ======================================================================
+    function fmtMs(ms) {
+        var t = Math.floor((ms || 0) / 1000);
+        var h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
+        function p(n) { return (n < 10 ? '0' : '') + n; }
+        return (h > 0 ? h + ':' : '') + p(m) + ':' + p(s);
+    }
+
+    function startRemote() {
+        // Use the same flag window as the in-player button.
+        api('GET', 'PlayerConfig').then(function (c) { state.padMs = (c && c.padMs) || 1500; })
+            .catch(function () { state.padMs = 1500; });
+        loadSessions();
+        stopRemotePoll();
+        state.remotePoll = setInterval(loadSessions, 3000);
+    }
+    function stopRemotePoll() { if (state.remotePoll) { clearInterval(state.remotePoll); state.remotePoll = null; } }
+
+    // Sessions come straight from Jellyfin (the browser is authenticated as an
+    // admin), so the position for a Roku or phone is whatever that device last
+    // reported — coarse, but the flag window and review retiming absorb it.
+    function loadSessions() {
+        ApiClient.getSessions().then(function (arr) {
+            var out = [];
+            (arr || []).forEach(function (s) {
+                var np = s.NowPlayingItem;
+                if (!np || (np.MediaType && np.MediaType !== 'Video')) { return; }
+                out.push({
+                    itemId: np.Id,
+                    name: (np.SeriesName ? np.SeriesName + ' · ' : '') + (np.Name || 'Unknown')
+                        + (np.ProductionYear ? ' (' + np.ProductionYear + ')' : ''),
+                    device: s.DeviceName || s.Client || 'Device',
+                    client: s.Client || '',
+                    positionMs: Math.round((s.PlayState && s.PlayState.PositionTicks || 0) / 10000),
+                    runtimeMs: Math.round((np.RunTimeTicks || 0) / 10000)
+                });
+            });
+            state.sessions = out;
+            renderSessions();
+        }).catch(function () { /* transient — keep last render */ });
+    }
+
+    function renderSessions() {
+        var host = page.querySelector('#CmSessions');
+        page.querySelector('#CmCPlaying').textContent = state.sessions.length;
+        if (!state.sessions.length) {
+            host.innerHTML = '<div class="empty">Nothing playing right now. Start a video on any device '
+                + '(Roku, a phone, the TV) and it will appear here to flag.</div>';
+            return;
+        }
+        host.innerHTML = state.sessions.map(function (s) {
+            return '<div class="row"><div class="stripe" style="background:var(--cm-accent)"></div>'
+                + '<div class="info"><div class="name">' + esc(s.name) + '</div>'
+                + '<div class="sub"><span>' + esc(s.device) + '</span>'
+                + '<span>· ' + fmtMs(s.positionMs) + (s.runtimeMs ? ' / ' + fmtMs(s.runtimeMs) : '') + '</span></div></div>'
+                + '<div class="acts">'
+                + '<button class="cmbtn primary" data-flag="' + esc(s.itemId) + '" data-pos="' + s.positionMs + '">⚑ Flag now</button>'
+                + '<button class="cmbtn mini" data-rev="' + esc(s.itemId) + '">Review</button>'
+                + '</div></div>';
+        }).join('');
+        host.querySelectorAll('[data-flag]').forEach(function (b) { b.onclick = function () { flagSession(b); }; });
+        host.querySelectorAll('[data-rev]').forEach(function (b) { b.onclick = function () { openReview(b.getAttribute('data-rev')); }; });
+    }
+
+    function flagSession(b) {
+        var itemId = b.getAttribute('data-flag');
+        var pos = parseInt(b.getAttribute('data-pos'), 10) || 0;
+        var pad = state.padMs || 1500;
+        var label = b.textContent;
+        b.disabled = true; b.textContent = 'Flagging…';
+        api('POST', 'Segments', { itemId: itemId }, {
+            startMs: Math.max(0, pos - pad), endMs: pos + pad,
+            category: 'manual', recommendedAction: 'skip',
+            reasoning: 'Flagged from remote at ' + fmtMs(pos)
+        }).then(function () {
+            b.textContent = '✓ Flagged ' + fmtMs(pos);
+            setTimeout(function () { b.textContent = label; b.disabled = false; }, 1800);
+        }).catch(function () {
+            b.textContent = 'Failed'; setTimeout(function () { b.textContent = label; b.disabled = false; }, 1800);
+        });
+    }
+
+    function openReview(itemId) {
+        // Open synchronously so the popup blocker allows it, then redirect.
+        var win = window.open('', '_blank');
+        api('GET', 'ReviewUrl', { itemId: itemId }).then(function (res) {
+            if (res && res.url) { if (win) { win.location = res.url; } else { window.location = res.url; } }
+            else if (win) { win.close(); }
+        }).catch(function () { if (win) { win.close(); } });
+    }
+
+    // ======================================================================
     //  WIRING
     // ======================================================================
     page.querySelectorAll('#CmTabs button').forEach(function (b) {
         b.onclick = function () {
+            var t = b.dataset.t;
             page.querySelectorAll('#CmTabs button').forEach(function (x) { x.classList.toggle('on', x === b); });
-            var queue = b.dataset.t === 'queue';
-            page.querySelector('#tab-queue').hidden = !queue;
-            page.querySelector('#tab-settings').hidden = queue;
-            if (queue) { loadJobs(); } else { stopPoll(); }
+            ['settings', 'queue', 'remote'].forEach(function (name) {
+                page.querySelector('#tab-' + name).hidden = (name !== t);
+            });
+            stopPoll();
+            stopRemotePoll();
+            if (t === 'queue') { loadJobs(); }
+            else if (t === 'remote') { startRemote(); }
         };
     });
 
@@ -1016,7 +1124,7 @@
 
     buildWeek();
     page.addEventListener('pageshow', refresh);
-    page.addEventListener('pagehide', stopPoll);
+    page.addEventListener('pagehide', function () { stopPoll(); stopRemotePoll(); });
     refresh();
 })();
 </script>

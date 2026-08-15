@@ -9,8 +9,16 @@
     "imageUrl": "",
     "versions": [
       {
+        "version": "0.2.7.0",
+        "changelog": "Flag from any device — new Remote tab. The plugin page gains a third tab, Remote, that lists what's playing on every client (including Roku and the mobile apps) with a 'Flag now' button and a 'Review' button for each. Flag captures a window at that device's current position as an unapproved finding, so you can mark a bad word or scene from your phone while it plays on the TV — no in-player button needed on native clients. Positions refresh a few times a second; the flag window and review retiming absorb the coarser reporting from set-top clients. Builds on 0.2.6.0.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.7.0.zip",
+        "checksum": "1d109094bd8eb7e5f65864f28a0134c1",
+        "timestamp": "2026-08-15T00:08:57"
+      },
+      {
         "version": "0.2.6.0",
-        "changelog": "Confirm before removing a job. The X buttons in the queue (cancel a running pass, drop a queued job, remove a finished one) and 'Cancel all' now ask first, so a mis-click can't silently drop a job. The Remove dialog makes clear it only clears the list entry — the film's analysis and your review decisions are kept. Builds on 0.2.5.0's player buttons.",
+        "changelog": "Confirm before removing a job. The X buttons in the queue (cancel a running pass, drop a queued job, remove a finished one) and 'Cancel all' now ask first, so a mis-click can't silently drop a job. The Remove dialog makes clear it only clears the list entry \u2014 the film's analysis and your review decisions are kept. Builds on 0.2.5.0's player buttons.",
         "targetAbi": "10.11.0.0",
         "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.6.0.zip",
         "checksum": "0cdc20590df965761824c876205ed424",
