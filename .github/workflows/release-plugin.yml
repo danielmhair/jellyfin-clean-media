@@ -2,11 +2,15 @@ name: Release plugin
 
 # Auto-release the Jellyfin plugin whenever its source changes on main.
 #
-# You just push to main. This bumps the version (patch of the 3rd segment),
-# builds the plugin, writes the release zip into plugin/releases/, updates
-# manifest.json (with an AI-written changelog), and commits it all back — so
-# Jellyfin (which installs from the raw manifest URL) sees the new version with
-# no manual step.
+# You just push to main (directly, or by merging a PR). This bumps the version
+# (patch of the 3rd segment), builds the plugin, writes the release zip into
+# plugin/releases/, updates manifest.json, and commits it all back — so Jellyfin
+# (which installs from the raw manifest URL) sees the new version with no manual
+# step.
+#
+# The changelog for the release is the **merged PR's description** (what you
+# already wrote in the PR body); for a direct push with no PR it falls back to
+# the commit message.
 on:
   push:
     branches: [main]
@@ -15,7 +19,6 @@ on:
 
 permissions:
   contents: write   # commit the release back
-  models: read      # GitHub Models inference for the changelog (built-in token)
 
 # Serialize releases so two quick pushes can't both bump to the same version.
 concurrency:
@@ -51,50 +54,20 @@ jobs:
           echo "next=$next" >> "$GITHUB_OUTPUT"
           echo "Releasing $cur -> $next"
 
-      - name: Gather change context (merged PR + commits since last release)
+      - name: Resolve changelog (PR description, else commit message)
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.sha }}
         run: |
-          last=$(git log --grep='^Release plugin' -n1 --format=%H 2>/dev/null || true)
-          range=HEAD
-          [ -n "$last" ] && range="$last..HEAD"
-          log=$(git log "$range" --format='- %s%n%b' -- plugin/ worker/ 2>/dev/null | head -n 80)
-          # If this push came from a merged PR, its title/body is the best summary.
-          pr=$(gh pr list --state merged --search "$HEAD_SHA" \
-                 --json title,body --jq '.[0] | select(. != null) | "PR: \(.title)\n\(.body)"' \
-               2>/dev/null || true)
-          { echo "CONTEXT<<CTX_EOF"; printf '%s\n\n%s\n' "$pr" "$log"; echo "CTX_EOF"; } >> "$GITHUB_ENV"
-
-      # Built-in GitHub Models inference (authenticated by the workflow token —
-      # no external API or secret). Non-fatal: if it fails, we fall back below.
-      - name: Draft changelog (GitHub Models)
-        id: ai
-        continue-on-error: true
-        uses: actions/ai-inference@v1
-        with:
-          token: ${{ github.token }}
-          model: openai/gpt-4o-mini
-          max-tokens: 200
-          system-prompt: >
-            You write changelog lines for 'Clean Media', a self-hosted Jellyfin
-            plugin that detects and skips objectionable content with an admin
-            review step. Reply with ONE or TWO concise, user-facing sentences
-            about what changed for users — no preamble, no 'Changelog:', no
-            markdown, no bullet points.
-          prompt: |
-            Summarise these changes into the changelog sentence(s):
-
-            ${{ env.CONTEXT }}
-
-      - name: Set changelog (AI, or fall back to the commit subject)
-        env:
-          RESP: ${{ steps.ai.outputs.response }}
-          MSG: ${{ github.event.head_commit.message }}
-        run: |
-          cl=$(printf '%s' "$RESP" | tr '\n' ' ' | sed -e 's/  */ /g' -e 's/^ *//' -e 's/ *$//')
-          if [ -z "$cl" ]; then cl=$(printf '%s' "$MSG" | head -n1); fi
-          echo "changelog: $cl"
+          # The changelog is the merged PR's body; for a direct push (no PR),
+          # fall back to the commit message. HTML comments (PR-template
+          # boilerplate) are stripped.
+          body=$(gh pr list --state merged --search "$HEAD_SHA" \
+                   --json body --jq '.[0].body // ""' 2>/dev/null || true)
+          if [ -z "$body" ]; then body=$(git log -1 --format=%B); fi
+          cl=$(printf '%s' "$body" | python3 -c \
+            'import sys,re; t=re.sub(r"<!--.*?-->","",sys.stdin.read(),flags=re.S).strip(); print(t or "See the repository for changes.")')
+          echo "changelog:"; echo "$cl"
           { echo "CHANGELOG<<CL_EOF"; printf '%s\n' "$cl"; echo "CL_EOF"; } >> "$GITHUB_ENV"
 
       - name: Build plugin & update manifest
