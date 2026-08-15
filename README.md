@@ -1,17 +1,64 @@
 # Clean Media for Jellyfin
 
-Self-hosted, privacy-first detection of objectionable content in your own
-media library, with an administrator review step before anything changes.
+**Watch your own movies your way.** Clean Media finds the profanity, nudity and
+sexual content in *your* personal library, lets you review every finding
+yourself, and then skips or mutes it in Jellyfin — all on your own hardware.
 
-**Originals are never modified.** Everything runs on your hardware — no cloud
-APIs, no telemetry, no uploads.
+<p>
+🔒 <b>Private by design</b> — everything runs locally. No cloud, no accounts, no
+telemetry, no uploads. Your library never leaves your machine.<br>
+🎬 <b>Your originals are never touched</b> — detection only ever <i>proposes</i>.
+Nothing is skipped, muted, or written to a file until you approve it.<br>
+👨‍👩‍👧 <b>Built for families and self-hosters</b> who want a say in what plays,
+without handing their media to someone else's service.
+</p>
 
-For a full capability catalog, see [docs/FEATURES.md](docs/FEATURES.md).
+---
+
+## Why Clean Media
+
+Content filters on streaming services are someone else's opinion applied to
+someone else's copy of the film. Clean Media is the opposite. It analyzes **your
+files**, shows you **exactly what it found and why**, and lets **you** decide
+each call — then hands Jellyfin only the edits you approved. The AI proposes; you
+dispose.
+
+- **Two detectors that actually work, one timeline.** Profanity is read straight
+  from the film's own subtitles (even bitmap DVD subs, via OCR) — a human already
+  transcribed the dialogue, so it beats speech-recognition decisively. Visual
+  content is judged by a local vision model (Ollama Qwen3-VL) that flags the one
+  real scene and leaves the courtroom drama alone. See the
+  [measured results](#measured-results) — the evidence is in the failure modes.
+- **A review workspace, not a wall of clips.** The **Studio** follows a playhead
+  across the whole film: minimap, filmstrip and waveform stacked, audio you can
+  scrub by dragging, and to-the-word timing. **Discreet mode blurs the picture by
+  default**, so a parent can review objectionable content by description and
+  waveform without anyone else in the room seeing it.
+- **Cut, mute, blur — or mute just the voice.** Skip a scene, silence a single
+  word in place, blur a shot, or drop *only the spoken word* while music and
+  ambience keep playing (Demucs stem separation). Every decision reads the way a
+  viewer experiences it: **✂ Cut out** or **👁 Leave in**.
+- **Skip live in Jellyfin, or render a clean copy.** Approved skips reach Jellyfin
+  as media segments and are skipped during playback — no second file. Mutes and
+  blurs render into a separate clean copy in one FFmpeg pass; the original is
+  never modified.
+- **Flag from any device.** A bad word slips by on the living-room TV? Flag the
+  moment from your phone — the plugin's Remote tab lists what's playing on every
+  client, Roku and mobile included, and captures that spot as a finding to review.
+- **Runs when you're not watching.** The visual pass is GPU-heavy, so restrict
+  analysis to chosen hours; long passes checkpoint and resume, and the queue
+  survives a restart.
+- **Install a matched set, not a guess.** Worker and plugin are released together
+  as one version — check out a tag, install the matching plugin, and the settings
+  page confirms the pair is compatible. See [Releasing](#releasing-maintainers).
+
+For the complete capability catalog, see [docs/FEATURES.md](docs/FEATURES.md).
 
 ---
 
 ## Contents
 
+- [Why Clean Media](#why-clean-media)
 - [How it works](#how-it-works)
 - [Detection engines](#detection-engines)
 - [Install](#install)
@@ -550,19 +597,38 @@ development; the manifest is how releases reach users.
 
 ### Releasing (maintainers)
 
+**The worker and the plugin ship as one matched pair.** They live in this repo
+and talk over an HTTP contract, so a release is a single git tag `vX.Y.Z`
+containing *both*: the worker stamped `X.Y.Z` and the plugin published as
+`X.Y.Z.0`. To run a specific version, check out its tag (or download its
+[Release](../../releases)) for the worker and install the matching plugin from
+the manifest — a compatible set, no guesswork.
+
 Releases are automatic. A GitHub Actions workflow
 ([`.github/workflows/release-plugin.yml`](.github/workflows/release-plugin.yml))
-watches `main` and, whenever the **plugin source**
+watches `main` and, whenever the **worker** (`worker/**`) *or* **plugin source**
 (`plugin/Jellyfin.Plugin.CleanMedia/**`) changes, it:
 
 1. bumps the version (the 3rd segment, e.g. `0.2.8.0 → 0.2.9.0`),
 2. builds the plugin and writes the release zip into `plugin/releases/`,
-3. updates `manifest.json` (so the repository above offers the new version),
-4. prepends the notes to [`CHANGELOG.md`](CHANGELOG.md),
-5. commits it back, and cuts a **GitHub Release** (tag + notes + the zip).
+3. stamps the worker version ([`worker/__init__.py`](worker/__init__.py)) in lockstep,
+4. updates `manifest.json` (so the repository above offers the new version),
+5. prepends the notes to [`CHANGELOG.md`](CHANGELOG.md),
+6. commits it back, and cuts a **GitHub Release** (tag + notes + the zip).
 
 So a maintainer just **pushes to `main`** — no manual version bump, no manual
-release. Worker-only or docs-only pushes don't cut a release.
+release. A worker-only change re-publishes the plugin at the new version too;
+that lockstep is what keeps "check out `vX.Y.Z`, install plugin `X.Y.Z.0`" true.
+Docs-only pushes don't cut a release.
+
+**Compatibility beyond the version number.** A second integer, `API_VERSION` (in
+[`worker/__init__.py`](worker/__init__.py), mirrored by `SupportedWorkerApiVersion`
+in the plugin), is the HTTP-contract version — bumped *only* when a change would
+break an older plugin. The worker reports it at `/api/health`; the plugin's
+**Test connection** shows a green *compatible* or an amber *version mismatch*
+banner that names which side is behind and the one command to fix it. So a
+slightly-behind plugin still works, and a real mismatch is reported instead of
+failing silently.
 
 **The changelog** is the one authored part: write the user-facing note for the
 next release into [`plugin/CHANGELOG_NEXT.md`](plugin/CHANGELOG_NEXT.md) in the
