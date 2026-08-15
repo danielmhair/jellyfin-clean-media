@@ -76,6 +76,43 @@ def test_detections_survive_concurrent_dispatch(tmp_path, monkeypatch):
     assert timeline.segments[0].category == "nudity"
 
 
+def test_tie_break_is_earliest_frame_not_arrival_order(tmp_path, monkeypatch):
+    """A shot flagged by several of its frames is labelled by the earliest.
+
+    Different frames of one shot can be answered out of order across the pool,
+    so the winning description must be chosen by timestamp, not arrival.
+    """
+    media = tmp_path / "Some Film (2010).mkv"
+    media.write_bytes(b"x")
+    # One long shot → several samples, all at the same (nudity) severity.
+    shot = Shot(0, 0, 240, 0.0, 10.0)
+    cache = tmp_path / "shots.json"
+    save_shots([shot], cache)
+    times = sample_times(shot, 2.5, 1)
+    assert len(times) > 1  # the tie only exists with multiple frames per shot
+
+    eng = VLMEngine()
+    # Carry each frame's timestamp through _grab so _ask can label it, and make
+    # the latest frame answer first (longest sleep for the smallest time).
+    monkeypatch.setattr(eng, "_grab", lambda m, when: repr(when).encode())
+
+    hi = max(times)
+
+    def fake_ask(host, model, jpeg, prompt, num_ctx=2048, num_gpu=None):
+        when = float(eval(jpeg.decode()))
+        time.sleep(0.02 * (hi - when + 0.01))  # earliest frame finishes last
+        return {"female_topless": True, "description": f"frame@{when:.2f}"}
+
+    monkeypatch.setattr(eng, "_ask", fake_ask)
+    timeline, _ = _run(
+        eng, media, cache, ["http://a:11434", "http://b:11434"], minSamples=1
+    )
+    assert len(timeline.segments) == 1
+    # The reasoning carries the winning frame's description; it must be the
+    # earliest timestamp even though that frame's answer arrived last.
+    assert f"frame@{min(times):.2f}" in timeline.segments[0].reasoning
+
+
 def test_one_dead_host_fails_over_to_the_survivor(tmp_path, monkeypatch):
     media, cache, plan = _make_film(tmp_path)
     eng = VLMEngine()

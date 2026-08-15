@@ -426,9 +426,18 @@ class VLMEngine(EngineAdapter):
             if category is None:
                 return
             prev = hits.get(shot.index)
-            # Prefer the more serious finding within a shot; ties keep the
-            # first recorded, so a shot is described by its worst moment.
-            if not prev or _severity(category) > _severity(prev["category"]):
+            # Describe a shot by its worst moment; on equal severity, keep the
+            # EARLIEST frame. Ordering by timestamp, not arrival, makes the
+            # label deterministic no matter which host answered first — two
+            # frames of one shot can complete out of order across the pool.
+            better = prev is None or (
+                _severity(category),
+                -when,
+            ) > (
+                _severity(prev["category"]),
+                -prev["at"],
+            )
+            if better:
                 hits[shot.index] = {
                     "category": category,
                     "confidence": 1.0 if category != "suggestive" else 0.5,
