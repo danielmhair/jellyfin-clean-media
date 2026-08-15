@@ -1,0 +1,29 @@
+name: Backfill releases
+
+# One-off maintenance: create a GitHub Release for every version already in
+# manifest.json (they predate the auto-release workflow, so the Releases page is
+# empty). Idempotent — safe to re-run; it skips versions that already have a
+# release. Trigger it manually from the Actions tab ("Run workflow"); once the
+# history is backfilled you never need it again.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # create releases + tags
+
+concurrency:
+  group: backfill-releases
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need the historical commits to tag each version accurately
+
+      - name: Create a GitHub Release for every manifest version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/backfill_releases.py
