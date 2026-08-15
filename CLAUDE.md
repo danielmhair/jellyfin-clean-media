@@ -82,6 +82,27 @@ themselves. `scripts/setup.sh` once, then:
 Tests: `uv run pytest`. **The sandbox blocks pytest's default temp dir**, so
 pass `--basetemp` to a writable path when running here.
 
+## Releasing the plugin (auto — just push to main)
+
+A GitHub Actions workflow
+([.github/workflows/release-plugin.yml](.github/workflows/release-plugin.yml))
+auto-releases the plugin whenever **plugin source
+(`plugin/Jellyfin.Plugin.CleanMedia/**`) changes on `main`**. It bumps the
+version (3rd segment), builds, writes the release zip + `manifest.json`,
+prepends to `CHANGELOG.md`, commits it back (`[skip ci]`), and cuts a **GitHub
+Release** (tag + notes + zip). **Do not** hand-run `release-plugin.sh` or bump the
+version for a normal change — just push; the pipeline does it.
+
+**The one authored piece is the changelog, and that's on us (Claude):** when you
+change the plugin, write the **user-facing** release note into
+[plugin/CHANGELOG_NEXT.md](plugin/CHANGELOG_NEXT.md) in the same commit — plain
+sentences about what changed for a plugin *user*, not internal/testing detail.
+CI uses it as the changelog (in the Release, `CHANGELOG.md`, and `manifest.json`),
+then resets the file. If it's left empty, the release falls back to the commit
+message. Worker-only or docs-only changes don't trigger a release (and don't need
+a `CHANGELOG_NEXT.md` entry). `release-plugin.sh` is still there for a manual
+release; it reads the note from the `CHANGELOG` env var.
+
 ## Architecture essentials
 
 - **Standard timeline format** — every engine emits the same segment shape

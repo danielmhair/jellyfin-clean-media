@@ -158,6 +158,7 @@ is not on `PATH` in a fresh shell.
 | `review.sh <film>` | Print/open the review URL for a film | — |
 | `render.sh <film>` | Render a clean copy from *approved* findings | 10–40 min |
 | `build-plugin.sh [dir]` | Build and package the Jellyfin plugin | seconds |
+| `release-plugin.sh <version>` | Cut a plugin release by hand (normally automatic — see [Releasing](#releasing-maintainers)) | seconds |
 | `install-service.ps1` | Windows only: run the worker at boot (see below) | seconds |
 | `organize-library.ps1` | Windows only: give every movie its own folder (see below) | seconds |
 
@@ -535,6 +536,43 @@ Swiftfin does not yet; Kodi does not.
 
 If the worker is unreachable the plugin returns no segments and logs a
 warning — a sleeping GPU box never breaks playback or a library scan.
+
+Most people install the plugin **from the repository, not by copying files** —
+add the manifest URL as a plugin repository and Jellyfin offers each new version:
+
+```
+https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/manifest.json
+```
+
+Dashboard → Plugins → Repositories → add that URL, then install/update **Clean
+Media** from the catalogue. The `build-plugin.sh` copy above is for local
+development; the manifest is how releases reach users.
+
+### Releasing (maintainers)
+
+Releases are automatic. A GitHub Actions workflow
+([`.github/workflows/release-plugin.yml`](.github/workflows/release-plugin.yml))
+watches `main` and, whenever the **plugin source**
+(`plugin/Jellyfin.Plugin.CleanMedia/**`) changes, it:
+
+1. bumps the version (the 3rd segment, e.g. `0.2.8.0 → 0.2.9.0`),
+2. builds the plugin and writes the release zip into `plugin/releases/`,
+3. updates `manifest.json` (so the repository above offers the new version),
+4. prepends the notes to [`CHANGELOG.md`](CHANGELOG.md),
+5. commits it back, and cuts a **GitHub Release** (tag + notes + the zip).
+
+So a maintainer just **pushes to `main`** — no manual version bump, no manual
+release. Worker-only or docs-only pushes don't cut a release.
+
+**The changelog** is the one authored part: write the user-facing note for the
+next release into [`plugin/CHANGELOG_NEXT.md`](plugin/CHANGELOG_NEXT.md) in the
+same change (if it's left empty, the release falls back to the commit message).
+That one note becomes the release's changelog everywhere it shows up — the repo's
+[**Releases** page](../../releases), `CHANGELOG.md`, and `manifest.json` (which is
+what Jellyfin displays in the plugin catalogue) — so they never drift.
+
+`scripts/release-plugin.sh <version>` still cuts a release by hand if you need
+one (it reads the note from the `CHANGELOG` environment variable).
 
 ---
 
