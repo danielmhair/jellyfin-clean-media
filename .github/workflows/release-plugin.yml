@@ -1,16 +1,14 @@
 name: Release plugin
 
-# Auto-release the Jellyfin plugin whenever its source changes on main.
+# Auto-release the Jellyfin plugin whenever its source changes on main (a merged
+# PR or a direct push). CI does the mechanical part — bump the version, build,
+# write the release zip + manifest.json, commit it back, and cut a GitHub Release
+# in the repo (tag + notes + the zip attached).
 #
-# You just push to main (directly, or by merging a PR). This bumps the version
-# (patch of the 3rd segment), builds the plugin, writes the release zip into
-# plugin/releases/, updates manifest.json, and commits it all back — so Jellyfin
-# (which installs from the raw manifest URL) sees the new version with no manual
-# step.
-#
-# The changelog for the release is the **merged PR's description** (what you
-# already wrote in the PR body); for a direct push with no PR it falls back to
-# the commit message.
+# The one human/authored part is the changelog: Claude Code writes it into
+# plugin/CHANGELOG_NEXT.md as part of the plugin change, and CI uses that as both
+# the manifest changelog and the GitHub Release notes (falling back to the commit
+# message if the file is empty).
 on:
   push:
     branches: [main]
@@ -18,9 +16,8 @@ on:
       - 'plugin/Jellyfin.Plugin.CleanMedia/**'
 
 permissions:
-  contents: write   # commit the release back
+  contents: write   # commit the release back + create the GitHub Release
 
-# Serialize releases so two quick pushes can't both bump to the same version.
 concurrency:
   group: release-plugin
   cancel-in-progress: false
@@ -54,30 +51,51 @@ jobs:
           echo "next=$next" >> "$GITHUB_OUTPUT"
           echo "Releasing $cur -> $next"
 
-      - name: Resolve changelog (PR description, else commit message)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.sha }}
+      - name: Resolve changelog (the file Claude wrote, else the commit message)
+        id: cl
         run: |
-          # The changelog is the merged PR's body; for a direct push (no PR),
-          # fall back to the commit message. HTML comments (PR-template
-          # boilerplate) are stripped.
-          body=$(gh pr list --state merged --search "$HEAD_SHA" \
-                   --json body --jq '.[0].body // ""' 2>/dev/null || true)
-          if [ -z "$body" ]; then body=$(git log -1 --format=%B); fi
-          cl=$(printf '%s' "$body" | python3 -c \
-            'import sys,re; t=re.sub(r"<!--.*?-->","",sys.stdin.read(),flags=re.S).strip(); print(t or "See the repository for changes.")')
+          file=plugin/CHANGELOG_NEXT.md
+          body=""
+          if [ -f "$file" ]; then
+            body=$(python3 -c 'import re,sys; print(re.sub(r"<!--.*?-->","",open("'"$file"'",encoding="utf-8").read(),flags=re.S).strip())')
+          fi
+          if [ -n "$body" ]; then
+            echo "used_file=true" >> "$GITHUB_OUTPUT"
+            cl="$body"
+          else
+            cl=$(git log -1 --format=%B)
+          fi
           echo "changelog:"; echo "$cl"
           { echo "CHANGELOG<<CL_EOF"; printf '%s\n' "$cl"; echo "CL_EOF"; } >> "$GITHUB_ENV"
 
       - name: Build plugin & update manifest
         run: scripts/release-plugin.sh "${{ steps.ver.outputs.next }}"   # uses $CHANGELOG
 
-      - name: Commit & push the release
+      - name: Reset the changelog file for the next release
+        if: steps.cl.outputs.used_file == 'true'
+        run: |
+          printf '%s\n' '<!-- Next plugin release changelog. Claude Code writes the user-facing notes here with each plugin change; the release workflow uses it as the changelog, then resets this file. Empty => the release falls back to the commit message. -->' > plugin/CHANGELOG_NEXT.md
+
+      - name: Update the browsable CHANGELOG.md
+        env:
+          VERSION: ${{ steps.ver.outputs.next }}
+        run: python3 scripts/prepend_changelog.py "$VERSION" "$(date -u +%F)"
+
+      - name: Commit, push, and cut the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.ver.outputs.next }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add manifest.json plugin/releases \
+          git add manifest.json CHANGELOG.md plugin/releases plugin/CHANGELOG_NEXT.md \
             plugin/Jellyfin.Plugin.CleanMedia/Jellyfin.Plugin.CleanMedia.csproj
-          git commit -m "Release plugin ${{ steps.ver.outputs.next }} [skip ci]"
+          git commit -m "Release plugin $VERSION [skip ci]"
           git push origin "${{ github.ref_name }}"
+          # A real GitHub Release in the repo: tag, the authored notes, and the zip.
+          printf '%s\n' "$CHANGELOG" > "$RUNNER_TEMP/notes.md"
+          gh release create "v$VERSION" \
+            --title "Clean Media $VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --target "$(git rev-parse HEAD)" \
+            "plugin/releases/clean-media-$VERSION.zip"
