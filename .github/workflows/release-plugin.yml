@@ -1,19 +1,22 @@
-name: Release plugin
+name: Release
 
-# Auto-release the Jellyfin plugin whenever its source changes on main (a merged
-# PR or a direct push). CI does the mechanical part — bump the version, build,
-# write the release zip + manifest.json, commit it back, and cut a GitHub Release
-# in the repo (tag + notes + the zip attached).
+# Auto-release Clean Media whenever the worker OR the plugin source changes on
+# main (a merged PR or a direct push). The worker and plugin ship as a matched
+# pair: one version, one git tag (vX.Y.Z), the plugin published as X.Y.Z.0 and
+# the worker stamped X.Y.Z. CI does the mechanical part — bump the version, build
+# the plugin, write the release zip + manifest.json, stamp the worker version,
+# commit it back, and cut a GitHub Release in the repo (tag + notes + the zip).
 #
 # The one human/authored part is the changelog: Claude Code writes it into
-# plugin/CHANGELOG_NEXT.md as part of the plugin change, and CI uses that as both
-# the manifest changelog and the GitHub Release notes (falling back to the commit
+# plugin/CHANGELOG_NEXT.md as part of the change, and CI uses that as both the
+# manifest changelog and the GitHub Release notes (falling back to the commit
 # message if the file is empty).
 on:
   push:
     branches: [main]
     paths:
       - 'plugin/Jellyfin.Plugin.CleanMedia/**'
+      - 'worker/**'
 
 permissions:
   contents: write   # commit the release back + create the GitHub Release
@@ -47,9 +50,17 @@ jobs:
           proj=plugin/Jellyfin.Plugin.CleanMedia/Jellyfin.Plugin.CleanMedia.csproj
           cur=$(sed -n 's#.*<AssemblyVersion>\([^<]*\)</AssemblyVersion>.*#\1#p' "$proj")
           IFS=. read -r a b c d <<< "$cur"
-          next="${a}.${b}.$((c + 1)).0"
+          next="${a}.${b}.$((c + 1)).0"          # plugin (4-segment)
+          next3="${a}.${b}.$((c + 1))"           # worker/project (3-segment)
           echo "next=$next" >> "$GITHUB_OUTPUT"
+          echo "next3=$next3" >> "$GITHUB_OUTPUT"
           echo "Releasing $cur -> $next"
+
+      - name: Stamp the worker version (lockstep with the plugin)
+        run: |
+          init=worker/__init__.py
+          sed -i "s#^__version__ = \".*\"#__version__ = \"${{ steps.ver.outputs.next3 }}\"#" "$init"
+          grep '^__version__' "$init"
 
       - name: Resolve changelog (the file Claude wrote, else the commit message)
         id: cl
@@ -89,7 +100,8 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add manifest.json CHANGELOG.md plugin/releases plugin/CHANGELOG_NEXT.md \
-            plugin/Jellyfin.Plugin.CleanMedia/Jellyfin.Plugin.CleanMedia.csproj
+            plugin/Jellyfin.Plugin.CleanMedia/Jellyfin.Plugin.CleanMedia.csproj \
+            worker/__init__.py
           git commit -m "Release plugin $VERSION [skip ci]"
           git push origin "${{ github.ref_name }}"
           # A real GitHub Release in the repo: tag, the authored notes, and the zip.

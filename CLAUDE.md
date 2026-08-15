@@ -82,25 +82,45 @@ themselves. `scripts/setup.sh` once, then:
 Tests: `uv run pytest`. **The sandbox blocks pytest's default temp dir**, so
 pass `--basetemp` to a writable path when running here.
 
-## Releasing the plugin (auto — just push to main)
+## Releasing (auto — just push to main)
+
+**The worker and the plugin are one matched pair, released together.** They live
+in this one repo and talk over an HTTP contract, so a version is a single git tag
+`vX.Y.Z` containing *both*: the plugin published as `X.Y.Z.0` and the worker
+stamped `X.Y.Z` (in [worker/__init__.py](worker/__init__.py)). To run a specific
+version, check out its tag (worker) and install the matching plugin. This is how
+a friend installs a compatible set without guessing.
 
 A GitHub Actions workflow
 ([.github/workflows/release-plugin.yml](.github/workflows/release-plugin.yml))
-auto-releases the plugin whenever **plugin source
-(`plugin/Jellyfin.Plugin.CleanMedia/**`) changes on `main`**. It bumps the
-version (3rd segment), builds, writes the release zip + `manifest.json`,
-prepends to `CHANGELOG.md`, commits it back (`[skip ci]`), and cuts a **GitHub
-Release** (tag + notes + zip). **Do not** hand-run `release-plugin.sh` or bump the
-version for a normal change — just push; the pipeline does it.
+auto-releases whenever **plugin source (`plugin/Jellyfin.Plugin.CleanMedia/**`)
+*or* worker source (`worker/**`) changes on `main`**. It bumps the version (3rd
+segment), builds the plugin, writes the release zip + `manifest.json`, stamps
+`worker/__init__.py`, prepends to `CHANGELOG.md`, commits it back (`[skip ci]`),
+and cuts a **GitHub Release** (tag + notes + zip). **Do not** hand-run
+`release-plugin.sh` or bump the version for a normal change — just push; the
+pipeline does it. (A worker-only change *does* now re-publish the plugin at the
+new version — that lockstep is what keeps "check out `vX.Y.Z`, install plugin
+`X.Y.Z.0`" true.)
+
+**The two-number split.** `__version__` is the marketing/lockstep number that
+bumps every release. Separately, `API_VERSION` (an int in `worker/__init__.py`,
+mirrored by `SupportedWorkerApiVersion` in
+[CleanMediaController.cs](plugin/Jellyfin.Plugin.CleanMedia/CleanMediaController.cs))
+is the **HTTP-contract version** — bump it *only* when an `/api` change would
+break an older plugin, and bump both sides together. The worker reports it at
+`/api/health`; the plugin compares and shows a compatible / update-needed banner
+on its settings page. So a slightly-behind plugin still works, and a real
+mismatch is reported with the exact fix instead of failing silently.
 
 **The one authored piece is the changelog, and that's on us (Claude):** when you
-change the plugin, write the **user-facing** release note into
+change the worker or the plugin, write the **user-facing** release note into
 [plugin/CHANGELOG_NEXT.md](plugin/CHANGELOG_NEXT.md) in the same commit — plain
-sentences about what changed for a plugin *user*, not internal/testing detail.
-CI uses it as the changelog (in the Release, `CHANGELOG.md`, and `manifest.json`),
-then resets the file. If it's left empty, the release falls back to the commit
-message. Worker-only or docs-only changes don't trigger a release (and don't need
-a `CHANGELOG_NEXT.md` entry). `release-plugin.sh` is still there for a manual
+sentences about what changed for a *user*, not internal/testing detail. CI uses
+it as the changelog (in the Release, `CHANGELOG.md`, and `manifest.json`), then
+resets the file. If it's left empty, the release falls back to the commit
+message. Docs-only changes don't trigger a release (and don't need a
+`CHANGELOG_NEXT.md` entry). `release-plugin.sh` is still there for a manual
 release; it reads the note from the `CHANGELOG` env var.
 
 ## Architecture essentials

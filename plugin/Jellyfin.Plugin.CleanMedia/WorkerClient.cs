@@ -97,6 +97,13 @@ public class WorkerHealth
 
     [JsonPropertyName("version")] public string Version { get; set; } = string.Empty;
 
+    /// <summary>
+    /// The worker's HTTP-contract version. Bumps only on a breaking API change,
+    /// so the plugin can tell a compatible worker from one it's out of step with.
+    /// Absent (0) on old workers that predate the handshake.
+    /// </summary>
+    [JsonPropertyName("apiVersion")] public int ApiVersion { get; set; }
+
     [JsonPropertyName("queueSize")] public int QueueSize { get; set; }
 
     [JsonPropertyName("gpu")] public GpuInfo? Gpu { get; set; }

@@ -85,6 +85,15 @@ public class PauseRequest
 [Produces("application/json")]
 public class CleanMediaController : ControllerBase
 {
+    /// <summary>
+    /// The worker HTTP-contract version this plugin build was written against.
+    /// It's compared with the worker's reported apiVersion so a mismatched pair
+    /// is reported plainly on the settings page instead of failing silently.
+    /// Bump this (and the worker's API_VERSION) together, only on a breaking
+    /// change to the /api surface.
+    /// </summary>
+    public const int SupportedWorkerApiVersion = 1;
+
     private readonly WorkerClient _worker;
 
     public CleanMediaController(WorkerClient worker)
@@ -616,14 +625,54 @@ public class CleanMediaController : ControllerBase
             });
         }
 
+        var (compatible, compatMessage) = CheckApiCompatibility(health.ApiVersion);
+
         return Ok(new
         {
             ok = true,
             version = health.Version,
+            apiVersion = health.ApiVersion,
+            pluginApiVersion = SupportedWorkerApiVersion,
+            compatible,
+            compatMessage,
             engines = health.Engines.Keys,
             queueSize = health.QueueSize,
             paused = health.Paused,
             gpu = health.Gpu is null || !health.Gpu.Available ? "none" : health.Gpu.Name,
         });
+    }
+
+    /// <summary>
+    /// Compare the worker's contract version with the one this plugin expects.
+    /// Returns whether they can talk, and if not, a message that names which
+    /// side is behind and the one action to fix it.
+    /// </summary>
+    private static (bool Compatible, string? Message) CheckApiCompatibility(int workerApiVersion)
+    {
+        if (workerApiVersion == 0)
+        {
+            // Predates the handshake — too old to advertise a contract version.
+            return (false,
+                "This worker is older than the plugin and doesn't report an API version. "
+                + "Update the worker: git pull, then run scripts/install-service.ps1 -Restart.");
+        }
+
+        if (workerApiVersion < SupportedWorkerApiVersion)
+        {
+            return (false,
+                $"The worker speaks API v{workerApiVersion} but this plugin needs "
+                + $"v{SupportedWorkerApiVersion}. Update the worker to match this plugin: "
+                + "git pull, then run scripts/install-service.ps1 -Restart.");
+        }
+
+        if (workerApiVersion > SupportedWorkerApiVersion)
+        {
+            return (false,
+                $"The worker speaks API v{workerApiVersion} but this plugin only understands "
+                + $"v{SupportedWorkerApiVersion}. Update the plugin to match the worker "
+                + "(Dashboard → Plugins → Clean Media → update to the version matching this worker).");
+        }
+
+        return (true, null);
     }
 }

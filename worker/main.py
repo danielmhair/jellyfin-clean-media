@@ -18,7 +18,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
-from . import __version__
+from . import API_VERSION, __version__
 from .logging_config import configure_logging, get_logger, tame_uvicorn_loggers
 
 # Configure logging before anything else imports/logs, so import-time messages
@@ -203,6 +203,7 @@ def health() -> dict:
     return {
         "status": "ok",
         "version": __version__,
+        "apiVersion": API_VERSION,
         "platform": platform.platform(),
         "gpu": _gpu_info(),
         "engines": {name: eng.health() for name, eng in ENGINES.items()},

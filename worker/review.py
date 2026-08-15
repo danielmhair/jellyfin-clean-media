@@ -1593,14 +1593,15 @@ function D_monitor(){
 // ---------- editor ----------
 const HEAVY_MS=180000;  // beyond this window, skip the ffmpeg strip/peaks fetch
 function D_editor(){
+  // Render the scrollable timeline even with no finding selected (incl. zero findings):
+  // the whole point of the empty state is to scrub and press A to add the first cut.
   const s=D_get(D.sel);
-  if(!s){document.getElementById('D-edcard').innerHTML='<div style="color:var(--dim2);font-size:12.5px">Select a finding, or add one with <b>A</b>.</div>';return;}
   const vs=D.viewStart, ve=D.viewEnd, span=Math.max(1,ve-vs), W=D_edW();
   const ex=ms=>(ms-vs)/span*W;
   const regions=SEGS.filter(r=>r.endMs>vs&&r.startMs<ve&&D_visible(r));
-  const acts=['skip','mute','voice','blur'].map(a=>`<option value="${a}" ${s.recommendedAction===a?'selected':''}>${actLabels[a]}</option>`).join('');
-  const cats=CATEGORIES.map(c=>`<option value="${c}" ${s.category===c?'selected':''}>${c.replace(/_/g,' ')}</option>`).join('');
-  const st=D_state(s);
+  const acts=s?['skip','mute','voice','blur'].map(a=>`<option value="${a}" ${s.recommendedAction===a?'selected':''}>${actLabels[a]}</option>`).join(''):'';
+  const cats=s?CATEGORIES.map(c=>`<option value="${c}" ${s.category===c?'selected':''}>${c.replace(/_/g,' ')}</option>`).join(''):'';
+  const st=s?D_state(s):'';
   const heavy=span>HEAVY_MS;
   // filmstrip: a single tiled JPEG for the viewport window (any scene), stacked over the waveform.
   const strip = heavy
@@ -1612,7 +1613,7 @@ function D_editor(){
     shots+=`<div class="shotmark" style="left:${ex(r.startMs)}px"></div>`;});
 
   document.getElementById('D-edcard').innerHTML=`
-    <div class="edhead">${cchip(s)}<span class="mono" style="color:var(--dim2);font-size:12px">#${s.id} · detected by ${esc(engineName[s.engine]||s.engine)}</span>
+    <div class="edhead">${s?cchip(s)+`<span class="mono" style="color:var(--dim2);font-size:12px">#${s.id} · detected by ${esc(engineName[s.engine]||s.engine)}</span>`:'<span class="mono" style="color:var(--dim2);font-size:12px">No finding selected — scrub, then press <b>A</b> to add a cut</span>'}
       <span class="zoomhint">scroll = zoom · drag the box on the map to pan · showing ${fmtShort(vs)}–${fmtShort(ve)}</span></div>
     <div class="edscroll" id="D-edscroll">
       <div class="edtrack" style="width:${W}px" id="D-edtrack">
@@ -1634,7 +1635,7 @@ function D_editor(){
       <button id="D-delregion">✕ Delete region<kbd>Del</kbd></button>
       <span class="note" id="D-ednote"></span>
     </div>
-    <div class="edform" id="D-edform">
+    ${s?`<div class="edform" id="D-edform">
       <label>Start</label><div class="val">
         <input class="time" id="D-start" value="${fmtHMS(s.startMs)}">
         <button class="nudge" data-edit="start" data-d="-1000">◀1s</button>
@@ -1657,7 +1658,7 @@ function D_editor(){
       <button class="big cut ${st==='cut'?'on':''}" id="D-cut">✂ Cut it out <kbd>C</kbd></button>
       <button class="big leave ${st==='leave'?'on':''}" id="D-leave">👁 Leave it in <kbd>L</kbd></button>
       <button class="trash" id="D-trash">🗑 Delete finding</button>
-    </div>
+    </div>`:''}
     <div class="edresult" id="D-edresult"></div>`;
 
   // waveform — real peaks for the viewport, cached by window so only a real
@@ -1737,17 +1738,19 @@ function D_editor(){
   document.getElementById('D-add').onclick=()=>D_add();
   document.getElementById('D-split').onclick=D_split;
   document.getElementById('D-delregion').onclick=D_delRegion;
-  document.getElementById('D-cut').onclick=()=>D_decide(s,true);
-  document.getElementById('D-leave').onclick=()=>D_decide(s,false);
-  document.getElementById('D-trash').onclick=()=>{if(confirm('Delete finding #'+s.id+'?'))D_deleteFinding(s);};
-  document.getElementById('D-cat').onchange=e=>{s.category=e.target.value;patchSeg(s.id,{category:s.category});D_render();};
-  document.getElementById('D-act').onchange=e=>{s.recommendedAction=e.target.value;patchSeg(s.id,{recommendedAction:s.recommendedAction});D_render();};
-  document.getElementById('D-desc').onchange=e=>{s.reasoning=e.target.value;patchSeg(s.id,{reasoning:s.reasoning});D_render();};
-  document.getElementById('D-start').onchange=e=>{const v=parseTime(e.target.value);if(v!=null){s.startMs=v;D_fixOrder(s);D_saveTiming(s);D_render();}};
-  document.getElementById('D-end').onchange=e=>{const v=parseTime(e.target.value);if(v!=null){s.endMs=v;D_fixOrder(s);D_saveTiming(s);D_render();}};
-  document.querySelectorAll('#D-edcard .nudge').forEach(b=>b.onclick=()=>{
-    const d=+b.dataset.d;if(b.dataset.edit==='start')s.startMs=Math.max(0,s.startMs+d);else s.endMs=Math.max(0,s.endMs+d);
-    D_fixOrder(s);D_saveTiming(s);D_render();});
+  if(s){
+    document.getElementById('D-cut').onclick=()=>D_decide(s,true);
+    document.getElementById('D-leave').onclick=()=>D_decide(s,false);
+    document.getElementById('D-trash').onclick=()=>{if(confirm('Delete finding #'+s.id+'?'))D_deleteFinding(s);};
+    document.getElementById('D-cat').onchange=e=>{s.category=e.target.value;patchSeg(s.id,{category:s.category});D_render();};
+    document.getElementById('D-act').onchange=e=>{s.recommendedAction=e.target.value;patchSeg(s.id,{recommendedAction:s.recommendedAction});D_render();};
+    document.getElementById('D-desc').onchange=e=>{s.reasoning=e.target.value;patchSeg(s.id,{reasoning:s.reasoning});D_render();};
+    document.getElementById('D-start').onchange=e=>{const v=parseTime(e.target.value);if(v!=null){s.startMs=v;D_fixOrder(s);D_saveTiming(s);D_render();}};
+    document.getElementById('D-end').onchange=e=>{const v=parseTime(e.target.value);if(v!=null){s.endMs=v;D_fixOrder(s);D_saveTiming(s);D_render();}};
+    document.querySelectorAll('#D-edcard .nudge').forEach(b=>b.onclick=()=>{
+      const d=+b.dataset.d;if(b.dataset.edit==='start')s.startMs=Math.max(0,s.startMs+d);else s.endMs=Math.max(0,s.endMs+d);
+      D_fixOrder(s);D_saveTiming(s);D_render();});
+  }
   D_edresult(s,D.viewStart,D.viewEnd);
 }
 function D_fixOrder(s){if(s.endMs<s.startMs){const t=s.startMs;s.startMs=s.endMs;s.endMs=t;}}

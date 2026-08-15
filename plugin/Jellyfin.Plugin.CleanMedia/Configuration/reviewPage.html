@@ -311,6 +311,8 @@
   background:rgba(118,125,135,.12);border:1px solid var(--cm-line-2);color:var(--cm-ink-2);font-size:12.5px;font-weight:600;}
 .cmRoot .connpill.ok{background:rgba(63,185,80,.1);border-color:rgba(63,185,80,.28);color:#9be6a6;}
 .cmRoot .connpill.bad{background:rgba(248,113,105,.1);border-color:rgba(248,113,105,.28);color:#ffb4b0;}
+.cmRoot .connpill.warn{background:rgba(210,153,34,.12);border-color:rgba(210,153,34,.34);color:#e3b341;}
+.cmRoot .help.connwarn{color:#e3b341;font-weight:600;}
 .cmRoot .field{margin-top:14px;}
 .cmRoot .field label{display:block;font-size:12px;color:var(--cm-ink-2);font-weight:600;margin-bottom:6px;}
 .cmRoot .cminput{width:100%;background:var(--cm-panel-2);border:1px solid var(--cm-line);border-radius:9px;
@@ -925,15 +927,20 @@
         }).then(function (res) {
             if (res.ok) {
                 state.paused = !!res.paused;
-                pill.className = 'connpill ok';
+                var incompatible = res.compatible === false;
+                pill.className = 'connpill ' + (incompatible ? 'warn' : 'ok');
                 pill.innerHTML = '<span class="dot-live"></span>Connected · v' + esc(res.version)
+                    + (incompatible ? ' · ⚠ version mismatch' : '')
                     + ' · ' + esc(res.gpu) + (res.paused ? ' · queue paused' : (res.queueSize ? ' · ' + res.queueSize + ' queued' : ' · queue idle'));
-                setLive(true, 'Worker online', res.gpu);
-                if (!silent) { result.textContent = ''; }
+                setLive(true, incompatible ? 'Worker online · version mismatch' : 'Worker online', res.gpu);
+                // A version mismatch is worth showing even on a silent (auto) check.
+                result.textContent = incompatible ? (res.compatMessage || 'The worker and plugin versions do not match.') : (silent ? result.textContent : '');
+                result.className = incompatible ? 'help connwarn' : 'help';
             } else {
                 pill.className = 'connpill bad';
                 pill.innerHTML = '<span class="dot-live off"></span>Not reachable';
                 setLive(false, 'Worker unreachable');
+                result.className = 'help';
                 if (!silent) { result.textContent = res.message || ''; }
             }
         }).catch(function (err) {

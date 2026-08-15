@@ -1,8 +1,14 @@
 # Changelog
 
-All plugin releases, newest first. New entries are added automatically by the
-release workflow from the notes in `plugin/CHANGELOG_NEXT.md`. The same notes
-appear on the repo's [Releases page](../../releases) and in `manifest.json`.
+Every release of Clean Media, newest first. The worker and the Jellyfin plugin
+are released together as a matched pair: each version below is one git tag
+(`vX.Y.Z`) containing both, and the plugin is published as `X.Y.Z.0`. To run a
+specific version, check out its tag (or download its GitHub Release) and install
+the matching plugin from `manifest.json`.
+
+New entries are added automatically by the release workflow from the notes in
+`plugin/CHANGELOG_NEXT.md`. The same notes appear on the repo's
+[Releases page](../../releases) and in `manifest.json`.
 
 <!-- releases -->
 
