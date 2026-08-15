@@ -1,7 +1,32 @@
 # Spec — In-Jellyfin queue manager + folded-in settings
 
-Status: ready-for-agent · Date: 2026-08-14 · Area: Jellyfin plugin dashboard +
-worker job queue.
+Status: **completed** (2026-08-14, verified live in Jellyfin) · Date: 2026-08-14 ·
+Area: Jellyfin plugin dashboard + worker job queue.
+
+## Completion notes
+
+Shipped and confirmed working in a running Jellyfin dashboard.
+
+- **Backend (persisted-order queue).** FIFO → `queuePosition`-ordered selection
+  on a condition variable ([worker/queue.py](../../worker/queue.py)); selection
+  is schedule-aware so a reorder made while a job waits out its window takes
+  effect (the worker never commits to a job while waiting). Added `reorder`,
+  `requeue`, `set_paused`/`is_paused`; `queuePosition` on the `Job` model;
+  recovery assigns positions by `createdAt` to any job predating the field.
+- **New worker endpoints** ([worker/main.py](../../worker/main.py)):
+  `POST /api/jobs/reorder`, `POST /api/jobs/{id}/requeue` (404/400), and
+  `POST /api/jobs/pause`; `paused` added to `GET /api/health`.
+- **Tests** — `tests/test_queue.py` (real `JobQueue`, asserts on run order) and
+  `tests/test_jobs_api.py` (endpoints); `test_recovery.py`/`test_schedule.py`
+  stay green. Full non-e2e suite: 185 passing.
+- **Plugin C#** — job DTO gains `queuePosition`/`createdAt`, health gains
+  `paused`; `ReorderJobsAsync`/`RequeueJobAsync`/`SetPausedAsync` and the
+  `Jobs/Reorder`, `Jobs/{id}/Requeue`, `Jobs/Pause` proxies.
+- **Dashboard page** — [reviewPage.html](../../plugin/Jellyfin.Plugin.CleanMedia/Configuration/reviewPage.html)
+  rewritten as the tabbed Settings + Queue page per the final mockup.
+- **Config page retired** — `configPage.html` deleted; the tabbed page is now the
+  single plugin page (main-menu entry + config destination).
+
 Reference prototypes (design source of truth, throwaway — capture to a branch,
 don't keep on `main`):
 [plan/prototypes/queue_manager_final.html](../prototypes/queue_manager_final.html)
