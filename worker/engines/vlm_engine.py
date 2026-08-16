@@ -475,37 +475,49 @@ class VLMEngine(EngineAdapter):
             def worker(host: str) -> None:
                 nonlocal live
                 fails = 0
-                while not stop.is_set():
-                    try:
-                        shot, when, attempt = work_q.get_nowait()
-                    except queuelib.Empty:
-                        break
-                    jpeg = self._grab(media_path, when)
-                    if not jpeg:
-                        result_q.put(("grab_fail", shot, when, None))
-                        continue
-                    try:
-                        verdict = self._ask(
-                            host, model, jpeg, prompt, num_ctx, num_gpu
-                        )
-                        fails = 0
-                        result_q.put(("ok", shot, when, verdict))
-                    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-                        fails += 1
-                        if attempt + 1 < max_attempts:
-                            work_q.put((shot, when, attempt + 1))  # let a peer try
-                        else:
-                            result_q.put(("give_up", shot, when, exc))
-                        if fails >= 5:
-                            # This host is persistently down: evict it and let
-                            # the survivors carry the run. Its in-flight sample
-                            # was already requeued (or given up) above.
-                            result_q.put(("host_dead", host, None, exc))
+                # The whole body is under try/finally: the ``live`` decrement and
+                # the "drained" sentinel MUST fire even if something in here
+                # throws, or the consumer blocks forever on result_q waiting for
+                # a worker that has silently died — a full-pass freeze.
+                try:
+                    while not stop.is_set():
+                        try:
+                            shot, when, attempt = work_q.get_nowait()
+                        except queuelib.Empty:
                             break
-                with state_lock:
-                    live -= 1
-                    if live == 0:
-                        result_q.put(("drained", None, None, None))
+                        try:
+                            jpeg = self._grab(media_path, when)
+                            if not jpeg:
+                                result_q.put(("grab_fail", shot, when, None))
+                                continue
+                            verdict = self._ask(
+                                host, model, jpeg, prompt, num_ctx, num_gpu
+                            )
+                            fails = 0
+                            result_q.put(("ok", shot, when, verdict))
+                        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                            fails += 1
+                            if attempt + 1 < max_attempts:
+                                work_q.put((shot, when, attempt + 1))  # peer tries
+                            else:
+                                result_q.put(("give_up", shot, when, exc))
+                            if fails >= 5:
+                                # This host is persistently down: evict it and let
+                                # the survivors carry the run. Its in-flight sample
+                                # was already requeued (or given up) above.
+                                result_q.put(("host_dead", host, None, exc))
+                                break
+                        except Exception as exc:  # noqa: BLE001
+                            # Any other error (a frame-grab/decode failure, etc.)
+                            # must not strand the consumer. Resolve this sample as
+                            # a give-up — counted as done for the loop, left
+                            # un-done on disk so a resume retries it — and carry on.
+                            result_q.put(("give_up", shot, when, exc))
+                finally:
+                    with state_lock:
+                        live -= 1
+                        if live == 0:
+                            result_q.put(("drained", None, None, None))
 
             threads = [
                 threading.Thread(

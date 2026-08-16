@@ -3,4 +3,8 @@ Worker/plugin version handshake. The worker and plugin are now released together
 
 Much faster visual analysis on small graphics cards. The vision pass now loads the whole model onto the GPU by default instead of leaving part of it on the CPU — measured about 3.8× faster on a 4 GB card. Nothing to configure; it just runs quicker.
 
+Voice-only mute now previews correctly. When you set a finding to "Voice-only mute" and played it in the review page, the Cleaned preview was silencing the whole span — music and all — instead of removing just the spoken word. The scene preview now runs the real vocal-removal so you hear exactly what the clean copy will sound like: the word gone, the music and ambient playing through. (The whole-film continuous preview still hard-mutes those spans, since it can't separate audio on the fly.)
+
 Use a second machine's GPU for the visual pass. You can now point the worker at more than one Ollama server, and a single film's frames are spread across all of them at once — so a second PC's graphics card roughly doubles the speed. Set it once on the worker with CLEANMEDIA_VLM_HOSTS (a comma-separated list of Ollama URLs), or pass --hosts to the analyze command. The pool balances itself: a faster card simply does more frames, and if one machine goes offline mid-run the pass keeps going on the others and picks up the rest on the next run.
+
+Fixed a rare freeze in the multi-GPU visual pass. If a frame failed to extract or decode while analysis was spread across more than one graphics card, the pass could stop making progress and sit stuck instead of moving on. It now treats that frame as a skip (retried next run) and keeps going, so the pass can't stall.

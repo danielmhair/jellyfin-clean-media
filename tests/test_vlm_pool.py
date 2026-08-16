@@ -140,6 +140,70 @@ def test_one_dead_host_fails_over_to_the_survivor(tmp_path, monkeypatch):
     assert good["http://good:11434"] >= plan - 10
 
 
+def test_worker_exception_does_not_wedge_the_pass(tmp_path, monkeypatch):
+    """An unexpected error in a worker must not hang the consumer.
+
+    Regression: `_grab` (frame extraction) sat outside the worker's try, so a
+    decode/subprocess error killed the thread before it decremented the live
+    count or posted "drained" — and the consumer blocked forever on the result
+    queue, freezing the whole pass. Every sample here raises a non-network
+    error; the run must still finish (as give-ups), not hang.
+    """
+    media, cache, _ = _make_film(tmp_path, n_shots=20)
+    eng = VLMEngine()
+
+    def boom(m, when):
+        raise ValueError("frame decode blew up")
+
+    monkeypatch.setattr(eng, "_grab", boom)
+    monkeypatch.setattr(eng, "_ask", lambda *a, **k: {})  # never reached
+
+    result = {}
+    err = {}
+
+    def run():
+        try:
+            result["tl"], _ = _run(eng, media, cache, ["http://a:11434", "http://b:11434"])
+        except Exception as e:  # noqa: BLE001 — surface, don't swallow, in the test
+            err["e"] = e
+
+    th = threading.Thread(target=run, daemon=True)
+    th.start()
+    th.join(timeout=30)
+    assert not th.is_alive(), "analyze() hung — a worker died without draining"
+    # It resolved every sample as a give-up: no crash, no findings, no hang.
+    assert "e" not in err, f"unexpected raise: {err.get('e')}"
+    assert result["tl"].segments == []
+
+
+def test_one_host_raising_unexpectedly_still_completes_on_the_other(tmp_path, monkeypatch):
+    """A non-network fault on one host fails that sample over, run completes."""
+    media, cache, _ = _make_film(tmp_path, n_shots=20)
+    eng = VLMEngine()
+    monkeypatch.setattr(eng, "_grab", lambda m, when: b"jpeg")
+
+    def fake_ask(host, model, jpeg, prompt, num_ctx=2048, num_gpu=None):
+        if host.endswith("bad:11434"):
+            # Slow, so it can't drain the shared queue into give-ups before the
+            # good host works it — an unexpected error isn't retried on a peer.
+            time.sleep(0.05)
+            raise ValueError("boom")  # not URLError/TimeoutError/OSError
+        return {"female_topless": True, "description": "x"}
+
+    monkeypatch.setattr(eng, "_ask", fake_ask)
+    result = {}
+
+    def run():
+        result["tl"], _ = _run(eng, media, cache, ["http://bad:11434", "http://good:11434"])
+
+    th = threading.Thread(target=run, daemon=True)
+    th.start()
+    th.join(timeout=30)
+    assert not th.is_alive(), "analyze() hung"
+    # The good host's detections survived; the run did not wedge on the bad one.
+    assert len(result["tl"].segments) >= 1
+
+
 def test_all_hosts_down_aborts_with_checkpoint(tmp_path, monkeypatch):
     media, cache, _ = _make_film(tmp_path)
     eng = VLMEngine()
