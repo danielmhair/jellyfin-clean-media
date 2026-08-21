@@ -85,6 +85,52 @@ def test_render_voice_removed_pcm_splices_only_the_span(tmp_path, monkeypatch):
     assert np.array_equal(result[hi:], samples[hi:])
 
 
+def test_voice_removed_window_wav_one_pass_over_many_spans(tmp_path, monkeypatch):
+    """The scene-preview path: a window with several voice findings separates the
+    vocals ONCE and subtracts them across every span, leaving the rest untouched."""
+    import wave
+
+    from worker.engines import voice_render
+    from worker.engines.voice_render import voice_removed_window_wav
+
+    sr, ch = 44100, 2
+    calls = {"n": 0}
+
+    # Fake separator: "vocals" are a constant 0.4; mixture is 0.7, so a cleaned
+    # span reads 0.3 and an untouched span stays 0.7. Count the passes.
+    def fake_sep(window, s):
+        calls["n"] += 1
+        return np.full_like(window, 0.4)
+
+    monkeypatch.setattr(voice_render, "separate_vocals", fake_sep)
+
+    def fake_extract(media, out_pcm, s, c, start_s=None, dur_s=None):
+        n = int((dur_s or 0) * s)
+        np.full((n, c), 0.7, dtype=np.float32).__mul__(32767.0).round().astype(
+            "<i2"
+        ).tofile(out_pcm)
+        return True
+
+    monkeypatch.setattr(voice_render, "_extract_pcm", fake_extract)
+
+    out_wav = tmp_path / "w.wav"
+    # 2 s window; two voice spans at 0.2–0.4 s and 1.0–1.2 s (absolute media time,
+    # window starts at t=0).
+    res = voice_removed_window_wav(
+        Path("m.mkv"), 0.0, 2.0, [(0.2, 0.4), (1.0, 1.2)], out_wav, sr=sr, ch=ch
+    )
+    assert res is not None
+    assert calls["n"] == 1  # a single Demucs pass for the whole window
+
+    with wave.open(str(out_wav)) as w:
+        data = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").reshape(-1, ch)
+    data = data.astype(np.float32) / 32767.0
+    # Cleaned spans dropped to ~0.3 (0.7 − 0.4); everything else stayed ~0.7.
+    assert np.allclose(data[int(0.25 * sr)], 0.3, atol=0.01)
+    assert np.allclose(data[int(1.1 * sr)], 0.3, atol=0.01)
+    assert np.allclose(data[int(0.7 * sr)], 0.7, atol=0.01)
+
+
 def test_voice_removed_wav_extracts_and_cleans_up_its_temp(tmp_path):
     """Regression: the review preview path. mkstemp returns an OPEN fd; leaving it
     open left the .pcm temp locked on Windows, so voice_removed_wav crashed at

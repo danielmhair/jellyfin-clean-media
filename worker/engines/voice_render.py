@@ -187,22 +187,23 @@ def render_voice_removed_pcm(
     return out_pcm
 
 
-def voice_removed_wav(
+def voice_removed_window_wav(
     media: Path,
     start_s: float,
     dur_s: float,
-    span_lo_s: float,
-    span_hi_s: float,
+    spans_s: list[tuple[float, float]],
     out_wav: Path,
     sr: int = DEFAULT_SR,
     ch: int = DEFAULT_CH,
     separate: Optional[Separator] = None,
 ) -> Optional[Path]:
-    """A voice-removed WAV of one time window, for the review preview.
+    """A voice-removed WAV of one time window across **several** flagged spans.
 
-    Extracts ``[start_s, start_s+dur_s)``, removes the vocals across
-    ``[span_lo_s, span_hi_s)`` (absolute media time), and writes a WAV the
-    review clip can mux over the video. Returns None if extraction fails.
+    Extracts ``[start_s, start_s+dur_s)`` once, separates its vocals **once**,
+    and subtracts them across each ``(lo, hi)`` of ``spans_s`` (absolute media
+    time) — so a window with three voice findings still pays a single Demucs
+    pass. Everything outside the spans plays through untouched. Returns None if
+    extraction fails or there is nothing to remove.
     """
     separate = separate or separate_vocals
     import os
@@ -223,9 +224,21 @@ def voice_removed_wav(
     if data.size == 0:
         return None
     window = data.reshape(-1, ch).astype(np.float32) / 32768.0
-    span0 = max(0, int((span_lo_s - start_s) * sr))
-    span1 = int((span_hi_s - start_s) * sr)
-    out = remove_vocals(window, sr, span0, span1, separate)
+    total = len(window)
+    spans = [
+        (max(0, int((lo - start_s) * sr)), min(total, int((hi - start_s) * sr)))
+        for lo, hi in spans_s
+    ]
+    spans = [(s0, s1) for s0, s1 in spans if s1 > s0]
+    if not spans:
+        return None
+
+    # One separation for the whole window; zero the vocals across every span.
+    vocals = separate(window, sr)
+    out = window.copy()
+    for s0, s1 in spans:
+        out[s0:s1] = window[s0:s1] - vocals[s0:s1]
+    out = np.clip(out, -1.0, 1.0)
     pcm16 = np.round(out * 32767.0).astype("<i2")
 
     with wave.open(str(out_wav), "wb") as w:
@@ -234,3 +247,25 @@ def voice_removed_wav(
         w.setframerate(sr)
         w.writeframes(pcm16.tobytes())
     return out_wav
+
+
+def voice_removed_wav(
+    media: Path,
+    start_s: float,
+    dur_s: float,
+    span_lo_s: float,
+    span_hi_s: float,
+    out_wav: Path,
+    sr: int = DEFAULT_SR,
+    ch: int = DEFAULT_CH,
+    separate: Optional[Separator] = None,
+) -> Optional[Path]:
+    """A voice-removed WAV of one time window, for the review preview.
+
+    Extracts ``[start_s, start_s+dur_s)``, removes the vocals across
+    ``[span_lo_s, span_hi_s)`` (absolute media time), and writes a WAV the
+    review clip can mux over the video. Returns None if extraction fails.
+    """
+    return voice_removed_window_wav(
+        media, start_s, dur_s, [(span_lo_s, span_hi_s)], out_wav, sr, ch, separate
+    )

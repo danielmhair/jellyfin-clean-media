@@ -421,19 +421,22 @@ def _parse_spans(text: str) -> list[tuple[int, int]]:
 
 @app.get("/api/preview_clip")
 def preview_clip(
-    path: str, startMs: int, endMs: int, cut: str = "", mute: str = "", blur: str = ""
+    path: str, startMs: int, endMs: int,
+    cut: str = "", mute: str = "", blur: str = "", voice: str = "",
 ) -> FileResponse:
     """A cleaned preview of a window [startMs, endMs]: the ``cut`` spans are
-    removed (their footage never transcoded), the ``mute`` spans silenced, and the
-    ``blur`` spans blurred, so the review page can play the window as the viewer
-    will experience it — with every applicable decision applied, not just one
-    finding. Spans are comma-separated absolute-ms ``a-b`` pairs.
+    removed (their footage never transcoded), the ``mute`` spans silenced, the
+    ``voice`` spans have just their vocals removed (Demucs), and the ``blur`` spans
+    blurred, so the review page can play the window as the viewer will experience
+    it — with every applicable decision applied, not just one finding. Spans are
+    comma-separated absolute-ms ``a-b`` pairs.
     """
     media = resolve_media(path)
     if media is None:
         raise HTTPException(404, f"media not found: {path}")
     built = build_preview_clip(
-        media, startMs, endMs, _parse_spans(cut), _parse_spans(mute), _parse_spans(blur)
+        media, startMs, endMs, _parse_spans(cut), _parse_spans(mute),
+        _parse_spans(blur), _parse_spans(voice),
     )
     if built is None:
         raise HTTPException(500, "could not build preview clip")

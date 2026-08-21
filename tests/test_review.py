@@ -334,6 +334,58 @@ def test_build_preview_clip_blurs_a_blur_finding(tmp_path):
     assert 9.0 < dur < 11.0  # blur doesn't cut — the whole 10s window survives
 
 
+def _span_rms(clip, t0, t1):
+    """RMS of a clip's audio across [t0, t1] seconds, via a raw-PCM extract."""
+    import subprocess
+
+    import numpy as np
+
+    pcm = subprocess.run(
+        ["ffmpeg", "-v", "error", "-ss", f"{t0:.3f}", "-i", str(clip),
+         "-t", f"{t1 - t0:.3f}", "-ac", "1", "-ar", "16000", "-f", "s16le", "pipe:1"],
+        capture_output=True,
+    ).stdout
+    a = np.frombuffer(pcm, dtype="<i2").astype(np.float32)
+    return float(np.sqrt(np.mean(a ** 2))) if a.size else 0.0
+
+
+def test_build_preview_clip_voice_removes_vocals_not_all_audio(tmp_path, monkeypatch):
+    """Regression: the review page hard-muted voice-only findings ('muting
+    everything'). A voice span must go through Demucs vocal removal, not a
+    volume=0 mute — so non-vocal audio survives. With a fake separator that
+    reports NO vocals, the tone plays through the voice span untouched; a hard
+    mute on the same span would silence it."""
+    import subprocess
+
+    import numpy as np
+
+    from worker.engines import voice_render
+    from worker.review import build_preview_clip
+
+    # Fake separator: nothing is vocal → mixture − vocals == mixture, so a
+    # voice-removed span keeps all its audio. Isolates the routing from Demucs.
+    monkeypatch.setattr(
+        voice_render, "separate_vocals", lambda w, sr: np.zeros_like(w)
+    )
+
+    media = tmp_path / "clip.mkv"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+         "-i", "testsrc=size=320x240:rate=24:duration=20",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=20",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(media)],
+        check=True,
+    )
+    # window [5s,15s]; the flagged span sits at 3–5 s into the clip.
+    voiced = build_preview_clip(media, 5000, 15000, [], [], [], [(8000, 10000)])
+    muted = build_preview_clip(media, 5000, 15000, [], [(8000, 10000)], [], [])
+    assert voiced is not None and muted is not None and voiced != muted
+
+    # The voice-removed span keeps the tone; the hard-muted span is silent.
+    assert _span_rms(voiced, 3.2, 4.8) > 1000
+    assert _span_rms(muted, 3.2, 4.8) < 50
+
+
 def test_stream_command_applies_blur_over_the_film(tmp_path):
     """A blur decision in Cleaned whole-film streaming becomes the render's gblur,
     even with no cuts (so the straight-transcode path is not taken)."""

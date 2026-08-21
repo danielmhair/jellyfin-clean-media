@@ -567,11 +567,11 @@ def _window_keeps(cuts: list[tuple[float, float]], dur: float) -> list[tuple[flo
 def preview_clip_path(
     media: Path, win_start_ms: int, win_end_ms: int,
     cut_rel: list[tuple[float, float]], mute_rel: list[tuple[float, float]],
-    blur_rel: list[tuple[float, float]],
+    blur_rel: list[tuple[float, float]], voice_rel: list[tuple[float, float]],
 ) -> Path:
     """Cache location for a cleaned-window preview, keyed by its decisions so a
     change (approve another finding, retime one, blur one) yields a different file."""
-    sig = f"{media}|{win_start_ms}|{win_end_ms}|{cut_rel}|{mute_rel}|{blur_rel}"
+    sig = f"{media}|{win_start_ms}|{win_end_ms}|{cut_rel}|{mute_rel}|{blur_rel}|{voice_rel}"
     key = hashlib.sha256(sig.encode("utf-8")).hexdigest()[:20]
     cache = Path(tempfile.gettempdir()) / "cleanmedia-clips"
     cache.mkdir(exist_ok=True)
@@ -595,17 +595,20 @@ def build_preview_clip(
     cuts: list[tuple[int, int]],
     mutes: list[tuple[int, int]],
     blurs: Optional[list[tuple[int, int]]] = None,
+    voices: Optional[list[tuple[int, int]]] = None,
 ) -> Optional[Path]:
     """A short *cleaned* preview of a window: approved **skips are cut out** (their
     footage is never transcoded — the whole point vs. encoding then jumping),
-    approved **mutes/voice are silenced**, and approved **blurs are blurred** (the
-    render's full-frame ``gblur``), so a reviewer sees/hears the window as the
-    viewer will. ``cuts`` / ``mutes`` / ``blurs`` are absolute-ms spans; the window
-    is [win_start_ms, win_end_ms]. Returns None on failure.
+    approved **mutes are silenced**, approved **voice-only mutes have just their
+    vocals removed** (Demucs — the music/ambient plays through), and approved
+    **blurs are blurred** (the render's full-frame ``gblur``), so a reviewer
+    sees/hears the window as the viewer will. ``cuts`` / ``mutes`` / ``blurs`` /
+    ``voices`` are absolute-ms spans; the window is [win_start_ms, win_end_ms].
+    Returns None on failure.
 
-    Voice-only mutes are silenced (not Demucs-separated) in this quick preview —
-    the multi-region, per-play case can't afford the separation pass; the
-    dedicated voice check remains a per-finding concern.
+    Voice removal runs one Demucs pass over the window (cached like the rest of
+    the clip), so this scene preview shows the true voice-only mute — unlike the
+    live whole-film stream, which can't separate per-frame and hard-mutes voice.
     """
     win_start = max(0.0, win_start_ms / 1000)
     win_dur = max(0.1, (win_end_ms - win_start_ms) / 1000)
@@ -622,21 +625,44 @@ def build_preview_clip(
     cut_rel = _merge_spans(rel(cuts))
     mute_rel = rel(mutes)
     blur_rel = rel(blurs or [])
+    voice_rel = rel(voices or [])
 
-    out = preview_clip_path(media, win_start_ms, win_end_ms, cut_rel, mute_rel, blur_rel)
+    out = preview_clip_path(
+        media, win_start_ms, win_end_ms, cut_rel, mute_rel, blur_rel, voice_rel
+    )
     if out.is_file() and out.stat().st_size > 0:
         return out
+
+    # Voice-only findings: pre-render the window's audio with just the vocals
+    # removed across those spans, and feed that as a second input in place of the
+    # source audio. Everything downstream (hard mutes, the skip concat) then
+    # operates on the voice-removed track.
+    voice_wav: Optional[Path] = None
+    if voice_rel:
+        from .engines.voice_render import voice_removed_window_wav
+
+        voice_wav = out.with_suffix(".voice.wav")
+        made = voice_removed_window_wav(
+            media, win_start, win_dur,
+            [(win_start + a, win_start + b) for a, b in voice_rel],
+            voice_wav,
+        )
+        if made is None:  # separation failed — fall back to a plain silence
+            voice_wav = None
 
     keeps = _window_keeps(cut_rel, win_dur)
     if not keeps:  # the whole window is cut — keep a sliver so the element loads
         keeps = [(0.0, min(0.2, win_dur))]
 
     n = len(keeps)
+    # When the vocals were removed the audio comes from input 1 (the WAV); the
+    # video always comes from input 0, so skip-cut the voice spans there too.
+    aidx = 1 if voice_wav else 0
     parts: list[str] = [f"[0:v]{_blur_vf(blur_rel)}scale=640:-2,split={n}" + "".join(f"[vs{i}]" for i in range(n))]
-    asrc = "[0:a]"
+    asrc = f"[{aidx}:a]"
     if mute_rel:
         expr = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in mute_rel)
-        parts.append(f"[0:a]volume=enable='{expr}':volume=0[am]")
+        parts.append(f"[{aidx}:a]volume=enable='{expr}':volume=0[am]")
         asrc = "[am]"
     parts.append(f"{asrc}asplit={n}" + "".join(f"[as{i}]" for i in range(n)))
     for i, (s, e) in enumerate(keeps):
@@ -646,18 +672,25 @@ def build_preview_clip(
     parts.append(f"{joins}concat=n={n}:v=1:a=1[outv][outa]")
     filter_complex = ";".join(parts)
 
-    proc = subprocess.run(
-        [
-            "ffmpeg", "-v", "error", "-y",
-            "-ss", f"{win_start:.3f}", "-i", str(media), "-t", f"{win_dur:.3f}",
-            "-filter_complex", filter_complex,
-            "-map", "[outv]", "-map", "[outa]",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
-            "-c:a", "aac", "-b:a", "128k",
-            "-movflags", "+faststart", str(out),
-        ],
-        capture_output=True, text=True, errors="replace",
-    )
+    cmd = ["ffmpeg", "-v", "error", "-y", "-ss", f"{win_start:.3f}", "-i", str(media)]
+    if voice_wav:
+        # The WAV is already just this window, so it needs no -ss seek.
+        cmd += ["-i", str(voice_wav)]
+    # Output-side -t bounds the whole clip; ffmpeg then stops reading input 0
+    # once the (skip-trimmed) output ends, so the rest of the film is never read.
+    cmd += [
+        "-t", f"{win_dur:.3f}",
+        "-filter_complex", filter_complex,
+        "-map", "[outv]", "-map", "[outa]",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart", str(out),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
+    finally:
+        if voice_wav:
+            voice_wav.unlink(missing_ok=True)
     if proc.returncode != 0 or not out.is_file():
         out.unlink(missing_ok=True)
         return None
@@ -987,9 +1020,9 @@ PAGE = r"""<!doctype html>
   --pos:#2ea043; --pos-d:#12361f; --neg:#da3633; --neg-d:#3d1517;
   --pick:#3b82f6; --undecided:#c9a227;
   --radius:12px;
-  /* Discreet-mode blur: enough to lose detail, not so much you can't tell what's
-     happening. Tune this one value. */
-  --discreet-blur:20px;
+  /* Discreet-mode blur: enough to soften the picture without hiding what's
+     happening — you still need to see the content to review it. Tune this one value. */
+  --discreet-blur:9px;
   /* one colour + one glyph per category, severity-ranked (mirrors _MERGE_SEVERITY) */
   --c-nudity:#ff5c8a; --c-sexual_activity:#ff6b6b; --c-intense_kissing:#ff9f45;
   --c-suggestive:#e0b341; --c-violence:#a78bfa; --c-gore:#e5484d; --c-profanity:#4aa3ff;
@@ -1110,7 +1143,7 @@ kbd{font-family:ui-monospace,monospace}
 /* Discreet = the picture (frame OR moving video) is heavily blurred but still
    shown, so you can play through a bad scene to find/edit it without seeing the
    detail. Hold-to-reveal drops the blur for a clean peek. */
-#D .monitor.discreet .mframe,#D .monitor.discreet .grad,#D .monitor.discreet .mvideo{filter:blur(var(--discreet-blur)) brightness(.75) saturate(.9);transform:scale(1.06)}
+#D .monitor.discreet .mframe,#D .monitor.discreet .grad,#D .monitor.discreet .mvideo{filter:blur(var(--discreet-blur)) brightness(.9) saturate(.95);transform:scale(1.06)}
 #D .monitor .mnote{position:relative;z-index:3;text-align:center;color:#fff;text-shadow:0 2px 10px #000;pointer-events:none;padding:0 12px}
 #D .monitor .mnote .glyph{font-size:34px}
 #D .monitor .mnote .lab{margin-top:6px;font-size:13px;font-weight:600}
@@ -1942,9 +1975,12 @@ function D_cleanedPlan(s){
   const apply=SEGS.filter(x=>(x.approved===true||x.id===s.id)&&x.endMs>winStart&&x.startMs<winEnd);
   const span=x=>[Math.max(winStart,Math.round(x.startMs)),Math.min(winEnd,Math.round(x.endMs))];
   const cuts=apply.filter(x=>x.recommendedAction==='skip').map(span);
-  const mutes=apply.filter(x=>x.recommendedAction==='mute'||x.recommendedAction==='voice').map(span);
+  const mutes=apply.filter(x=>x.recommendedAction==='mute').map(span);
+  // Voice-only mutes get real Demucs vocal removal in the cached scene clip
+  // (kept separate from hard mutes), so the reviewer hears music through.
+  const voices=apply.filter(x=>x.recommendedAction==='voice').map(span);
   const blurs=apply.filter(x=>x.recommendedAction==='blur').map(span);
-  return {winStart,winEnd,cuts,mutes,blurs};
+  return {winStart,winEnd,cuts,mutes,blurs,voices};
 }
 // clip-time → film-time for a cleaned clip: the skips are gone, so time is
 // compressed; walk the kept spans to map where in the film a clip position is.
@@ -1967,7 +2003,7 @@ function D_clipSrc(s){
     const p=D_cleanedPlan(s);
     const enc=spans=>spans.map(([a,b])=>a+'-'+b).join(',');
     return `/api/preview_clip?path=${encodeURIComponent(MEDIA)}&startMs=${p.winStart}&endMs=${p.winEnd}`
-      +`&cut=${enc(p.cuts)}&mute=${enc(p.mutes)}&blur=${enc(p.blurs)}`;
+      +`&cut=${enc(p.cuts)}&mute=${enc(p.mutes)}&blur=${enc(p.blurs)}&voice=${enc(p.voices)}`;
   }
   // Normal / Muted → the plain window clip (audio as-is; Muted mutes the element).
   return `/api/clip?path=${encodeURIComponent(MEDIA)}&startMs=${Math.round(s.startMs)}&endMs=${Math.round(s.endMs)}&pad=${PLAY_PAD}`;
@@ -2058,6 +2094,9 @@ function D_filmPlan(){
     const apply=SEGS.filter(x=>x.approved===true&&x.endMs>start);
     const span=x=>[Math.max(start,Math.round(x.startMs)),Math.round(x.endMs)];
     const cuts=apply.filter(x=>x.recommendedAction==='skip').map(span);
+    // Live whole-film stream can't run Demucs per-frame, so voice-only mutes
+    // fall back to a hard mute here (the word is gone). The scene preview shows
+    // the true voice-only mute with music intact.
     const mutes=apply.filter(x=>x.recommendedAction==='mute'||x.recommendedAction==='voice').map(span);
     const blurs=apply.filter(x=>x.recommendedAction==='blur').map(span);
     const enc=sp=>sp.map(([a,b])=>a+'-'+b).join(',');
