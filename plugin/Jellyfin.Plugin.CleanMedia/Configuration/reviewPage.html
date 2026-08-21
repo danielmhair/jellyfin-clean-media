@@ -877,10 +877,10 @@
         var sub = film.ProductionYear ? String(film.ProductionYear) : 'Film';
         var ov = document.createElement('div');
         ov.className = 'cmOv';
-        ov.innerHTML = '<div class="cmDlg cmRoot">'
+        ov.innerHTML = '<div class="cmDlg cmRoot" role="dialog" aria-modal="true" aria-label="Add passes for ' + esc(name) + '">'
             + '<div class="dhead"><div class="dth">' + (img ? '<img src="' + img + '"/>' : '🎞') + '</div>'
             + '<div style="min-width:0"><div class="dtitle">' + esc(name) + '</div><div class="dsub">' + esc(sub) + '</div></div>'
-            + '<button class="dx" title="Close">×</button></div>'
+            + '<button class="dx" title="Close" aria-label="Close">×</button></div>'
             + '<div class="dbody"><div class="dloading">Checking what’s already done…</div></div>'
             + '<div class="dfoot"><span class="dmsg"></span>'
             + '<button class="cmbtn ghost dcancel">Cancel</button>'

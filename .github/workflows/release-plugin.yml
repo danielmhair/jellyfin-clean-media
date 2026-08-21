@@ -17,6 +17,9 @@ on:
     paths:
       - 'plugin/Jellyfin.Plugin.CleanMedia/**'
       - 'worker/**'
+  # Manual re-run: a release that failed on a bug outside the trigger paths
+  # (e.g. the release script itself) can be retried without a source change.
+  workflow_dispatch: {}
 
 permissions:
   contents: write   # commit the release back + create the GitHub Release

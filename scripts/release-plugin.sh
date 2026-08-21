@@ -62,8 +62,10 @@ zip_path="$releases/$zip_name"
 rm -f "$zip_path"
 
 # Built with python rather than zip/Compress-Archive: neither is reliably
-# present, and PowerShell cannot read Git Bash's /tmp paths.
-"$UV" run python - "$stage" "$zip_path" <<'PY'
+# present, and PowerShell cannot read Git Bash's /tmp paths. --no-project: these
+# are stdlib-only scripts, so never sync the worker env (a multi-GB CUDA torch
+# download) just to zip a DLL — that sync is what failed the release in CI.
+"$UV" run --no-project python - "$stage" "$zip_path" <<'PY'
 import sys, zipfile
 from pathlib import Path
 
@@ -77,13 +79,13 @@ rm -rf "$stage"
 [ -s "$zip_path" ] || { echo "failed to build $zip_path" >&2; exit 1; }
 
 # Jellyfin verifies the download against an MD5 of the zip.
-checksum=$("$UV" run python -c "
+checksum=$("$UV" run --no-project python -c "
 import hashlib,sys
 print(hashlib.md5(open(sys.argv[1],'rb').read()).hexdigest())
 " "$zip_path")
 
 echo "==> writing manifest.json"
-"$UV" run python - "$version" "$checksum" "$raw/$releases/$zip_name" \
+"$UV" run --no-project python - "$version" "$checksum" "$raw/$releases/$zip_name" \
   "${CHANGELOG:-See the repository for changes.}" <<'PY'
 import datetime, json, os, sys
 
