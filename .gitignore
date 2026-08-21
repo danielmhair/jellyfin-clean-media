@@ -14,3 +14,4 @@ obj/
 plugin/dist/
 .pytest-tmp/
 .playwright-cli/
+.cleanmedia.env

@@ -48,9 +48,6 @@ dispose.
 - **Runs when you're not watching.** The visual pass is GPU-heavy, so restrict
   analysis to chosen hours; long passes checkpoint and resume, and the queue
   survives a restart.
-- **Install a matched set, not a guess.** Worker and plugin are released together
-  as one version — check out a tag, install the matching plugin, and the settings
-  page confirms the pair is compatible. See [Releasing](#releasing-maintainers).
 
 For the complete capability catalog, see [docs/FEATURES.md](docs/FEATURES.md).
 
@@ -152,7 +149,47 @@ jellyfish, a starfish, a handwritten note and glass vials as nudity at
 
 ## Install
 
-Requirements:
+### One command (recommended)
+
+Download and extract this repo, then from its folder run:
+
+```bash
+bash scripts/install.sh
+```
+
+**You don't need anything installed first — not even Python.** The script
+installs everything the worker needs: **uv** (which brings its own private
+Python), **FFmpeg**, **Ollama**, and the **vision model**. It only installs
+what's missing, never touches what you already have, and is safe to re-run — so
+if a step needs a fresh terminal, just open one and run it again; it picks up
+where it left off. When it finishes it prints the two remaining steps (install
+the plugin from the manifest URL, start the worker):
+
+```bash
+bash scripts/worker.sh          # start the worker, leave it running
+```
+
+**On a Mac** this works out of the box (Terminal already has `bash`). **On
+Windows**, install [Git Bash](https://git-scm.com/download/win) once
+(`winget install Git.Git`), then run the same `bash scripts/install.sh` from the
+repo folder in Git Bash.
+
+Already run Ollama elsewhere (another GPU box, an existing install)? Point the
+setup at it instead of installing a second copy:
+
+```bash
+bash scripts/install.sh --ollama existing --ollama-host http://192.168.1.9:11434
+```
+
+Have **several GPUs / machines** and want the visual pass to use all of them? See
+[Fanning the visual pass across multiple GPUs](#fanning-the-visual-pass-across-multiple-gpus).
+
+You do **not** need dotnet or to build anything — the plugin installs from the
+manifest URL the script prints at the end.
+
+### Manual install
+
+If you'd rather install the pieces yourself:
 
 | Tool | Why | Install |
 |---|---|---|
@@ -185,6 +222,31 @@ retargets the CLI, so use `127.0.0.1` in shells where you run `ollama pull`.
 `qwen3-vl:8b` and `gemma4:e4b` are ~6.1GB and will *not* fit 6GB alongside
 context — Ollama silently falls back to CPU, costing 5–20× speed. Check with
 `ollama ps`: if `size_vram` is 0, you are on CPU.
+
+### Fanning the visual pass across multiple GPUs
+
+The visual pass is the slow part, and it parallelizes cleanly: one film's frames
+are dispatched across a **pool of Ollama servers**, so several GPUs — cards in
+one box, or separate machines on your network — work the same film at once. A
+faster card simply pulls more frames, so the pool self-balances a 4GB and a 12GB
+card with no tuning.
+
+On **each** GPU machine: install Ollama, set `OLLAMA_HOST=0.0.0.0:11434` so it
+listens on the LAN (restart Ollama, open port 11434 in its firewall), and
+`ollama pull qwen3-vl:4b-instruct` — every host needs the same model.
+
+Then, on the worker machine, register the pool:
+
+```bash
+scripts/vlm-hosts.sh add http://localhost:11434 http://192.168.1.9:11434
+scripts/vlm-hosts.sh list      # probes every host — READY / DOWN / NO MODEL
+```
+
+That writes the pool to `.cleanmedia.env`, which `scripts/worker.sh` reads on
+start (restart the worker to apply). `remove`, `set <a,b,c>`, and `clear` manage
+the list. Under the hood this is just the `CLEANMEDIA_VLM_HOSTS` env var, which
+both CLI runs and plugin-triggered jobs honor; the Windows service takes the
+same pool via `install-service.ps1 -VlmHosts`.
 
 ---
 
