@@ -11,6 +11,32 @@ New entries are added automatically by the release workflow from the notes in
 [Releases page](../../releases) and in `manifest.json`.
 
 <!-- releases -->
+## 0.2.9.0 — 2026-08-21
+
+Worker/plugin version handshake. The worker and plugin are now released together as a matched pair — one version, one download set — so you install a set that's known to work together. The plugin's settings page now checks the worker it connects to: if the two are out of step it shows a clear "version mismatch" warning that names which side is behind and the one command to fix it, instead of failing quietly. When they match you'll just see the worker version as before. Restart the worker after updating so it reports its new version.
+
+Much faster visual analysis on small graphics cards. The vision pass now loads the whole model onto the GPU by default instead of leaving part of it on the CPU — measured about 3.8× faster on a 4 GB card. Nothing to configure; it just runs quicker.
+
+Voice-only mute now previews correctly. When you set a finding to "Voice-only mute" and played it in the review page, the Cleaned preview was silencing the whole span — music and all — instead of removing just the spoken word. The scene preview now runs the real vocal-removal so you hear exactly what the clean copy will sound like: the word gone, the music and ambient playing through. (The whole-film continuous preview still hard-mutes those spans, since it can't separate audio on the fly.)
+
+Use a second machine's GPU for the visual pass. You can now point the worker at more than one Ollama server, and a single film's frames are spread across all of them at once — so a second PC's graphics card roughly doubles the speed. Set it once on the worker with CLEANMEDIA_VLM_HOSTS (a comma-separated list of Ollama URLs), or pass --hosts to the analyze command. The pool balances itself: a faster card simply does more frames, and if one machine goes offline mid-run the pass keeps going on the others and picks up the rest on the next run.
+
+Fixed a rare freeze in the multi-GPU visual pass. If a frame failed to extract or decode while analysis was spread across more than one graphics card, the pass could stop making progress and sit stuck instead of moving on. It now treats that frame as a skip (retried next run) and keeps going, so the pass can't stall.
+
+One-command setup for a fresh machine. A new `scripts/install.sh` gets a new user from a downloaded copy of the project to a working worker in a single step — it installs everything the worker needs (uv and its private Python, FFmpeg, Ollama, and the vision model), only filling in what's missing and never touching what you already have, then prints the two remaining steps (install the plugin from the manifest URL, start the worker). It runs on macOS, Linux, and Windows (in Git Bash), and can point at an Ollama you already run elsewhere with `--ollama existing --ollama-host <url>`.
+
+Easier multi-GPU setup. A new `scripts/vlm-hosts.sh` manages the pool of Ollama servers the visual pass fans across — `add`, `remove`, `set`, `clear`, and a `list` that probes every host and tells you which are ready (reachable and have the model). It saves the pool where the worker reads it on start, so you no longer hand-edit an environment variable.
+
+Lighter "discreet" blur on the review page. Discreet mode now softens the picture less heavily, so you can still tell what's happening in a scene while you review and edit it, instead of it being blurred almost to nothing.
+
+Queue page fits on one screen. On the queue tab, "Running now", "Up next", and "Recent" each scroll within their own area now, so all three stay visible at once instead of pushing each other down a long page — and the "Add to queue" collection list scrolls the same way. A busy queue no longer means scrolling the whole page to see what finished.
+
+Pick exactly what to run, per film. Clicking a film in "Add to queue" now opens a dialog that shows what's already been done for it — which passes have finished, what's still running or queued, and how many findings are approved or waiting for review — and lets you tick the passes you want (profanity from subtitles, profanity from audio, the visual scene pass, and rendering a clean copy) and queue them all in one click. So "analyze for everything" is now a few checkboxes instead of adding each pass separately, and you won't accidentally re-queue something that's already done.
+
+Sort the film list. The "Add to queue" film picker now has a sort control with the usual choices — name, release date (newest or oldest), recently added, community rating, and runtime — so a big library is easier to work through.
+
+Analysis no longer fails on a brief network-drive hiccup. When your films live on a NAS or network share, a momentary dropped read used to fail a whole job — profanity analysis stopping with an "Invalid argument" error, or the visual pass refusing to run because shot detection only saw a fraction of the film. The worker now retries these reads a few times before giving up, so a passing glitch on the share no longer wastes a long run. A file that's genuinely unreadable still reports the same clear error, just after a couple of quick retries.
+
 
 ## 0.2.8.0 — 2026-08-15
 
