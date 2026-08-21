@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..models import Segment, Timeline
+from ..retry import retry_media_read
 from .base import EngineAdapter, ProgressCb
 from .mute_render import render_muted
 from .profanity import Hit, is_profane, merge_hits
@@ -95,11 +96,25 @@ class WhisperEngine(EngineAdapter):
         # before the profanity. So expect this to help substantially but not
         # to close the gap: a human-written subtitle track got 9 of 9, which
         # is why the subtitle engine is preferred wherever one exists.
-        segments, info = model.transcribe(
-            str(media_path),
-            word_timestamps=True,
-            vad_filter=vad_filter,
-            beam_size=5,
+        # faster-whisper decodes the whole audio up front (via PyAV) inside this
+        # call, so a flaky-share read surfaces here as OSError/FileNotFoundError
+        # (EINVAL 22, ENOENT 2) on a path that reads fine a moment later — the
+        # decode happens before transcribe() returns, so a retry re-reads the
+        # file cleanly. RuntimeError is included because faster-whisper wraps
+        # some decode failures; a non-transient error still surfaces after the
+        # retries, unchanged.
+        def run():
+            return model.transcribe(
+                str(media_path),
+                word_timestamps=True,
+                vad_filter=vad_filter,
+                beam_size=5,
+            )
+
+        segments, info = retry_media_read(
+            run,
+            transient=(OSError, RuntimeError),
+            on_retry=lambda exc: progress(0.01, f"retrying after read error: {exc}"),
         )
         duration = info.duration or 1.0
 

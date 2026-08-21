@@ -60,10 +60,12 @@ def test_sampling_a_valid_shot_stays_in_range():
 
 
 def test_coverage_guard_rejects_a_partial_timeline(monkeypatch, tmp_path):
-    """A decode that stops far short (here half the film) must fail loudly,
-    not be silently stretched over the whole runtime."""
+    """A decode that stops far short (here half the film) on every attempt must
+    fail loudly, not be silently stretched over the whole runtime."""
+    from worker import retry as retry_mod
     from worker import shots as shots_mod
 
+    monkeypatch.setattr(retry_mod, "BACKOFFS_S", ())  # single attempt, no sleeps
     media = tmp_path / "film.mkv"
     media.touch()
     monkeypatch.setattr(shots_mod, "true_fps", lambda _p: (24.0, 1000.0, 24000))
@@ -71,6 +73,44 @@ def test_coverage_guard_rejects_a_partial_timeline(monkeypatch, tmp_path):
 
     with pytest.raises(RuntimeError, match="covered only"):
         shots_mod.detect_shots(media)
+
+
+def test_partial_decode_is_retried_then_succeeds(monkeypatch, tmp_path):
+    """A dropped share read shows up as a short decode; the next attempt reads
+    the whole film. Shot detection must retry rather than fail the job."""
+    from worker import retry as retry_mod
+    from worker import shots as shots_mod
+
+    monkeypatch.setattr(retry_mod, "BACKOFFS_S", (0.0,))  # retry once, no real wait
+    media = tmp_path / "film.mkv"
+    media.touch()
+    monkeypatch.setattr(shots_mod, "true_fps", lambda _p: (24.0, 1000.0, 24000))
+
+    # First pass sees only 11% of the film (the Green Lantern failure); the
+    # retry sees the whole thing.
+    passes = iter([
+        [(_TC(0.0), _TC(110.0))],           # partial → PartialTimeline → retry
+        [(_TC(0.0), _TC(1000.0))],          # full timeline
+    ])
+
+    class _Mgr:
+        def add_detector(self, _d):
+            pass
+
+        def detect_scenes(self, _v, show_progress=False):
+            pass
+
+        def get_scene_list(self):
+            return next(passes)
+
+    import scenedetect
+
+    monkeypatch.setattr(scenedetect, "SceneManager", _Mgr)
+    monkeypatch.setattr(scenedetect, "open_video", lambda _p: object())
+    monkeypatch.setattr(scenedetect, "ContentDetector", lambda threshold=27.0: None)
+
+    shots = shots_mod.detect_shots(media)
+    assert shots and shots[-1].end_s == pytest.approx(1000.0)
 
 
 def test_telecine_undercoverage_is_rescaled_not_rejected(monkeypatch, tmp_path):

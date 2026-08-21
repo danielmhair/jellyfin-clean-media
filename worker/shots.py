@@ -15,6 +15,25 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .retry import retry_media_read
+
+
+class TransientMediaRead(RuntimeError):
+    """A media read that failed but is likely to succeed on retry.
+
+    Raised when a decode comes up short — the usual symptom of a NAS/SMB read
+    that was dropped mid-stream rather than a genuinely broken file. Retried by
+    ``retry_media_read``; if every attempt fails, the last one surfaces unchanged.
+    """
+
+
+class PartialTimeline(TransientMediaRead):
+    """Shot detection covered far less of the film than its true duration.
+
+    Almost always a decode that stopped short (a dropped share read), so it is
+    retried; a truly truncated file fails every attempt and this is raised.
+    """
+
 
 @dataclass
 class Shot:
@@ -37,41 +56,56 @@ def media_duration(media_path: Path) -> float:
     when a render needs the film's length to compute skip keeps but does not
     need the full decode-and-count that true_fps does.
     """
-    return float(
-        subprocess.run(
+    def run() -> float:
+        out = subprocess.run(
             [
                 "ffprobe", "-v", "error", "-show_entries", "format=duration",
                 "-of", "csv=p=0", str(media_path),
             ],
             capture_output=True, text=True, check=True,
         ).stdout.strip()
+        return float(out)  # empty output (a dropped read) raises ValueError → retried
+
+    # A flaky share makes ffprobe exit non-zero or return nothing; retry before
+    # failing the job. See worker/retry.py.
+    return retry_media_read(
+        run, transient=(subprocess.CalledProcessError, ValueError)
     )
 
 
 def true_fps(media_path: Path) -> tuple[float, float, int]:
     """Return (fps, duration_s, frame_count) as the decoder actually emits them."""
     duration = media_duration(media_path)
+
     # Decode-and-discard is the only reliable count: nb_frames is often absent
     # or wrong, and container fps cannot be trusted on telecined sources.
-    proc = subprocess.run(
-        [
-            "ffmpeg", "-hide_banner", "-nostats", "-i", str(media_path),
-            "-map", "0:v:0", "-f", "null", "-",
-        ],
-        capture_output=True, text=True, errors="replace",
-    )
-    frames = 0
-    for token in proc.stderr.split():
-        if token.startswith("frame="):
-            frames = int(token.split("=", 1)[1] or 0)
-    for line in reversed(proc.stderr.splitlines()):
-        if "frame=" in line:
-            part = line.split("frame=", 1)[1].strip().split()[0]
-            if part.isdigit():
-                frames = int(part)
-            break
-    if not frames or duration <= 0:
-        raise RuntimeError(f"could not measure frame count for {media_path}")
+    def run() -> int:
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-nostats", "-i", str(media_path),
+                "-map", "0:v:0", "-f", "null", "-",
+            ],
+            capture_output=True, text=True, errors="replace",
+        )
+        frames = 0
+        for token in proc.stderr.split():
+            if token.startswith("frame="):
+                frames = int(token.split("=", 1)[1] or 0)
+        for line in reversed(proc.stderr.splitlines()):
+            if "frame=" in line:
+                part = line.split("frame=", 1)[1].strip().split()[0]
+                if part.isdigit():
+                    frames = int(part)
+                break
+        if not frames:
+            # A decode that emitted no frames is a dropped share read far more
+            # often than a truly empty file — retry it (see worker/retry.py).
+            raise TransientMediaRead(f"could not measure frame count for {media_path}")
+        return frames
+
+    frames = retry_media_read(run, transient=(TransientMediaRead,))
+    if duration <= 0:
+        raise RuntimeError(f"could not measure duration for {media_path}")
     return frames / duration, duration, frames
 
 
@@ -102,37 +136,45 @@ def detect_shots(media_path: Path, threshold: float = 27.0) -> list[Shot]:
 
     fps, duration, frames = true_fps(media_path)
 
-    video = open_video(str(media_path))
-    manager = SceneManager()
-    manager.add_detector(ContentDetector(threshold=threshold))
-    manager.detect_scenes(video, show_progress=False)
-    scenes = manager.get_scene_list()
-    if not scenes:
-        return [Shot(0, 0, frames, 0.0, duration)]
+    # One full detection pass. A partial decode (a dropped share read) trips the
+    # coverage guard below as PartialTimeline, which retry_media_read re-runs —
+    # so a flaky read gets another decode rather than failing the whole film.
+    def one_pass() -> list[Shot]:
+        video = open_video(str(media_path))
+        manager = SceneManager()
+        manager.add_detector(ContentDetector(threshold=threshold))
+        manager.detect_scenes(video, show_progress=False)
+        scenes = manager.get_scene_list()
+        if not scenes:
+            return [Shot(0, 0, frames, 0.0, duration)]
 
-    # How far scenedetect thinks the film runs, in its own (frame-rate-lying)
-    # timeline. Rescale that onto the true duration so full coverage is exact.
-    span = scenes[-1][1].get_seconds()
-    if span <= 0:
-        raise RuntimeError(f"shot detection produced an empty timeline for {media_path}")
-    scale = duration / span
-    if scale > _MAX_TIMELINE_STRETCH:
-        raise RuntimeError(
-            f"shot detection covered only {span:.0f}s of a {duration:.0f}s "
-            f"film ({span / duration:.0%}) — decode stopped short, refusing a "
-            "partial timeline"
-        )
+        # How far scenedetect thinks the film runs, in its own (frame-rate-lying)
+        # timeline. Rescale that onto the true duration so full coverage is exact.
+        span = scenes[-1][1].get_seconds()
+        if span <= 0:
+            raise TransientMediaRead(
+                f"shot detection produced an empty timeline for {media_path}"
+            )
+        scale = duration / span
+        if scale > _MAX_TIMELINE_STRETCH:
+            raise PartialTimeline(
+                f"shot detection covered only {span:.0f}s of a {duration:.0f}s "
+                f"film ({span / duration:.0%}) — decode stopped short, refusing a "
+                "partial timeline"
+            )
 
-    shots: list[Shot] = []
-    for i, (start, end) in enumerate(scenes):
-        start_s = min(duration, start.get_seconds() * scale)
-        end_s = min(duration, end.get_seconds() * scale)
-        if start_s >= duration:
-            break
-        shots.append(Shot(i, start.get_frames(), end.get_frames(), start_s, end_s))
-    if not shots:
-        return [Shot(0, 0, frames, 0.0, duration)]
-    return shots
+        shots: list[Shot] = []
+        for i, (start, end) in enumerate(scenes):
+            start_s = min(duration, start.get_seconds() * scale)
+            end_s = min(duration, end.get_seconds() * scale)
+            if start_s >= duration:
+                break
+            shots.append(Shot(i, start.get_frames(), end.get_frames(), start_s, end_s))
+        if not shots:
+            return [Shot(0, 0, frames, 0.0, duration)]
+        return shots
+
+    return retry_media_read(one_pass, transient=(TransientMediaRead,))
 
 
 def sample_times(
