@@ -83,7 +83,9 @@ jobs:
           { echo "CHANGELOG<<CL_EOF"; printf '%s\n' "$cl"; echo "CL_EOF"; } >> "$GITHUB_ENV"
 
       - name: Build plugin & update manifest
-        run: scripts/release-plugin.sh "${{ steps.ver.outputs.next }}"   # uses $CHANGELOG
+        # Invoke via bash, not directly: the script is authored on Windows where
+        # the executable bit isn't tracked, so `./script` exits 126 on Linux CI.
+        run: bash scripts/release-plugin.sh "${{ steps.ver.outputs.next }}"   # uses $CHANGELOG
 
       - name: Reset the changelog file for the next release
         if: steps.cl.outputs.used_file == 'true'
