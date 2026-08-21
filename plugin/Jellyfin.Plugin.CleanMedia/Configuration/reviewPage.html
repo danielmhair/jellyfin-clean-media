@@ -128,11 +128,14 @@
 
                             <div class="addcard">
                                 <div class="addhead"><span class="t">Add to queue</span>
-                                    <span class="s" id="CmAddHint">— pick a pass, open a collection, click a film</span></div>
-                                <div class="seg" id="CmEngineSeg"></div>
+                                    <span class="s" id="CmAddHint">— open a collection, then click a film to choose passes</span></div>
                                 <input class="search2" id="CmFilmSearch" placeholder="Search films…" />
                                 <div class="addnav" id="CmAddNav"></div>
-                                <div class="cblabel" id="CmAddLabel">Collections</div>
+                                <div class="cblabel"><span id="CmAddLabel">Collections</span>
+                                    <label class="sortwrap" id="CmSortWrap" hidden>Sort
+                                        <select class="sortsel" id="CmSortSel"></select>
+                                    </label>
+                                </div>
                                 <div class="collist" id="CmAddList"></div>
                             </div>
                         </div>
@@ -240,16 +243,18 @@
 .cmRoot .addhead{display:flex;align-items:center;gap:10px;margin-bottom:11px;flex-wrap:wrap;}
 .cmRoot .addhead .t{font-size:13px;font-weight:700;}
 .cmRoot .addhead .s{font-size:12px;color:var(--cm-muted);}
-.cmRoot .seg{display:flex;gap:6px;flex-wrap:wrap;}
-.cmRoot .seg .opt{display:inline-flex;align-items:center;gap:7px;padding:6px 11px;border-radius:9px;
-  border:1px solid var(--cm-line-2);background:var(--cm-panel-2);font-size:12px;font-weight:600;cursor:pointer;}
-.cmRoot .seg .opt .dot{width:9px;height:9px;border-radius:50%;}
-.cmRoot .seg .opt.sel{border-color:currentColor;background:rgba(255,255,255,.04);}
 .cmRoot .search2{margin:13px 0 2px;background:var(--cm-panel-2);border:1px solid var(--cm-line);border-radius:9px;
   padding:9px 12px;color:var(--cm-ink);font-size:12.5px;width:100%;}
 .cmRoot .cblabel{font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--cm-muted);
-  margin:14px 2px 8px;font-weight:700;}
-.cmRoot .collist{display:flex;flex-direction:column;gap:8px;overflow:auto;flex:1;min-height:120px;}
+  margin:14px 2px 8px;font-weight:700;display:flex;align-items:center;justify-content:space-between;gap:10px;}
+.cmRoot .sortwrap{display:inline-flex;align-items:center;gap:6px;font-size:10px;letter-spacing:.06em;color:var(--cm-muted);}
+.cmRoot .sortwrap[hidden]{display:none;}
+.cmRoot .sortsel{background:var(--cm-panel-2);border:1px solid var(--cm-line-2);border-radius:8px;color:var(--cm-ink);
+  font:inherit;font-size:11.5px;font-weight:600;letter-spacing:0;text-transform:none;padding:5px 8px;cursor:pointer;}
+.cmRoot .collist{display:flex;flex-direction:column;gap:8px;overflow-y:auto;flex:1;min-height:120px;max-height:46vh;
+  padding-right:4px;scrollbar-width:thin;scrollbar-color:var(--cm-line-2) transparent;}
+.cmRoot .collist::-webkit-scrollbar{width:8px;}
+.cmRoot .collist::-webkit-scrollbar-thumb{background:var(--cm-line-2);border-radius:999px;}
 .cmRoot .crow{display:flex;align-items:center;gap:11px;padding:9px 12px 9px 9px;border-radius:11px;
   border:1px solid var(--cm-line);background:var(--cm-card);cursor:pointer;}
 .cmRoot .crow:hover{border-color:var(--cm-line-2);}
@@ -267,6 +272,17 @@
 
 /* rows */
 .cmRoot .rows{display:flex;flex-direction:column;gap:8px;}
+/* each queue section scrolls on its own so Running now / Up next / Recent
+   are all visible at once without scrolling the whole page */
+.cmRoot #CmActive{max-height:24vh;overflow-y:auto;}
+.cmRoot #CmQueued{max-height:34vh;overflow-y:auto;}
+.cmRoot #CmRecent{max-height:26vh;overflow-y:auto;}
+.cmRoot #CmActive,.cmRoot #CmQueued,.cmRoot #CmRecent{
+  padding-right:4px;scrollbar-width:thin;scrollbar-color:var(--cm-line-2) transparent;}
+.cmRoot #CmActive::-webkit-scrollbar,.cmRoot #CmQueued::-webkit-scrollbar,
+.cmRoot #CmRecent::-webkit-scrollbar{width:8px;}
+.cmRoot #CmActive::-webkit-scrollbar-thumb,.cmRoot #CmQueued::-webkit-scrollbar-thumb,
+.cmRoot #CmRecent::-webkit-scrollbar-thumb{background:var(--cm-line-2);border-radius:999px;}
 .cmRoot .row{position:relative;display:flex;align-items:center;gap:12px;background:var(--cm-card);
   border:1px solid var(--cm-line);border-radius:12px;padding:12px 14px 12px 0;
   box-shadow:0 1px 1px rgba(0,0,0,.25);overflow:hidden;}
@@ -351,6 +367,46 @@
   background:rgba(20,22,25,.94);backdrop-filter:blur(8px);border:1px solid var(--cm-line-2);
   border-radius:12px;padding:12px 16px;box-shadow:var(--cm-shadow);}
 .cmRoot .savebar .grow{flex:1;}
+
+/* add-passes modal */
+.cmOv{position:fixed;inset:0;z-index:200000;display:flex;align-items:center;justify-content:center;
+  background:rgba(0,0,0,.55);padding:20px;}
+.cmDlg{background:var(--cm-panel);color:var(--cm-ink);width:520px;max-width:100%;max-height:88vh;
+  border:1px solid var(--cm-line-2);border-radius:16px;box-shadow:0 18px 60px rgba(0,0,0,.55);
+  display:flex;flex-direction:column;overflow:hidden;
+  font:14.5px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+.cmDlg .dhead{display:flex;align-items:center;gap:13px;padding:18px 20px 14px;border-bottom:1px solid var(--cm-line);}
+.cmDlg .dth{width:44px;height:44px;border-radius:9px;overflow:hidden;background:#222;flex:0 0 auto;
+  display:grid;place-items:center;font-size:21px;}
+.cmDlg .dth img{width:100%;height:100%;object-fit:cover;}
+.cmDlg .dtitle{font-size:16.5px;font-weight:700;line-height:1.25;}
+.cmDlg .dsub{font-size:12px;color:var(--cm-muted);margin-top:2px;}
+.cmDlg .dx{margin-left:auto;background:none;border:none;color:var(--cm-muted);font-size:22px;cursor:pointer;
+  width:30px;height:30px;border-radius:8px;flex:0 0 auto;}
+.cmDlg .dx:hover{background:var(--cm-panel-2);color:var(--cm-ink);}
+.cmDlg .dbody{padding:14px 20px;overflow-y:auto;display:flex;flex-direction:column;gap:9px;}
+.cmDlg .dloading{padding:34px;text-align:center;color:var(--cm-muted);}
+.cmDlg .dhint{font-size:12px;color:var(--cm-muted);margin:0 0 3px;}
+.cmDlg .pcard{display:flex;align-items:center;gap:12px;padding:12px 13px;border-radius:12px;
+  border:1px solid var(--cm-line);background:var(--cm-card);cursor:pointer;transition:.12s border-color,.12s background;}
+.cmDlg .pcard:hover:not(.disabled){border-color:var(--cm-line-2);}
+.cmDlg .pcard.sel{border-color:var(--cm-accent);background:rgba(74,168,255,.07);}
+.cmDlg .pcard.disabled{cursor:default;opacity:.62;}
+.cmDlg .pglyph{width:38px;height:38px;border-radius:10px;display:grid;place-items:center;font-size:18px;flex:0 0 auto;}
+.cmDlg .pinfo{flex:1;min-width:0;}
+.cmDlg .pname{font-weight:650;font-size:14px;}
+.cmDlg .pstate{font-size:12px;color:var(--cm-muted);margin-top:2px;display:flex;align-items:center;gap:7px;flex-wrap:wrap;}
+.cmDlg .sbadge{font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:999px;letter-spacing:.02em;}
+.cmDlg .sbadge.done{background:rgba(63,185,80,.16);color:#7ee787;}
+.cmDlg .sbadge.busy{background:rgba(74,168,255,.16);color:#8cc6ff;}
+.cmDlg .sbadge.todo{background:var(--cm-panel-2);color:var(--cm-ink-2);border:1px solid var(--cm-line-2);}
+.cmDlg .sbadge.warn{background:rgba(210,153,34,.14);color:#e3b341;}
+.cmDlg .pcheck{width:22px;height:22px;border-radius:7px;border:2px solid var(--cm-line-2);flex:0 0 auto;
+  display:grid;place-items:center;color:var(--cm-accent-ink);font-size:14px;font-weight:800;}
+.cmDlg .pcard.sel .pcheck{background:var(--cm-accent);border-color:var(--cm-accent);}
+.cmDlg .pcard.disabled .pcheck{visibility:hidden;}
+.cmDlg .dfoot{display:flex;align-items:center;gap:12px;padding:14px 20px;border-top:1px solid var(--cm-line);}
+.cmDlg .dfoot .dmsg{font-size:12px;color:var(--cm-muted);flex:1;min-width:0;}
 </style>
 
 <script type="text/javascript">
@@ -371,7 +427,7 @@
     var state = {
         jobs: [], workerUrl: '', paused: false, poll: null,
         hidden: {},                 // type -> true when its rows are toggled off
-        addEngine: 'subtitles',     // selected pass type in Add to queue
+        sortKey: 'name',            // Add-to-queue film sort (see SORTS)
         addView: null,              // null = collections; else a collection {id,name}
         collections: [], films: [], searchTerm: '', dirty: false,
         sessions: [], remotePoll: null, padMs: 1500  // Remote tab: what's playing
@@ -688,16 +744,27 @@
         if (!item.ImageTags || !item.ImageTags.Primary) { return ''; }
         return ApiClient.getImageUrl(item.Id, { type: 'Primary', maxWidth: 90, tag: item.ImageTags.Primary });
     }
-    function renderSeg() {
-        page.querySelector('#CmEngineSeg').innerHTML = ORDER.map(function (e) {
-            var t = TYPES[e];
-            return '<span class="opt ' + (state.addEngine === e ? 'sel' : '') + '" data-eng="' + e + '" style="color:'
-                + (state.addEngine === e ? t.color : 'var(--cm-ink)') + '"><span class="dot" style="background:' + t.color + '"></span>'
-                + t.label + '</span>';
+    // Common Jellyfin sorts for the film picker. `by` maps to the Items API
+    // SortBy (with SortName as a stable tiebreaker).
+    var SORTS = [
+        { key: 'name',      label: 'Name (A–Z)',           by: 'SortName',                     order: 'Ascending' },
+        { key: 'year_desc', label: 'Release date (newest)', by: 'PremiereDate,ProductionYear,SortName', order: 'Descending' },
+        { key: 'year_asc',  label: 'Release date (oldest)', by: 'PremiereDate,ProductionYear,SortName', order: 'Ascending' },
+        { key: 'added',     label: 'Recently added',        by: 'DateCreated,SortName',         order: 'Descending' },
+        { key: 'rating',    label: 'Community rating',      by: 'CommunityRating,SortName',     order: 'Descending' },
+        { key: 'runtime',   label: 'Runtime (longest)',     by: 'Runtime,SortName',             order: 'Descending' }
+    ];
+    function sortDef() { return SORTS.find(function (s) { return s.key === state.sortKey; }) || SORTS[0]; }
+    function buildSortSel() {
+        var sel = page.querySelector('#CmSortSel');
+        sel.innerHTML = SORTS.map(function (s) {
+            return '<option value="' + s.key + '"' + (s.key === state.sortKey ? ' selected' : '') + '>' + esc(s.label) + '</option>';
         }).join('');
-        page.querySelectorAll('#CmEngineSeg .opt').forEach(function (o) {
-            o.onclick = function () { state.addEngine = o.getAttribute('data-eng'); renderSeg(); };
-        });
+        sel.onchange = function () {
+            state.sortKey = sel.value;
+            if (state.searchTerm) { runSearch(state.searchTerm); }
+            else if (state.addView) { openCollection(state.addView.id, state.addView.name); }
+        };
     }
     function loadCollections() {
         return ApiClient.getJSON(ApiClient.getUrl('Library/MediaFolders')).then(function (res) {
@@ -727,19 +794,21 @@
     function renderAdd() {
         var nav = page.querySelector('#CmAddNav'), list = page.querySelector('#CmAddList');
         var hint = page.querySelector('#CmAddHint'), label = page.querySelector('#CmAddLabel');
+        var isFilmList = !!(state.searchTerm || state.addView);
+        page.querySelector('#CmSortWrap').hidden = !isFilmList;
         if (state.searchTerm) {
             nav.innerHTML = ''; label.textContent = 'Search results';
-            hint.textContent = '— click a film to queue it';
+            hint.textContent = '— click a film to choose passes';
             list.innerHTML = state.films.length ? state.films.map(filmRow).join('')
                 : '<div class="empty">No films match “' + esc(state.searchTerm) + '”.</div>';
         } else if (state.addView === null) {
             nav.innerHTML = ''; label.textContent = 'Collections';
-            hint.textContent = '— pick a pass, open a collection, click a film';
+            hint.textContent = '— open a collection, then click a film';
             list.innerHTML = state.collections.length ? state.collections.map(collectionRow).join('')
                 : '<div class="empty">No libraries found.</div>';
         } else {
             label.textContent = state.addView.name;
-            hint.textContent = '— click a film to queue it';
+            hint.textContent = '— click a film to choose passes';
             nav.innerHTML = '<button class="cmbtn mini ghost" id="CmAddBack">← Collections</button>'
                 + '<span class="crumb">' + esc(state.addView.name) + '</span>';
             list.innerHTML = state.films.length ? state.films.map(filmRow).join('')
@@ -754,47 +823,152 @@
             el.onclick = function () { openCollection(el.getAttribute('data-col'), el.getAttribute('data-name')); };
         });
         page.querySelectorAll('#CmAddList [data-film]').forEach(function (el) {
-            el.onclick = function () { queueFilm(el, el.getAttribute('data-film'), el.getAttribute('data-name')); };
+            el.onclick = function () { openAddDialog(el.getAttribute('data-film'), el.getAttribute('data-name')); };
         });
     }
     function openCollection(parentId, name) {
         state.addView = { id: parentId, name: name }; state.films = [];
         page.querySelector('#CmAddList').innerHTML = '<div class="empty">Loading…</div>';
         page.querySelector('#CmAddLabel').textContent = name;
+        var srt = sortDef();
         ApiClient.getJSON(ApiClient.getUrl('Items', {
             ParentId: parentId, IncludeItemTypes: 'Movie,Episode', Recursive: true,
-            Fields: 'ProductionYear', SortBy: 'SortName', Limit: 500
+            Fields: 'ProductionYear', SortBy: srt.by, SortOrder: srt.order, Limit: 500
         })).then(function (res) { state.films = res.Items || []; renderAdd(); });
     }
     var searchTimer = null;
     function runSearch(term) {
         state.searchTerm = term;
         if (!term) { state.films = []; renderAdd(); return; }
+        var srt = sortDef();
         ApiClient.getJSON(ApiClient.getUrl('Items', {
             SearchTerm: term, IncludeItemTypes: 'Movie,Episode', Recursive: true,
-            Fields: 'ProductionYear', SortBy: 'SortName', Limit: 60
+            Fields: 'ProductionYear', SortBy: srt.by, SortOrder: srt.order, Limit: 60
         })).then(function (res) { if (state.searchTerm === term) { state.films = res.Items || []; renderAdd(); } });
     }
-    function queueFilm(el, itemId, name) {
-        var t = TYPES[state.addEngine];
-        var done = function (ok, msg) {
-            var out = page.querySelector('#CmQueueMsg');
-            if (ok) { el.classList.add('added'); setTimeout(function () { el.classList.remove('added'); }, 700); out.textContent = 'Queued ' + name + ' (' + t.tag + ').'; }
-            else { out.textContent = msg || ('Could not queue ' + name + '.'); }
-            loadJobs();
-        };
-        if (t.kind === 'render') {
-            api('POST', 'Render', {}, { itemId: itemId }).then(function (res) {
-                if (res.unreachable) { done(false, 'Worker unreachable.'); }
-                else if (res.error) { done(false, res.error); }
-                else if (res.jobId) { done(true); }
-                else { done(false); }
-            }).catch(function (err) { done(false, 'Could not queue: ' + err); });
+    // ---- add dialog: pick which passes to run for one film ---------------
+    // State per pass comes from POST Status: `enginesDone` for finished
+    // analysis, `jobs` for anything already running/queued for this film.
+    function passState(engine, st) {
+        var act = ((st && st.jobs) || []).find(function (j) { return j.engine === engine; });
+        if (act) { return { kind: 'busy', badge: act.status === 'queued' ? 'Queued' : 'Running' }; }
+        if (st && (st.enginesDone || []).indexOf(engine) !== -1) { return { kind: 'done', badge: 'Done' }; }
+        return { kind: 'todo', badge: 'Not run yet' };
+    }
+    function passCard(engine, st, sel) {
+        var t = TYPES[engine], ps, note, disabled = false, canSel = true;
+        if (engine === 'render') {
+            var busy = ((st && st.jobs) || []).find(function (j) { return j.engine === 'render'; });
+            var approved = (st && st.approved) || 0;
+            if (busy) { ps = { kind: 'busy', badge: busy.status === 'queued' ? 'Queued' : 'Rendering' }; note = 'Already in the queue.'; disabled = true; canSel = false; }
+            else if (approved > 0) { ps = { kind: 'todo', badge: 'Ready' }; note = approved + ' approved finding' + (approved === 1 ? '' : 's') + ' to apply.'; }
+            else { ps = { kind: 'warn', badge: 'Nothing approved' }; note = 'Approve findings in review first.'; disabled = true; canSel = false; }
         } else {
-            api('POST', 'Analyze', {}, { itemIds: [itemId], engine: t.engine }).then(function (res) {
-                var queued = (res.queued || []).filter(function (q) { return q.jobId; });
-                done(queued.length > 0, queued.length ? null : 'The worker could not find that file under its media roots.');
-            }).catch(function (err) { done(false, 'Could not queue: ' + err); });
+            ps = passState(engine, st);
+            if (ps.kind === 'busy') { note = 'Already in the queue for this film.'; disabled = true; canSel = false; }
+            else if (ps.kind === 'done') { note = 'Re-run to refresh findings.'; }
+            else { note = ''; }
+        }
+        return { engine: engine, def: t, ps: ps, note: note, disabled: disabled, canSel: canSel, sel: sel && canSel };
+    }
+    function openAddDialog(itemId, name) {
+        var film = (state.films || []).find(function (f) { return f.Id === itemId; }) || {};
+        var img = imageUrl(film);
+        var sub = film.ProductionYear ? String(film.ProductionYear) : 'Film';
+        var ov = document.createElement('div');
+        ov.className = 'cmOv';
+        ov.innerHTML = '<div class="cmDlg cmRoot">'
+            + '<div class="dhead"><div class="dth">' + (img ? '<img src="' + img + '"/>' : '🎞') + '</div>'
+            + '<div style="min-width:0"><div class="dtitle">' + esc(name) + '</div><div class="dsub">' + esc(sub) + '</div></div>'
+            + '<button class="dx" title="Close">×</button></div>'
+            + '<div class="dbody"><div class="dloading">Checking what’s already done…</div></div>'
+            + '<div class="dfoot"><span class="dmsg"></span>'
+            + '<button class="cmbtn ghost dcancel">Cancel</button>'
+            + '<button class="cmbtn primary dgo" disabled>Add to queue</button></div></div>';
+        document.body.appendChild(ov);
+        function close() { if (ov.parentNode) { ov.parentNode.removeChild(ov); } document.removeEventListener('keydown', onKey); }
+        function onKey(e) { if (e.key === 'Escape') { close(); } }
+        document.addEventListener('keydown', onKey);
+        ov.onclick = function (e) { if (e.target === ov) { close(); } };
+        ov.querySelector('.dx').onclick = close;
+        ov.querySelector('.dcancel').onclick = close;
+
+        api('POST', 'Status', {}, { itemIds: [itemId] }).then(function (res) {
+            var st = (res && res.items && res.items[0]) || null;
+            if (res && res.unreachable) { st = null; }
+            renderBody(st);
+        }).catch(function () { renderBody(null); });
+
+        function renderBody(st) {
+            var body = ov.querySelector('.dbody'), go = ov.querySelector('.dgo'), msg = ov.querySelector('.dmsg');
+            // Default selection: analysis passes not yet done (and not busy).
+            var cards = ORDER.map(function (e) { return passCard(e, st, e !== 'render' && passState(e, st).kind === 'todo'); });
+            var summary = '';
+            if (st && st.analyzed) {
+                summary = '<p class="dhint">' + (st.total || 0) + ' finding' + ((st.total === 1) ? '' : 's')
+                    + ' so far · ' + (st.approved || 0) + ' approved · ' + (st.pending || 0) + ' pending review.</p>';
+            } else if (st) {
+                summary = '<p class="dhint">Not analyzed yet — pick the passes to run.</p>';
+            } else {
+                summary = '<p class="dhint" style="color:#e3b341">Couldn’t reach the worker to check status; you can still queue passes.</p>';
+            }
+            body.innerHTML = summary + cards.map(function (c, i) {
+                return '<div class="pcard' + (c.sel ? ' sel' : '') + (c.disabled ? ' disabled' : '') + '" data-i="' + i + '">'
+                    + '<div class="pglyph" style="background:' + hex(c.def.color, .16) + '">' + c.def.glyph + '</div>'
+                    + '<div class="pinfo"><div class="pname">' + esc(c.def.label) + '</div>'
+                    + '<div class="pstate"><span class="sbadge ' + c.ps.kind + '">' + c.ps.badge + '</span>'
+                    + (c.note ? '<span>' + esc(c.note) + '</span>' : '') + '</div></div>'
+                    + '<div class="pcheck">' + (c.sel ? '✓' : '') + '</div></div>';
+            }).join('');
+
+            function refreshGo() {
+                var n = cards.filter(function (c) { return c.sel; }).length;
+                go.disabled = n === 0;
+                go.textContent = n === 0 ? 'Add to queue' : 'Add ' + n + ' to queue';
+            }
+            body.querySelectorAll('.pcard').forEach(function (el) {
+                var c = cards[+el.getAttribute('data-i')];
+                if (c.disabled) { return; }
+                el.onclick = function () {
+                    c.sel = !c.sel;
+                    el.classList.toggle('sel', c.sel);
+                    el.querySelector('.pcheck').textContent = c.sel ? '✓' : '';
+                    refreshGo();
+                };
+            });
+            refreshGo();
+
+            go.onclick = function () {
+                var picked = cards.filter(function (c) { return c.sel; });
+                if (!picked.length) { return; }
+                go.disabled = true; go.textContent = 'Adding…';
+                var calls = picked.map(function (c) {
+                    if (c.engine === 'render') {
+                        return api('POST', 'Render', {}, { itemId: itemId }).then(function (r) {
+                            return { tag: c.def.tag, ok: !!(r && r.jobId), err: r && (r.error || (r.unreachable && 'worker unreachable')) };
+                        }).catch(function (e) { return { tag: c.def.tag, ok: false, err: String(e) }; });
+                    }
+                    return api('POST', 'Analyze', {}, { itemIds: [itemId], engine: c.engine }).then(function (r) {
+                        var q = (r.queued || []).filter(function (x) { return x.jobId; });
+                        return { tag: c.def.tag, ok: q.length > 0, err: q.length ? null : 'not found under media roots' };
+                    }).catch(function (e) { return { tag: c.def.tag, ok: false, err: String(e) }; });
+                });
+                Promise.all(calls).then(function (results) {
+                    var ok = results.filter(function (r) { return r.ok; });
+                    var bad = results.filter(function (r) { return !r.ok; });
+                    var out = page.querySelector('#CmQueueMsg');
+                    if (ok.length) { out.textContent = 'Queued ' + name + ': ' + ok.map(function (r) { return r.tag; }).join(', ') + '.'; }
+                    loadJobs();
+                    if (bad.length) {
+                        msg.style.color = '#e3b341';
+                        msg.textContent = 'Couldn’t queue ' + bad.map(function (r) { return r.tag; }).join(', ')
+                            + (bad[0].err ? ' — ' + bad[0].err : '') + '.';
+                        go.disabled = false; refreshGo();
+                        if (!ok.length) { return; }
+                    }
+                    close();
+                });
+            };
         }
     }
 
@@ -1135,7 +1309,7 @@
     // ---- entry -----------------------------------------------------------
     function refresh() {
         api('GET', 'Config').then(function (res) { state.workerUrl = (res && res.workerUrl) || ''; }).catch(function () { state.workerUrl = ''; });
-        renderSeg();
+        buildSortSel();
         loadCollections().catch(function () { /* libraries optional */ });
         loadSettings();
         testConnection(true);

@@ -15,4 +15,10 @@ Easier multi-GPU setup. A new `scripts/vlm-hosts.sh` manages the pool of Ollama 
 
 Lighter "discreet" blur on the review page. Discreet mode now softens the picture less heavily, so you can still tell what's happening in a scene while you review and edit it, instead of it being blurred almost to nothing.
 
+Queue page fits on one screen. On the queue tab, "Running now", "Up next", and "Recent" each scroll within their own area now, so all three stay visible at once instead of pushing each other down a long page — and the "Add to queue" collection list scrolls the same way. A busy queue no longer means scrolling the whole page to see what finished.
+
+Pick exactly what to run, per film. Clicking a film in "Add to queue" now opens a dialog that shows what's already been done for it — which passes have finished, what's still running or queued, and how many findings are approved or waiting for review — and lets you tick the passes you want (profanity from subtitles, profanity from audio, the visual scene pass, and rendering a clean copy) and queue them all in one click. So "analyze for everything" is now a few checkboxes instead of adding each pass separately, and you won't accidentally re-queue something that's already done.
+
+Sort the film list. The "Add to queue" film picker now has a sort control with the usual choices — name, release date (newest or oldest), recently added, community rating, and runtime — so a big library is easier to work through.
+
 Analysis no longer fails on a brief network-drive hiccup. When your films live on a NAS or network share, a momentary dropped read used to fail a whole job — profanity analysis stopping with an "Invalid argument" error, or the visual pass refusing to run because shot detection only saw a fraction of the film. The worker now retries these reads a few times before giving up, so a passing glitch on the share no longer wastes a long run. A file that's genuinely unreadable still reports the same clear error, just after a couple of quick retries.
