@@ -17,7 +17,7 @@ import pytest
 
 from worker.engines.base import EngineAdapter
 from worker.models import Job, JobCreate, JobStatus, Timeline
-from worker.queue import JobQueue
+from worker.queue import JobQueue, clean_output_path
 from worker.store import Store
 
 BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -211,3 +211,44 @@ def test_pause_holds_the_next_start_and_resume_releases_it(engine, tmp_path):
 
     q.set_paused(False)
     assert _wait(lambda: engine.order == ["Film 0.mkv"])  # resume releases it
+
+
+# -- where the clean copy is written ------------------------------------------
+# Jellyfin only groups files as selectable *versions* of one movie when they
+# share a per-movie folder and each name begins, character for character, with
+# the folder name + " - <label>". Get this wrong and a clean copy shows up as a
+# duplicate movie, so the naming is pinned here.
+
+
+def test_clean_copy_is_a_version_when_the_film_has_its_own_folder(tmp_path):
+    folder = tmp_path / "Guardians of the Galaxy (2014)"
+    folder.mkdir()
+    media = folder / "Guardians of the Galaxy (2014).mkv"
+    out = clean_output_path(media)
+    # Same folder, folder-name prefix + " - Clean": Jellyfin reads it as a version.
+    assert out == folder / "Guardians of the Galaxy (2014) - Clean.mkv"
+    assert out.parent == media.parent
+
+
+def test_clean_copy_version_prefix_includes_provider_ids(tmp_path):
+    folder = tmp_path / "Movie (2021) [imdbid-tt12801262]"
+    folder.mkdir()
+    media = folder / "Movie (2021) [imdbid-tt12801262].mkv"
+    # The prefix must match the folder name exactly, provider ids and all.
+    assert clean_output_path(media) == folder / "Movie (2021) [imdbid-tt12801262] - Clean.mkv"
+
+
+def test_clean_copy_falls_back_to_subfolder_for_a_flat_library(tmp_path):
+    # A film that isn't in its own folder can't be a version — writing a file
+    # named after the shared parent would mis-group — so use a safe subfolder.
+    media = tmp_path / "Guardians of the Galaxy (2014).mkv"
+    out = clean_output_path(media)
+    assert out == tmp_path / "cleaned" / "Guardians of the Galaxy (2014) (Clean).mkv"
+
+
+def test_clean_copy_falls_back_for_an_episode_under_a_season_folder(tmp_path):
+    season = tmp_path / "Show" / "Season 01"
+    season.mkdir(parents=True)
+    media = season / "Show - S01E01.mkv"
+    out = clean_output_path(media)
+    assert out == season / "cleaned" / "Show - S01E01 (Clean).mkv"

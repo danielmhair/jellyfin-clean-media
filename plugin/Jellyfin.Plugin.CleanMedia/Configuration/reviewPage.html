@@ -442,6 +442,7 @@
         jobs: [], workerUrl: '', paused: false, poll: null,
         hidden: {},                 // type -> true when its rows are toggled off
         sortKey: 'name',            // Add-to-queue film sort (see SORTS)
+        renderedSeen: null,         // ids already 'rendered' (null until first load)
         addView: null,              // null = collections; else a collection {id,name}
         collections: [], films: [], searchTerm: '', dirty: false,
         sessions: [], remotePoll: null, padMs: 1500  // Remote tab: what's playing
@@ -460,6 +461,12 @@
     }
     function hex(c, a) { var n = parseInt(c.slice(1), 16); return 'rgba(' + (n >> 16 & 255) + ',' + (n >> 8 & 255) + ',' + (n & 255) + ',' + a + ')'; }
     function baseName(p) { return String(p || '').split(/[\\/]/).pop(); }
+    // Last two path segments (folder/file), for showing where a clean copy went
+    // without spelling out a long absolute path.
+    function shortPath(p) {
+        var parts = String(p || '').split(/[\\/]/).filter(Boolean);
+        return parts.length <= 1 ? (parts[0] || '') : parts.slice(-2).join('/');
+    }
     function gripSVG() {
         return '<svg width="12" height="18" viewBox="0 0 12 18"><g fill="currentColor">'
             + [3, 9, 15].map(function (y) { return '<circle cx="3" cy="' + y + '" r="1.6"/><circle cx="9" cy="' + y + '" r="1.6"/>'; }).join('')
@@ -519,6 +526,7 @@
             }
             page.querySelector('#CmQueueMsg').textContent = '';
             state.jobs = res.jobs || [];
+            detectNewRenders();
             renderQueue();
             schedulePoll();
         }).catch(function (err) {
@@ -584,10 +592,17 @@
         var can = j.status === 'failed' || j.status === 'cancelled';
         var extra = '';
         if (j.error) { extra = '<span style="color:#ffb4b0">· ' + esc(String(j.error).split('\n')[0]) + '</span>'; }
-        else if (j.status === 'rendered') { extra = '<span>· clean copy written</span>'; }
+        else if (j.status === 'rendered') {
+            var cp = j.renderedPath ? shortPath(j.renderedPath) : '';
+            extra = '<span title="' + esc(j.renderedPath || '') + '">· clean copy: ' + esc(cp || 'written') + '</span>';
+        }
         else if (j.status === 'completed') { extra = '<span>· done</span>'; }
         var acts = '';
         if (can) { acts += '<button class="cmbtn mini" data-requeue="' + j.id + '">↻ Requeue</button>'; }
+        if (j.status === 'rendered') {
+            acts += '<button class="cmbtn mini" title="Open this film in Jellyfin" '
+                + 'data-open="' + esc(j.renderedPath || '') + '" data-openfallback="' + esc(j.mediaPath || '') + '">▶ Open in Jellyfin</button>';
+        }
         if (j.status === 'completed' && state.workerUrl) { acts += '<button class="cmbtn mini" data-review="' + esc(j.mediaPath) + '">Review</button>'; }
         acts += '<button class="iconbtn ghost" title="Remove" data-remove="' + j.id + '">✕</button>';
         return '<div class="row"><div class="stripe" style="background:' + t.color + '"></div>'
@@ -710,6 +725,61 @@
                 if (!state.workerUrl) { return; }
                 window.open(state.workerUrl + '/api/review?path=' + encodeURIComponent(b.getAttribute('data-review')), '_blank');
             };
+        });
+        page.querySelectorAll('#tab-queue [data-open]').forEach(function (b) {
+            b.onclick = function () { openFilmInJellyfin(b.getAttribute('data-open'), b.getAttribute('data-openfallback')); };
+        });
+    }
+
+    // When a render finishes, its clean copy is a new file Jellyfin hasn't seen.
+    // Kick one incremental library scan so it attaches to the movie as a "Clean"
+    // version. We only react to renders that finish *this session* — a page full
+    // of old rendered jobs on first load must not trigger a scan.
+    var rescanCooling = false;
+    function detectNewRenders() {
+        var renderedIds = state.jobs.filter(function (j) { return j.status === 'rendered'; })
+            .map(function (j) { return j.id; });
+        if (state.renderedSeen === null) {
+            state.renderedSeen = {};
+            renderedIds.forEach(function (id) { state.renderedSeen[id] = true; });
+            return;
+        }
+        var fresh = renderedIds.filter(function (id) { return !state.renderedSeen[id]; });
+        fresh.forEach(function (id) { state.renderedSeen[id] = true; });
+        if (fresh.length) { triggerRescan(); }
+    }
+    function triggerRescan() {
+        if (rescanCooling) { return; }
+        rescanCooling = true;
+        setTimeout(function () { rescanCooling = false; }, 10000);
+        api('POST', 'Rescan', {}).then(function (res) {
+            if (res && res.ok) {
+                page.querySelector('#CmQueueMsg').textContent =
+                    'Clean copy rendered — scanning your library so it appears as a “Clean” version in the player.';
+            }
+        }).catch(function () { /* a scan we couldn't kick isn't worth interrupting the queue for */ });
+    }
+
+    // Jump to a film's page inside Jellyfin. The clean copy is a separate file;
+    // if it's been scanned into the library we open it, otherwise we open the
+    // original film (where approved skips already apply). We resolve the id
+    // server-side because only Jellyfin knows the path->item mapping.
+    function goInJellyfin(url) {
+        try { if (window.Dashboard && Dashboard.navigate) { Dashboard.navigate(url); return; } } catch (e) { /* fall through */ }
+        try { if (window.Emby && Emby.Page && Emby.Page.show) { Emby.Page.show('/' + url); return; } } catch (e) { /* fall through */ }
+        window.location.hash = '#/' + url;
+    }
+    function openFilmInJellyfin(renderedPath, mediaPath) {
+        var msg = page.querySelector('#CmQueueMsg');
+        var query = { path: renderedPath || mediaPath || '' };
+        if (mediaPath) { query.fallback = mediaPath; }
+        api('GET', 'ItemForPath', query).then(function (res) {
+            if (!res || !res.itemId) { msg.textContent = 'That film isn’t in your Jellyfin library.'; return; }
+            msg.textContent = res.isCleanCopy ? ''
+                : 'Opened in Jellyfin — pick the “Clean” version in the player. (If it isn’t listed yet, the library scan may still be running.)';
+            goInJellyfin('details?id=' + res.itemId + '&serverId=' + ApiClient.serverId());
+        }).catch(function () {
+            msg.textContent = 'Couldn’t find that file in Jellyfin. The clean copy is at: ' + (renderedPath || mediaPath || '');
         });
     }
 

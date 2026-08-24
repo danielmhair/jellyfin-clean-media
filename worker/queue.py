@@ -36,6 +36,29 @@ def _fmt_duration(seconds: float) -> str:
     return f"{whole // 3600}h{(whole % 3600) // 60:02d}m"
 
 
+def clean_output_path(media: Path) -> Path:
+    """Where a film's clean copy should be written.
+
+    Jellyfin groups multiple files in one *movie folder* as selectable versions
+    of the same movie, as long as each file name begins — character for
+    character — with the folder name, followed by ``" - <label>"``. So when the
+    film sits in its own folder (``Movie (2014)/Movie (2014).mkv``) we write the
+    clean copy alongside it as ``Movie (2014) - Clean.mkv``: it shows up as a
+    "Clean" version to pick in the player, and the original is never touched.
+
+    When the film is *not* in its own folder (a flat library, or an episode
+    under ``Season 01/``), version grouping can't work — naming a file after the
+    shared parent folder would either fail to group or collide — so we fall back
+    to a ``cleaned/`` subfolder, which is safe but won't appear as a version.
+    """
+    # A dedicated per-movie folder is the standard Jellyfin layout and the only
+    # one where the file name equals the folder name. That exact match is also
+    # what version grouping requires, so it's the right condition to key on.
+    if media.stem == media.parent.name:
+        return media.parent / f"{media.parent.name} - Clean{media.suffix}"
+    return media.parent / "cleaned" / f"{media.stem} (Clean){media.suffix}"
+
+
 class JobCancelled(Exception):
     """Raised inside a running job to abort it when a cancel is requested."""
 
@@ -615,8 +638,7 @@ class JobQueue:
             raise RuntimeError("no analysis results to render from")
 
         media = Path(job.mediaPath)
-        default_out = media.parent / "cleaned" / f"{media.stem} (Clean){media.suffix}"
-        output = Path(job.options.get("renderOutputPath") or default_out)
+        output = Path(job.options.get("renderOutputPath") or clean_output_path(media))
         started = time.monotonic()
         log.info("job %s rendering: %s (%s) -> %s", job.id, media.name, job.engine, output)
 
@@ -653,8 +675,7 @@ class JobQueue:
             # submit and now — better to fail than render an empty diff.
             raise RuntimeError("no approved findings to render")
 
-        default_out = media.parent / "cleaned" / f"{media.stem} (Clean){media.suffix}"
-        output = Path(job.options.get("renderOutputPath") or default_out)
+        output = Path(job.options.get("renderOutputPath") or clean_output_path(media))
         started = time.monotonic()
         log.info(
             "job %s rendering: %s -> %s (%d approved finding(s))",

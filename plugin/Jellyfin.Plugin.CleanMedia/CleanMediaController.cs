@@ -608,6 +608,55 @@ public class CleanMediaController : ControllerBase
         return Ok(new { url });
     }
 
+    /// <summary>Resolve a file path back to a Jellyfin library item id, so the
+    /// review page can open a film straight in Jellyfin.</summary>
+    /// <remarks>
+    /// A render writes a separate clean copy; if that file is in the library
+    /// (its own item) we return it, otherwise we fall back to the original
+    /// film — which is where approved skips already apply during playback.
+    /// </remarks>
+    [HttpGet("ItemForPath")]
+    public ActionResult<object> ItemForPath(
+        [FromQuery] string path,
+        [FromQuery] string? fallback = null)
+    {
+        var library = Plugin.LibraryManager;
+        if (library is null)
+        {
+            return NotFound();
+        }
+
+        var clean = string.IsNullOrEmpty(path) ? null : library.FindByPath(path, false);
+        var item = clean
+            ?? (string.IsNullOrEmpty(fallback) ? null : library.FindByPath(fallback, false));
+        if (item is null)
+        {
+            return NotFound();
+        }
+
+        return Ok(new { itemId = item.Id.ToString("N"), isCleanCopy = clean is not null });
+    }
+
+    /// <summary>Ask Jellyfin to scan its libraries now.</summary>
+    /// <remarks>
+    /// A freshly rendered clean copy is a new file in the movie's folder; until
+    /// Jellyfin scans it, it isn't attached to the movie as a selectable
+    /// version. The review page calls this once when a render finishes. The scan
+    /// is incremental — it only picks up new/changed files — so it is cheap.
+    /// </remarks>
+    [HttpPost("Rescan")]
+    public ActionResult<object> Rescan()
+    {
+        var library = Plugin.LibraryManager;
+        if (library is null)
+        {
+            return Ok(new { ok = false });
+        }
+
+        library.QueueLibraryScan();
+        return Ok(new { ok = true });
+    }
+
     /// <summary>Ask the worker for its health, from the server.</summary>
     [HttpGet("TestConnection")]
     public async Task<ActionResult<object>> TestConnection(CancellationToken cancellationToken)
