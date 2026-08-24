@@ -9,6 +9,14 @@
     "imageUrl": "",
     "versions": [
       {
+        "version": "0.2.11.0",
+        "changelog": "The clean copy now shows up as a \"Clean\" version of the movie in Jellyfin. When a film lives in its own folder (the standard Jellyfin layout), the render now writes the clean copy right beside the original as a \"\u2026 - Clean\" file, which Jellyfin groups as a selectable version of that same movie \u2014 so you pick \"Clean\" in the player instead of hunting for a separate file, and the original is never modified. Films that aren't in their own folder (a flat library, or TV episodes) can't be grouped this way, so their clean copy still goes into a \"cleaned\" subfolder as before. After a render finishes, Clean Media asks Jellyfin to do a quick library scan so the new version appears on its own.\n\nSee where the clean copy went, and jump to it. Finished renders in the queue's \"Recent\" list now show where the clean copy was written (full path on hover) and have an \"Open in Jellyfin\" button that takes you straight to that film's page \u2014 where the Clean version is ready to play.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.11.0.zip",
+        "checksum": "b809becf26418d4a44f8f47662c51b2b",
+        "timestamp": "2026-08-24T23:30:31"
+      },
+      {
         "version": "0.2.10.0",
         "changelog": "See at a glance what's been analyzed. Each film in \"Add to queue\" now shows three small coloured dots \u2014 for the subtitle, audio (whisper), and visual passes \u2014 lit in the pass's colour when that analysis is done, faintly outlined when it hasn't run, and gently pulsing while a pass is running for that film. A small key above the list explains the colours. So you can scan a whole collection and tell what still needs work without opening each film.\n\nJump straight to review from the queue dialog. The per-film \"Add to queue\" dialog now has a \"Review\u2026\" button that opens that film's findings editor directly, so you can go from picking passes to reviewing results in one click.\n\nA queued render no longer looks like it's running. With a single graphics card only one job runs at a time, so a render you queue waits its turn behind an analysis pass. Previously, hiding a pass type with the \"Show\" filters could make that waiting render jump up to \"Running now\" and appear to be running when it wasn't. The queue now decides what's actually running from the real job state, so a render correctly stays in \"Up next\" until it truly starts, and filtering the view never changes whether something looks like it's running.\n\nTidier queue rows. Queue rows now have a consistent minimum height, so shorter entries no longer look cramped next to ones with a progress bar.",
         "targetAbi": "10.11.0.0",

@@ -11,6 +11,12 @@ New entries are added automatically by the release workflow from the notes in
 [Releases page](../../releases) and in `manifest.json`.
 
 <!-- releases -->
+## 0.2.11.0 — 2026-08-24
+
+The clean copy now shows up as a "Clean" version of the movie in Jellyfin. When a film lives in its own folder (the standard Jellyfin layout), the render now writes the clean copy right beside the original as a "… - Clean" file, which Jellyfin groups as a selectable version of that same movie — so you pick "Clean" in the player instead of hunting for a separate file, and the original is never modified. Films that aren't in their own folder (a flat library, or TV episodes) can't be grouped this way, so their clean copy still goes into a "cleaned" subfolder as before. After a render finishes, Clean Media asks Jellyfin to do a quick library scan so the new version appears on its own.
+
+See where the clean copy went, and jump to it. Finished renders in the queue's "Recent" list now show where the clean copy was written (full path on hover) and have an "Open in Jellyfin" button that takes you straight to that film's page — where the Clean version is ready to play.
+
 ## 0.2.10.0 — 2026-08-24
 
 See at a glance what's been analyzed. Each film in "Add to queue" now shows three small coloured dots — for the subtitle, audio (whisper), and visual passes — lit in the pass's colour when that analysis is done, faintly outlined when it hasn't run, and gently pulsing while a pass is running for that film. A small key above the list explains the colours. So you can scan a whole collection and tell what still needs work without opening each film.
