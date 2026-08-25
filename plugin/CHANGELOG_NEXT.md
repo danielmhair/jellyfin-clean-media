@@ -1,6 +1,1 @@
 <!-- Next plugin release changelog. Claude Code writes the user-facing notes here with each plugin change; the release workflow uses it as the changelog, then resets this file. Empty => the release falls back to the commit message. -->
-The "done" dots are now accurate for films analyzed earlier. A film that was analyzed in a past session — whose finished jobs have since been cleared from the queue — used to show its audio and visual passes as "not run". Those dots now read from the film's saved findings as well as the job list, so a completed pass shows as done even long after its job is gone.
-
-New dot: whether a clean copy exists. Each film in "Add to queue" now has a fourth dot that lights up when a rendered clean copy is present — whether it's a "… - Clean" version beside the original or a file in the "cleaned" subfolder — so you can see at a glance which films you've already produced a clean copy for. The colour key above the list now includes it.
-
-Smarter default passes when you add a film. Opening a film's "Add to queue" dialog now pre-selects the audio (whisper) and visual passes that haven't run yet — plus rendering a clean copy when there are approved findings ready — and leaves the subtitle pass unchecked, since the audio pass is the fuller profanity check. You can still tick or untick anything before adding.

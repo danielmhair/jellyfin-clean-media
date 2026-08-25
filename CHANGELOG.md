@@ -11,6 +11,14 @@ New entries are added automatically by the release workflow from the notes in
 [Releases page](../../releases) and in `manifest.json`.
 
 <!-- releases -->
+## 0.2.13.0 — 2026-08-25
+
+The "done" dots are now accurate for films analyzed earlier. A film that was analyzed in a past session — whose finished jobs have since been cleared from the queue — used to show its audio and visual passes as "not run". Those dots now read from the film's saved findings as well as the job list, so a completed pass shows as done even long after its job is gone.
+
+New dot: whether a clean copy exists. Each film in "Add to queue" now has a fourth dot that lights up when a rendered clean copy is present — whether it's a "… - Clean" version beside the original or a file in the "cleaned" subfolder — so you can see at a glance which films you've already produced a clean copy for. The colour key above the list now includes it.
+
+Smarter default passes when you add a film. Opening a film's "Add to queue" dialog now pre-selects the audio (whisper) and visual passes that haven't run yet — plus rendering a clean copy when there are approved findings ready — and leaves the subtitle pass unchecked, since the audio pass is the fuller profanity check. You can still tick or untick anything before adding.
+
 ## 0.2.12.0 — 2026-08-25
 
 Move a queued job straight to the top or bottom. Each job in "Up next" now has move-to-top (⤒) and move-to-bottom (⤓) buttons, so you can jump a film to the front of the queue or push it to the back in one click — no dragging. The buttons grey out when a job is already at the top or bottom.

@@ -9,6 +9,14 @@
     "imageUrl": "",
     "versions": [
       {
+        "version": "0.2.13.0",
+        "changelog": "The \"done\" dots are now accurate for films analyzed earlier. A film that was analyzed in a past session \u2014 whose finished jobs have since been cleared from the queue \u2014 used to show its audio and visual passes as \"not run\". Those dots now read from the film's saved findings as well as the job list, so a completed pass shows as done even long after its job is gone.\n\nNew dot: whether a clean copy exists. Each film in \"Add to queue\" now has a fourth dot that lights up when a rendered clean copy is present \u2014 whether it's a \"\u2026 - Clean\" version beside the original or a file in the \"cleaned\" subfolder \u2014 so you can see at a glance which films you've already produced a clean copy for. The colour key above the list now includes it.\n\nSmarter default passes when you add a film. Opening a film's \"Add to queue\" dialog now pre-selects the audio (whisper) and visual passes that haven't run yet \u2014 plus rendering a clean copy when there are approved findings ready \u2014 and leaves the subtitle pass unchecked, since the audio pass is the fuller profanity check. You can still tick or untick anything before adding.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.13.0.zip",
+        "checksum": "18bfc8270ea917bc93fe1a1b5c739d02",
+        "timestamp": "2026-08-25T12:24:40"
+      },
+      {
         "version": "0.2.12.0",
         "changelog": "Move a queued job straight to the top or bottom. Each job in \"Up next\" now has move-to-top (\u2912) and move-to-bottom (\u2913) buttons, so you can jump a film to the front of the queue or push it to the back in one click \u2014 no dragging. The buttons grey out when a job is already at the top or bottom.",
         "targetAbi": "10.11.0.0",
