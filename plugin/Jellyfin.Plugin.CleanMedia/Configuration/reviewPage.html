@@ -320,6 +320,8 @@
   border:1px solid var(--cm-line-2);background:var(--cm-panel-2);color:var(--cm-ink);cursor:pointer;}
 .cmRoot .iconbtn.danger{color:#ffb4b0;border-color:rgba(248,113,105,.3);background:rgba(248,113,105,.07);}
 .cmRoot .iconbtn.ghost{background:transparent;}
+.cmRoot .iconbtn:hover:not(:disabled){filter:brightness(1.2);}
+.cmRoot .iconbtn:disabled{opacity:.3;cursor:default;}
 .cmRoot .badge{font-size:11px;font-weight:700;padding:3px 9px;border-radius:999px;letter-spacing:.02em;}
 .cmRoot .b-running,.cmRoot .b-rendering{background:rgba(74,168,255,.16);color:#8cc6ff;}
 .cmRoot .b-completed,.cmRoot .b-rendered{background:rgba(63,185,80,.16);color:#7ee787;}
@@ -574,10 +576,11 @@
             + '<span class="badge b-' + j.status + '">' + j.status + '</span>'
             + '<div class="acts"><button class="iconbtn danger" title="Cancel" data-cancel="' + j.id + '">✕</button></div></div>';
     }
-    function rowQueued(j, i) {
+    function rowQueued(j, i, total) {
         var t = TYPES[typeFor(j.engine)];
         var sub = j.stage && j.stage.indexOf('waiting') !== -1 ? 'waiting for scheduled hours'
             : (j.status === 'rendering' ? 'queued · render' : 'queued');
+        var atTop = i === 0, atBottom = i === total - 1;
         return '<div class="row" data-id="' + j.id + '">'
             + '<div class="stripe" style="background:' + t.color + '"></div>'
             + '<div class="grip" data-grip="' + j.id + '" title="Drag to reorder">' + gripSVG() + '</div>'
@@ -585,7 +588,10 @@
             + '<div class="glyph" style="background:' + hex(t.color, .15) + '">' + t.glyph + '</div>'
             + '<div class="info"><div class="name">' + esc(baseName(j.mediaPath)) + '</div>'
             + '<div class="sub">' + typeTag(typeFor(j.engine)) + '<span>' + esc(sub) + '</span></div></div>'
-            + '<div class="acts"><button class="iconbtn danger" title="Delete" data-cancel="' + j.id + '">✕</button></div></div>';
+            + '<div class="acts">'
+            + '<button class="iconbtn" title="Move to top" data-top="' + j.id + '"' + (atTop ? ' disabled' : '') + '>⤒</button>'
+            + '<button class="iconbtn" title="Move to bottom" data-bottom="' + j.id + '"' + (atBottom ? ' disabled' : '') + '>⤓</button>'
+            + '<button class="iconbtn danger" title="Delete" data-cancel="' + j.id + '">✕</button></div></div>';
     }
     function rowRecent(j) {
         var t = TYPES[typeFor(j.engine)];
@@ -631,7 +637,9 @@
         var g = classify();
         var A = page.querySelector('#CmActive'), Q = page.querySelector('#CmQueued'), R = page.querySelector('#CmRecent');
         A.innerHTML = g.active.length ? g.active.map(rowActive).join('') : '<div class="empty">Idle — nothing running</div>';
-        Q.innerHTML = g.upnext.length ? g.upnext.map(rowQueued).join('') : '<div class="empty">Queue is empty</div>';
+        Q.innerHTML = g.upnext.length
+            ? g.upnext.map(function (j, i) { return rowQueued(j, i, g.upnext.length); }).join('')
+            : '<div class="empty">Queue is empty</div>';
         R.innerHTML = g.recent.length ? g.recent.map(rowRecent).join('') : '<div class="empty">Nothing finished yet</div>';
         page.querySelector('#CmCActive').textContent = g.active.length;
         page.querySelector('#CmCQueued').textContent = g.upnext.length;
@@ -729,6 +737,25 @@
         page.querySelectorAll('#tab-queue [data-open]').forEach(function (b) {
             b.onclick = function () { openFilmInJellyfin(b.getAttribute('data-open'), b.getAttribute('data-openfallback')); };
         });
+        page.querySelectorAll('#tab-queue [data-top]').forEach(function (b) {
+            b.onclick = function () { moveInQueue(b.getAttribute('data-top'), 'top'); };
+        });
+        page.querySelectorAll('#tab-queue [data-bottom]').forEach(function (b) {
+            b.onclick = function () { moveInQueue(b.getAttribute('data-bottom'), 'bottom'); };
+        });
+    }
+
+    // Send the new Up-next order to the worker, then re-render from its truth.
+    function applyReorder(ids) {
+        api('POST', 'Jobs/Reorder', {}, { ids: ids }).then(function (res) {
+            if (res && res.jobs) { state.jobs = res.jobs; renderQueue(); }
+            else { loadJobs(); }
+        });
+    }
+    function moveInQueue(id, where) {
+        var order = classify().upnext.map(function (j) { return j.id; }).filter(function (x) { return x !== id; });
+        if (where === 'top') { order.unshift(id); } else { order.push(id); }
+        applyReorder(order);
     }
 
     // When a render finishes, its clean copy is a new file Jellyfin hasn't seen.
@@ -807,10 +834,7 @@
                 var idx = order.indexOf(id) + (after ? 1 : 0);
                 order.splice(idx, 0, dragId);
                 clearDrop();
-                api('POST', 'Jobs/Reorder', {}, { ids: order }).then(function (res) {
-                    if (res && res.jobs) { state.jobs = res.jobs; renderQueue(); }
-                    else { loadJobs(); }
-                });
+                applyReorder(order);
             });
         });
     }

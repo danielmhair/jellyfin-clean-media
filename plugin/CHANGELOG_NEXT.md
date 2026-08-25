@@ -1,1 +1,2 @@
 <!-- Next plugin release changelog. Claude Code writes the user-facing notes here with each plugin change; the release workflow uses it as the changelog, then resets this file. Empty => the release falls back to the commit message. -->
+Move a queued job straight to the top or bottom. Each job in "Up next" now has move-to-top (⤒) and move-to-bottom (⤓) buttons, so you can jump a film to the front of the queue or push it to the back in one click — no dragging. The buttons grey out when a job is already at the top or bottom.
