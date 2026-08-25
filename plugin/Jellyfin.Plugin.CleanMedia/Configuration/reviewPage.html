@@ -861,10 +861,14 @@
     // the dashless ("N") form. Normalise both sides before matching.
     function normId(s) { return String(s || '').replace(/-/g, '').toLowerCase(); }
     function passDotsHtml(itemId) {
-        return '<span class="pdots" data-dots="' + esc(itemId) + '">' + PASS_DOTS.map(function (e) {
+        var dots = PASS_DOTS.map(function (e) {
             var t = TYPES[e];
             return '<span class="pdot" data-e="' + e + '" style="--dc:' + t.color + '" title="' + esc(t.tag) + ': checking…"></span>';
-        }).join('') + '</span>';
+        });
+        // A final dot for whether a clean copy exists (render colour).
+        dots.push('<span class="pdot clean" data-e="render" style="--dc:' + TYPES.render.color
+            + '" title="Clean copy: checking…"></span>');
+        return '<span class="pdots" data-dots="' + esc(itemId) + '">' + dots.join('') + '</span>';
     }
     // Common Jellyfin sorts for the film picker. `by` maps to the Items API
     // SortBy (with SortName as a stable tiebreaker).
@@ -947,13 +951,15 @@
         var lg = page.querySelector('#CmDotLegend');
         lg.hidden = !show;
         if (!show) { return; }
-        lg.innerHTML = '<span>Done:</span>' + PASS_DOTS.map(function (e) {
+        lg.innerHTML = '<span>Done:</span>' + PASS_DOTS.concat(['render']).map(function (e) {
             var t = TYPES[e];
-            return '<span class="lg"><span class="d" style="--dc:' + t.color + '"></span>' + esc(t.tag) + '</span>';
+            var label = e === 'render' ? 'Clean copy' : t.tag;
+            return '<span class="lg"><span class="d" style="--dc:' + t.color + '"></span>' + esc(label) + '</span>';
         }).join('');
     }
     // Light up each film row's dots from the worker's per-film status, in one
-    // batch call. enginesDone -> lit; an active job for that engine -> pulsing.
+    // batch call. enginesDone -> lit; an active job for that engine -> pulsing;
+    // the trailing "clean" dot lights when a rendered clean copy exists.
     function annotateFilmStatuses() {
         var els = page.querySelectorAll('#CmAddList [data-dots]');
         if (!els.length) { return; }
@@ -967,12 +973,19 @@
                 var done = (st && st.enginesDone) || [];
                 var jobs = (st && st.jobs) || [];
                 row.querySelectorAll('.pdot').forEach(function (dot) {
-                    var e = dot.getAttribute('data-e'), tag = TYPES[e].tag;
+                    var e = dot.getAttribute('data-e');
                     var busy = jobs.some(function (j) { return j.engine === e; });
+                    if (e === 'render') {
+                        var has = !!(st && st.cleanCopy);
+                        dot.classList.toggle('on', has);
+                        dot.classList.toggle('busy', busy && !has);
+                        dot.title = 'Clean copy: ' + (has ? 'yes' : busy ? 'rendering' : 'none');
+                        return;
+                    }
                     var isDone = done.indexOf(e) !== -1;
                     dot.classList.toggle('on', isDone);
                     dot.classList.toggle('busy', busy && !isDone);
-                    dot.title = tag + (isDone ? ': done' : busy ? ': running' : ': not run');
+                    dot.title = TYPES[e].tag + (isDone ? ': done' : busy ? ': running' : ': not run');
                 });
             });
         }).catch(function () { /* leave dots faint if the worker is unreachable */ });
@@ -1072,8 +1085,15 @@
 
         function renderBody(st) {
             var body = ov.querySelector('.dbody'), go = ov.querySelector('.dgo'), msg = ov.querySelector('.dmsg');
-            // Default selection: analysis passes not yet done (and not busy).
-            var cards = ORDER.map(function (e) { return passCard(e, st, e !== 'render' && passState(e, st).kind === 'todo'); });
+            // Default selection: prefer the visual and whisper passes (whichever
+            // haven't run) plus a render when one can be made — subtitles is left
+            // unchecked, since audio profanity is the fuller pass.
+            var cards = ORDER.map(function (e) { return passCard(e, st, false); });
+            cards.forEach(function (c) {
+                if (c.engine === 'subtitles') { c.sel = false; }
+                else if (c.engine === 'render') { c.sel = c.canSel; }
+                else { c.sel = c.canSel && c.ps.kind === 'todo'; }
+            });
             var summary = '';
             if (st && st.analyzed) {
                 summary = '<p class="dhint">' + (st.total || 0) + ' finding' + ((st.total === 1) ? '' : 's')

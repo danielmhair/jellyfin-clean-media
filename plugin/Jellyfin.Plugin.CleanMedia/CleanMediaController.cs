@@ -164,6 +164,7 @@ public class CleanMediaController : ControllerBase
                 job = s.Job,
                 jobs = s.Jobs,
                 enginesDone = s.EnginesDone,
+                cleanCopy = s.CleanCopy,
             }),
         });
     }

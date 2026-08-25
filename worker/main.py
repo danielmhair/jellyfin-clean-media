@@ -642,6 +642,32 @@ def timeline_for(media: Path) -> Timeline | None:
     return Timeline(mediaFingerprint=fingerprint, segments=merged)
 
 
+def _has_clean_copy(media: Path, film_jobs: list[Job]) -> bool:
+    """Whether a rendered clean copy of this film exists on disk.
+
+    Checks any render job's recorded output first, then the two default
+    locations a render writes to — the version-style ``<folder> - Clean`` file
+    next to the original, and the older ``cleaned/`` subfolder — so a clean copy
+    still counts even after its render job has been cleared from the queue. The
+    first existing path short-circuits, and a NAS stat that throws is treated as
+    "not there" rather than failing the whole status request.
+    """
+    candidates: list[Path] = [
+        Path(j.renderedPath)
+        for j in film_jobs
+        if j.status == JobStatus.rendered and j.renderedPath
+    ]
+    candidates.append(media.parent / f"{media.parent.name} - Clean{media.suffix}")
+    candidates.append(media.parent / "cleaned" / f"{media.stem} (Clean){media.suffix}")
+    for path in candidates:
+        try:
+            if path.exists():
+                return True
+        except OSError:
+            pass
+    return False
+
+
 @app.delete("/api/segments/{segment_id}", response_model=Timeline)
 def remove_segment(segment_id: int, path: str) -> Timeline:
     """Delete a finding outright, so noise does not accumulate."""
@@ -768,11 +794,14 @@ def status_for_media(req: StatusRequest) -> list[MediaStatus]:
 
         # Analysis engines already finished for this film, so the UI can stop
         # offering to re-run one that is done. "render" is not an analysis
-        # engine, so restrict to the registered detectors.
-        status.enginesDone = sorted({
+        # engine, so restrict to the registered detectors. Job rows are only
+        # half the story — they can be cleared from the queue — so the sidecar
+        # (which stamps each segment with the engine that produced it) is folded
+        # in below, so a film analysed in an earlier session still reads "done".
+        engines_done = {
             j.engine for j in film_jobs
             if j.status in (JobStatus.completed, JobStatus.rendered) and j.engine in ENGINES
-        })
+        }
 
         # Reading the sidecar is a NAS round trip; skip it unless the cached
         # index says one exists, or a finished job means it was just written.
@@ -789,6 +818,12 @@ def status_for_media(req: StatusRequest) -> list[MediaStatus]:
                 status.approved = sum(1 for s in timeline.segments if s.approved is True)
                 status.rejected = sum(1 for s in timeline.segments if s.approved is False)
                 status.pending = status.total - status.approved - status.rejected
+                engines_done |= {
+                    s.engine for s in timeline.segments if s.engine in ENGINES
+                }
+                status.cleanCopy = _has_clean_copy(media, film_jobs)
+
+        status.enginesDone = sorted(engines_done)
         out.append(status)
     return out
 

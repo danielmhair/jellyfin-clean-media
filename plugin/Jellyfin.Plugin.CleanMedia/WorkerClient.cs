@@ -153,6 +153,8 @@ public class MediaStatus
     [JsonPropertyName("jobs")] public List<JobBrief> Jobs { get; set; } = new();
 
     [JsonPropertyName("enginesDone")] public List<string> EnginesDone { get; set; } = new();
+
+    [JsonPropertyName("cleanCopy")] public bool CleanCopy { get; set; }
 }
 
 /// <summary>How many jobs a cancel-all request stopped.</summary>

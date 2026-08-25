@@ -171,6 +171,9 @@ class MediaStatus(BaseModel):
     #: Analysis engines that have already completed for this film, so the UI
     #: can stop offering to re-run one that is already done.
     enginesDone: list[str] = Field(default_factory=list)
+    #: Whether a rendered clean copy of this film exists on disk (a "- Clean"
+    #: version beside the original, or one in a cleaned/ subfolder).
+    cleanCopy: bool = False
 
 
 class StatusRequest(BaseModel):

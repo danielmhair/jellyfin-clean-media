@@ -32,9 +32,9 @@ def _film(tmp_path, name, segments=None):
     return media
 
 
-def _segment(id, approved=None):
+def _segment(id, approved=None, engine="subtitles"):
     return Segment(id=id, startMs=id * 1000, endMs=id * 1000 + 500,
-                   category="profanity", confidence=1.0, engine="subtitles",
+                   category="profanity", confidence=1.0, engine=engine,
                    recommendedAction="mute", approved=approved)
 
 
@@ -178,6 +178,39 @@ def test_finished_engines_are_reported(client, tmp_path):
 
     for jid in ("d1", "d2", "d3"):
         store.delete_job(jid)
+
+
+def test_engines_done_includes_passes_recorded_only_in_the_sidecar(client, tmp_path):
+    """Job rows can be cleared from the queue, but the sidecar stamps each
+    segment with the engine that produced it — so a film analyzed in an earlier
+    session (no jobs left) still reports those passes as done."""
+    _film(tmp_path, "Old Analysis.mkv", [
+        _segment(1, approved=True, engine="whisper"),
+        _segment(2, engine="vlm"),
+    ])
+
+    body = client.post("/api/status", json={"paths": ["Old Analysis.mkv"]}).json()
+
+    assert body[0]["enginesDone"] == ["vlm", "whisper"]  # sorted, from the sidecar alone
+
+
+def test_clean_copy_detected_from_the_cleaned_subfolder(client, tmp_path):
+    _film(tmp_path, "Rendered.mkv", [_segment(1, approved=True)])
+    cleaned = tmp_path / "cleaned"
+    cleaned.mkdir()
+    (cleaned / "Rendered (Clean).mkv").write_bytes(b"clean copy")
+
+    body = client.post("/api/status", json={"paths": ["Rendered.mkv"]}).json()
+
+    assert body[0]["cleanCopy"] is True
+
+
+def test_no_clean_copy_reads_false(client, tmp_path):
+    _film(tmp_path, "NoClean.mkv", [_segment(1, approved=True)])
+
+    body = client.post("/api/status", json={"paths": ["NoClean.mkv"]}).json()
+
+    assert body[0]["cleanCopy"] is False
 
 
 def test_empty_request_is_answered_empty(client):
