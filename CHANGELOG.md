@@ -11,6 +11,12 @@ New entries are added automatically by the release workflow from the notes in
 [Releases page](../../releases) and in `manifest.json`.
 
 <!-- releases -->
+## 0.2.14.0 — 2026-08-25
+
+"Open in Jellyfin" now works when your media is on a NAS or network share. It was failing with "couldn't find that file in Jellyfin" whenever the worker sees a film by a different path than Jellyfin does (for example the worker reads it over a \\NAS share while Jellyfin has it mounted elsewhere). It now matches the film by its file name when the exact path doesn't line up, so the button reliably opens the movie — where the Clean version is ready to play.
+
+Tidy up clean copies rendered before versions were supported. Older renders saved the clean copy into a "cleaned" subfolder, which Jellyfin can't offer as a version of the movie. A new maintenance command moves any such copies to the "<movie> - Clean" name beside the original, so they group as a selectable Clean version. Run scripts/migrate-clean-copies.sh to preview the moves, then again with --apply to perform them, and rescan your library. Only films that live in their own folder are moved; a flat library or a TV episode is left as-is.
+
 ## 0.2.13.0 — 2026-08-25
 
 The "done" dots are now accurate for films analyzed earlier. A film that was analyzed in a past session — whose finished jobs have since been cleared from the queue — used to show its audio and visual passes as "not run". Those dots now read from the film's saved findings as well as the job list, so a completed pass shows as done even long after its job is gone.
