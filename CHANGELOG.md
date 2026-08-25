@@ -11,6 +11,10 @@ New entries are added automatically by the release workflow from the notes in
 [Releases page](../../releases) and in `manifest.json`.
 
 <!-- releases -->
+## 0.2.12.0 — 2026-08-25
+
+Move a queued job straight to the top or bottom. Each job in "Up next" now has move-to-top (⤒) and move-to-bottom (⤓) buttons, so you can jump a film to the front of the queue or push it to the back in one click — no dragging. The buttons grey out when a job is already at the top or bottom.
+
 ## 0.2.11.0 — 2026-08-24
 
 The clean copy now shows up as a "Clean" version of the movie in Jellyfin. When a film lives in its own folder (the standard Jellyfin layout), the render now writes the clean copy right beside the original as a "… - Clean" file, which Jellyfin groups as a selectable version of that same movie — so you pick "Clean" in the player instead of hunting for a separate file, and the original is never modified. Films that aren't in their own folder (a flat library, or TV episodes) can't be grouped this way, so their clean copy still goes into a "cleaned" subfolder as before. After a render finishes, Clean Media asks Jellyfin to do a quick library scan so the new version appears on its own.
