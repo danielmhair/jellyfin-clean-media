@@ -1,4 +1,7 @@
 using System.Text.Json;
+using Jellyfin.Data.Enums;
+using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Library;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -627,15 +630,56 @@ public class CleanMediaController : ControllerBase
             return NotFound();
         }
 
+        // 1) Exact path match — works when Jellyfin and the worker share a mount.
         var clean = string.IsNullOrEmpty(path) ? null : library.FindByPath(path, false);
         var item = clean
             ?? (string.IsNullOrEmpty(fallback) ? null : library.FindByPath(fallback, false));
+
+        // 2) Foreign mounts: the worker's path (e.g. a \\NAS UNC) need not equal
+        //    Jellyfin's path for the same file. Fall back to matching the
+        //    original film by file name, which is mount-independent. The clean
+        //    copy is a *version* of that item, so we match the original's name.
+        if (item is null)
+        {
+            var fileName = System.IO.Path.GetFileName(
+                string.IsNullOrEmpty(fallback) ? (path ?? string.Empty) : fallback);
+            if (!string.IsNullOrEmpty(fileName))
+            {
+                item = FindByFileName(library, fileName);
+            }
+        }
+
         if (item is null)
         {
             return NotFound();
         }
 
         return Ok(new { itemId = item.Id.ToString("N"), isCleanCopy = clean is not null });
+    }
+
+    /// <summary>Find a movie/episode whose file name matches, ignoring the
+    /// directory — so a worker path on a different mount still resolves.</summary>
+    private static BaseItem? FindByFileName(ILibraryManager library, string fileName)
+    {
+        var query = new InternalItemsQuery
+        {
+            IncludeItemTypes = new[] { BaseItemKind.Movie, BaseItemKind.Episode },
+            Recursive = true,
+        };
+        foreach (var candidate in library.GetItemList(query))
+        {
+            var candidatePath = candidate.Path;
+            if (!string.IsNullOrEmpty(candidatePath)
+                && string.Equals(
+                    System.IO.Path.GetFileName(candidatePath),
+                    fileName,
+                    System.StringComparison.OrdinalIgnoreCase))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>Ask Jellyfin to scan its libraries now.</summary>
