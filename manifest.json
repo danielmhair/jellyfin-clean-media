@@ -9,6 +9,14 @@
     "imageUrl": "",
     "versions": [
       {
+        "version": "0.2.16.0",
+        "changelog": "Fixed profanity analysis failing on large films from a network share. A big file's audio decode could get cut short by a momentary drop in the share connection \u2014 sometimes reporting the film as clean when only its opening minutes were actually checked, and on the largest films failing the job outright with no retry. Films above 1 GB on a network share are now copied to local disk first (resuming automatically if the copy itself is interrupted), decoded there, and the temporary copy is removed afterward \u2014 so an unreliable share no longer costs you a wasted multi-hour pass. Nothing to configure.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.16.0.zip",
+        "checksum": "becc8282c7f0ada75bccfffcba0f12ba",
+        "timestamp": "2026-08-26T14:18:48"
+      },
+      {
         "version": "0.2.15.0",
         "changelog": "The clean-copy migration command now finds your media on its own. It used to fail with \"No usable media roots\" unless you typed the path \u2014 and a NAS path's backslashes got mangled by the shell along the way. While the worker is running, the command now asks it where your films are, so you can just run scripts/migrate-clean-copies.sh (no path, preview) and again with --apply. You can still pass a path explicitly if you prefer (use single quotes around a \\\\NAS\\... path).\n\n- Fixed profanity analysis failing on large films stored on a network share with \"Invalid argument \u2026 returned 22\". Big files are now copied to local disk with a resumable copy before transcription, so an unreliable share that drops mid-read no longer fails the job. Dropped reads of smaller files are retried instead of failing, and a transcription that stops short of the film's full length is retried rather than being reported as clean.",
         "targetAbi": "10.11.0.0",

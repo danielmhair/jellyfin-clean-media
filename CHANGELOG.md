@@ -11,6 +11,10 @@ New entries are added automatically by the release workflow from the notes in
 [Releases page](../../releases) and in `manifest.json`.
 
 <!-- releases -->
+## 0.2.16.0 — 2026-08-26
+
+Fixed profanity analysis failing on large films from a network share. A big file's audio decode could get cut short by a momentary drop in the share connection — sometimes reporting the film as clean when only its opening minutes were actually checked, and on the largest films failing the job outright with no retry. Films above 1 GB on a network share are now copied to local disk first (resuming automatically if the copy itself is interrupted), decoded there, and the temporary copy is removed afterward — so an unreliable share no longer costs you a wasted multi-hour pass. Nothing to configure.
+
 ## 0.2.15.0 — 2026-08-26
 
 The clean-copy migration command now finds your media on its own. It used to fail with "No usable media roots" unless you typed the path — and a NAS path's backslashes got mangled by the shell along the way. While the worker is running, the command now asks it where your films are, so you can just run scripts/migrate-clean-copies.sh (no path, preview) and again with --apply. You can still pass a path explicitly if you prefer (use single quotes around a \\NAS\... path).
