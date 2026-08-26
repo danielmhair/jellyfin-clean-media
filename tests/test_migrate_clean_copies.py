@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-from worker.migrate_clean_copies import main, plan
+import worker.migrate_clean_copies as mig
+from worker.migrate_clean_copies import main, plan, resolve_roots
 
 
 def _film(root, folder, stem, ext=".mkv"):
@@ -52,6 +53,26 @@ def test_apply_moves_the_file_and_removes_the_emptied_cleaned_folder(tmp_path, m
     assert rc == 0
     assert (folder / "Iron Man (2008) - Clean.mkv").read_bytes() == b"clean copy"
     assert not (folder / "cleaned").exists()  # emptied folder tidied away
+
+
+def test_resolve_roots_prefers_explicit_then_env_then_worker(tmp_path, monkeypatch):
+    explicit = tmp_path / "explicit"
+    envdir = tmp_path / "env"
+    workerdir = tmp_path / "worker"
+    for d in (explicit, envdir, workerdir):
+        d.mkdir()
+
+    # Explicit args win outright.
+    monkeypatch.setenv("CLEANMEDIA_MEDIA_ROOTS", str(envdir))
+    monkeypatch.setattr(mig, "_roots_from_worker", lambda: [workerdir])
+    assert resolve_roots([str(explicit)]) == [explicit]
+
+    # No args but env set -> env.
+    assert resolve_roots([]) == [envdir]
+
+    # No args, no env -> ask the worker.
+    monkeypatch.delenv("CLEANMEDIA_MEDIA_ROOTS", raising=False)
+    assert resolve_roots([]) == [workerdir]
 
 
 def test_dry_run_moves_nothing(tmp_path, monkeypatch):

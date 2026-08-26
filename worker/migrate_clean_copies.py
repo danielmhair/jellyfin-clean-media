@@ -20,8 +20,10 @@ Dry run by default; pass ``--apply`` to actually move files::
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
+import urllib.request
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -29,6 +31,34 @@ from .review import media_roots
 from .store import Store
 
 CLEAN_SUFFIX = " (Clean)"
+
+
+def _roots_from_worker() -> list[Path]:
+    """Ask the running worker for its configured media roots.
+
+    The Windows service bakes ``CLEANMEDIA_MEDIA_ROOTS`` into its own launcher,
+    so a plain shell doesn't see it — but the worker does, and reports it on
+    ``/api/health``. This lets the migration Just Work while the worker is up,
+    with no path to type.
+    """
+    port = os.environ.get("PORT", "8765")
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=3) as resp:
+            data = json.load(resp)
+        return [Path(r) for r in data.get("mediaRoots", [])]
+    except Exception:
+        return []
+
+
+def resolve_roots(explicit: list[str]) -> list[Path]:
+    """Where to scan: explicit args win, then the env, then the running worker."""
+    if explicit:
+        roots = [Path(r) for r in explicit]
+    elif os.environ.get("CLEANMEDIA_MEDIA_ROOTS"):
+        roots = media_roots()
+    else:
+        roots = _roots_from_worker() or media_roots()
+    return [r for r in roots if r.is_dir()]
 
 
 def _norm(p: str | Path) -> str:
@@ -72,10 +102,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("roots", nargs="*", help="media root(s) to scan (default: CLEANMEDIA_MEDIA_ROOTS)")
     args = ap.parse_args(argv)
 
-    roots = [Path(r) for r in args.roots] if args.roots else media_roots()
-    roots = [r for r in roots if r.is_dir()]
+    roots = resolve_roots(args.roots)
     if not roots:
-        print("No usable media roots. Set CLEANMEDIA_MEDIA_ROOTS or pass a path.", file=sys.stderr)
+        print(
+            "No usable media roots found.\n"
+            "  - Start the worker (it reports its roots), or\n"
+            "  - pass a path: scripts/migrate-clean-copies.sh '\\\\Nas\\nas-8tb-hdd\\Movies'\n"
+            "    (use single quotes so the backslashes survive), or\n"
+            "  - set CLEANMEDIA_MEDIA_ROOTS.",
+            file=sys.stderr,
+        )
         return 1
     print("Scanning:", ", ".join(str(r) for r in roots))
 

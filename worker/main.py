@@ -59,6 +59,7 @@ from .review import (
     grab_thumbnail,
     library_view,
     load_timeline,
+    media_roots,
     merge_into_one,
     render_landing,
     render_page,
@@ -209,6 +210,9 @@ def health() -> dict:
         "engines": {name: eng.health() for name, eng in ENGINES.items()},
         "queueSize": jobs.queue_size(),
         "paused": jobs.is_paused(),
+        # The configured media roots, so tools (e.g. the clean-copy migration)
+        # can discover where films live without re-deriving service config.
+        "mediaRoots": [str(r) for r in media_roots()],
     }
 
 

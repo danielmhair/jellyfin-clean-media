@@ -10,8 +10,10 @@ set -euo pipefail
 source "$(dirname "$0")/_common.sh"
 cd "$(dirname "$0")/.."
 
-# Same config the worker starts from, so we scan the same media roots.
+# Pick up any roots persisted to .cleanmedia.env. Deliberately DON'T default
+# CLEANMEDIA_MEDIA_ROOTS here — if it's unset (the Windows service bakes it into
+# its own launcher, not this shell), the tool asks the running worker for its
+# configured roots on /api/health, so no path needs typing.
 [ -f "$PWD/.cleanmedia.env" ] && source "$PWD/.cleanmedia.env"
-export CLEANMEDIA_MEDIA_ROOTS="${CLEANMEDIA_MEDIA_ROOTS:-$PWD/movies}"
 
 "$UV" run python -m worker.migrate_clean_copies "$@"
