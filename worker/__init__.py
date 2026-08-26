@@ -3,7 +3,7 @@
 # Project version. The worker and the Jellyfin plugin are released as a matched
 # pair from this one repo: a git tag `vX.Y.Z` contains this worker and plugin
 # X.Y.Z.0. The release workflow stamps this string in lockstep with the plugin.
-__version__ = "0.2.14"
+__version__ = "0.2.15"
 
 # HTTP contract version between the plugin and this worker. Unlike __version__
 # (which bumps every release), this integer bumps ONLY when the /api surface

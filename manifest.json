@@ -9,6 +9,14 @@
     "imageUrl": "",
     "versions": [
       {
+        "version": "0.2.15.0",
+        "changelog": "The clean-copy migration command now finds your media on its own. It used to fail with \"No usable media roots\" unless you typed the path \u2014 and a NAS path's backslashes got mangled by the shell along the way. While the worker is running, the command now asks it where your films are, so you can just run scripts/migrate-clean-copies.sh (no path, preview) and again with --apply. You can still pass a path explicitly if you prefer (use single quotes around a \\\\NAS\\... path).\n\n- Fixed profanity analysis failing on large films stored on a network share with \"Invalid argument \u2026 returned 22\". Big files are now copied to local disk with a resumable copy before transcription, so an unreliable share that drops mid-read no longer fails the job. Dropped reads of smaller files are retried instead of failing, and a transcription that stops short of the film's full length is retried rather than being reported as clean.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.15.0.zip",
+        "checksum": "65fa05eaac430661b963e7a47d8ed586",
+        "timestamp": "2026-08-26T14:13:42"
+      },
+      {
         "version": "0.2.14.0",
         "changelog": "\"Open in Jellyfin\" now works when your media is on a NAS or network share. It was failing with \"couldn't find that file in Jellyfin\" whenever the worker sees a film by a different path than Jellyfin does (for example the worker reads it over a \\\\NAS share while Jellyfin has it mounted elsewhere). It now matches the film by its file name when the exact path doesn't line up, so the button reliably opens the movie \u2014 where the Clean version is ready to play.\n\nTidy up clean copies rendered before versions were supported. Older renders saved the clean copy into a \"cleaned\" subfolder, which Jellyfin can't offer as a version of the movie. A new maintenance command moves any such copies to the \"<movie> - Clean\" name beside the original, so they group as a selectable Clean version. Run scripts/migrate-clean-copies.sh to preview the moves, then again with --apply to perform them, and rescan your library. Only films that live in their own folder are moved; a flat library or a TV episode is left as-is.",
         "targetAbi": "10.11.0.0",

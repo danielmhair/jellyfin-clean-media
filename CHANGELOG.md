@@ -11,6 +11,12 @@ New entries are added automatically by the release workflow from the notes in
 [Releases page](../../releases) and in `manifest.json`.
 
 <!-- releases -->
+## 0.2.15.0 — 2026-08-26
+
+The clean-copy migration command now finds your media on its own. It used to fail with "No usable media roots" unless you typed the path — and a NAS path's backslashes got mangled by the shell along the way. While the worker is running, the command now asks it where your films are, so you can just run scripts/migrate-clean-copies.sh (no path, preview) and again with --apply. You can still pass a path explicitly if you prefer (use single quotes around a \\NAS\... path).
+
+- Fixed profanity analysis failing on large films stored on a network share with "Invalid argument … returned 22". Big files are now copied to local disk with a resumable copy before transcription, so an unreliable share that drops mid-read no longer fails the job. Dropped reads of smaller files are retried instead of failing, and a transcription that stops short of the film's full length is retried rather than being reported as clean.
+
 ## 0.2.14.0 — 2026-08-25
 
 "Open in Jellyfin" now works when your media is on a NAS or network share. It was failing with "couldn't find that file in Jellyfin" whenever the worker sees a film by a different path than Jellyfin does (for example the worker reads it over a \\NAS share while Jellyfin has it mounted elsewhere). It now matches the film by its file name when the exact path doesn't line up, so the button reliably opens the movie — where the Clean version is ready to play.
