@@ -35,15 +35,21 @@ def retry_media_read(
     *,
     transient: tuple[type[BaseException], ...],
     on_retry: Optional[Callable[[BaseException], None]] = None,
+    backoffs: Optional[tuple[float, ...]] = None,
 ) -> T:
     """Run ``op()``, retrying the listed transient exceptions with backoff.
 
     ``on_retry`` (if given) is called with the caught exception just before each
     pause — used to emit a progress line so a stalled read looks like a retry,
     not a hang. The final failure re-raises the last exception verbatim.
+
+    ``backoffs`` overrides the default pause schedule for callers whose read is
+    both long and drop-prone (a full-film audio decode off a flaky share almost
+    always drops at least once, so it wants more attempts than the default four).
     """
+    schedule = BACKOFFS_S if backoffs is None else backoffs
     last: Optional[BaseException] = None
-    for attempt, backoff in enumerate((0.0, *BACKOFFS_S)):
+    for attempt, backoff in enumerate((0.0, *schedule)):
         if attempt > 0:  # a retry, not the first try
             if on_retry is not None and last is not None:
                 on_retry(last)

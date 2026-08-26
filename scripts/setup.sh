@@ -23,5 +23,6 @@ check ffprobe  "required by every engine"
 check tesseract "OCR of DVD subtitles (winget install UB-Mannheim.TesseractOCR)"
 check ollama   "vlm engine (ollama pull qwen3-vl:4b-instruct)"
 check dotnet   "building the Jellyfin plugin"
+check robocopy "built into Windows; stages large network-share films to local disk before transcription (no install)"
 
 echo "==> done"
