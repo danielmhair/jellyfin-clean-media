@@ -1012,7 +1012,9 @@ def media_runtime_ms(media: Path, timeline: Timeline) -> int:
 
 
 PAGE = r"""<!doctype html>
-<meta charset="utf-8"><title>Review — __TITLE__</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Review — __TITLE__</title>
 <style>
 :root{
   --bg:#0d1013; --panel:#16191d; --panel2:#1d2126; --line:#2a2f36;
@@ -1244,6 +1246,49 @@ kbd{font-family:ui-monospace,monospace}
 #D .dmerge button.x{background:transparent;color:var(--dim)}
 #D .khint{color:var(--dim2);font-size:11.5px;padding:8px 22px;border-top:1px solid var(--line);display:flex;gap:16px;flex-wrap:wrap}
 #D .khint kbd{background:var(--panel2);border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:1px 6px;font-family:inherit;font-size:10.5px;color:var(--ink)}
+
+/* Touch: these surfaces are dragged with a finger (scrub, pan, resize a region),
+   so stop the browser's own scroll/zoom/callout from competing with the JS drag
+   (wired as Pointer Events, which unify mouse + touch + pen in one code path). */
+#D .edbar,#D .edthumb,#D .ftrack,#D .fbox,#D .region,#D .edfilm,#D .edwave,#D .edlane,
+#D .reveal,#D .edstep{touch-action:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
+#D .edzoom{display:flex;gap:5px;flex:0 0 auto}
+
+/* Mobile: the app shell is desktop-first (a fixed 340px findings rail beside the
+   editor); below this width there isn't room for both, so switch to one full-
+   width pane at a time with a small tab bar to flip between them. Selecting a
+   finding jumps to the Player tab automatically (see D_select/D_mtabSet). */
+#D .mtabbar{display:none;gap:8px;padding:8px 22px 0}
+#D .mtabbar button{flex:1;padding:11px;font-weight:700;font-size:13px;border-radius:9px;background:var(--panel2);color:var(--dim)}
+#D .mtabbar button.on{background:#243244;color:#cfe3ff}
+@media (max-width:900px){
+  #D .mtabbar{display:flex}
+  #D .dwork{display:flex;flex-direction:column}
+  #D .drail{display:none;flex:1 1 auto;min-height:0;border-right:none}
+  #D .dstage{display:none;flex:1 1 auto;min-height:0;padding:14px 16px}
+  #D .drail.mshow,#D .dstage.mshow{display:block}
+  #D .khint{display:none}
+  #D .dtoprow{flex-wrap:wrap;row-gap:8px}
+  #D .swtrigger{max-width:100%}
+  #D .swtrigger h1,#D .swtrigger .path{max-width:70vw}
+  /* bigger touch targets — the desktop sizes above are mouse-tuned */
+  #D .drow .qd{padding:11px 12px;font-size:13px}
+  #D .drow{padding:12px 11px}
+  #D .transport{gap:16px}
+  #D .transport button{min-height:42px;padding:10px 14px}
+  #D .transport .pp{width:54px;height:54px;font-size:18px}
+  #D .segbtn button{padding:10px 13px;font-size:13px}
+  #D .edstep{width:36px;height:34px}
+  #D .eddecide .big{padding:16px;font-size:15px}
+  #D .reveal{padding:9px 14px;font-size:12.5px}
+  /* The left/right edge-drag handles that retime a finding's start/end are 9px
+     wide (fine for a mouse pointer, too thin for a fingertip). 22px is a
+     compromise, not the usual 44px minimum — a region can be quite narrow at a
+     wide zoom, and two 44px handles would swallow the whole body, leaving no
+     room to drag the region as a whole (D_dragBody). Zooming in first (the new
+     +/- buttons) widens the region and makes the handle easier to land on too. */
+  #D .region .redge{width:22px}
+}
 </style>
 
 <section id="D">
@@ -1275,6 +1320,10 @@ kbd{font-family:ui-monospace,monospace}
   <div class="filmtl">
     <div class="ftrack" id="D-ftrack"><div class="fbox" id="D-fbox" title="What the editor below is showing — drag to pan, zoom the editor to resize"></div><div class="fph" id="D-fph"></div></div>
     <div class="flbl"><span>0:00</span><span>click to jump · drag the box to pan the editor · markers are findings</span><span id="D-runtime">0:00</span></div>
+  </div>
+  <div class="mtabbar" id="D-mtabbar">
+    <button class="on" id="D-mtab-stage">▶ Player</button>
+    <button id="D-mtab-findings">☰ Findings <span id="D-mtab-count"></span></button>
   </div>
   <div class="dmerge hidden" id="D-mergebar">
     <b><span id="D-mergecount">0</span> picked</b>
@@ -1438,6 +1487,7 @@ function refetch(){
 // ---------- state ----------
 const D_PAD=15000;
 let D={sel:SEGS[0]?SEGS[0].id:null, playMs:SEGS[0]?SEGS[0].startMs:0, discreet:true, playing:false, timer:null,
+       mtab:'stage',                 // mobile only: 'stage' (player/editor) | 'findings' (the list)
        viewStart:null, viewEnd:null, merge:false, picks:new Set(), scrubbing:false, held:false,
        peaksKey:null, peaks:null, frameKey:null, frameTimer:null,
        typeFilter:'all',            // scope the whole workspace to one finding type
@@ -1474,6 +1524,15 @@ function D_clampView(){let span=D.viewEnd-D.viewStart;
   if(span>=RUNTIME_MS){D.viewStart=0;D.viewEnd=RUNTIME_MS;return;}
   if(D.viewStart<0){D.viewEnd-=D.viewStart;D.viewStart=0;}
   if(D.viewEnd>RUNTIME_MS){D.viewStart-=(D.viewEnd-RUNTIME_MS);D.viewEnd=RUNTIME_MS;if(D.viewStart<0)D.viewStart=0;}}
+// Zoom the editor viewport by `factor` (<1 = in, >1 = out) around `centerT` (ms).
+// Shared by the wheel handler (desktop) and the +/- buttons (no wheel on a phone).
+function D_zoomBy(factor,centerT){
+  const span=D.viewEnd-D.viewStart||1;
+  const newSpan=Math.max(3000,Math.min(RUNTIME_MS,span*factor));
+  const frac=(centerT-D.viewStart)/span;
+  D.viewStart=centerT-frac*newSpan;D.viewEnd=D.viewStart+newSpan;D_clampView();
+  D_editor();D_filmtl();
+}
 function D_ensureView(){if(D.viewStart==null){const s=D_get(D.sel)||SEGS[0];
   if(!s){D.viewStart=0;D.viewEnd=Math.min(RUNTIME_MS,60000);return;}
   const span=Math.min(RUNTIME_MS,Math.max(24000,(s.endMs-s.startMs)+30000));
@@ -1491,6 +1550,7 @@ function D_render(){
   D_ensureView();
   D_prog(); D_typechips(); D_bulkrow(); D_filmtl(); D_list(); D_monitor(); D_editor(); D_mergebar();
   document.getElementById('D-runtime').textContent=fmtShort(RUNTIME_MS);
+  const mc=document.getElementById('D-mtab-count');if(mc)mc.textContent=SEGS.length?`(${SEGS.length})`:'';
 }
 
 // One chip per type present, plus All; picking one scopes the whole workspace.
@@ -1580,7 +1640,18 @@ function D_list(){
     const id=+b.dataset.pick; D.picks.has(id)?D.picks.delete(id):D.picks.add(id); D_render();});
 }
 
-function D_select(id){D.sel=id;const s=D_get(id);if(s){D.playMs=s.startMs;D_centerView(s);}D_render();}
+// Mobile tab switch (Player <-> Findings) — CSS gates whether this has any
+// visible effect (both panes show side by side above the breakpoint), so this
+// is safe to call unconditionally.
+function D_mtabSet(tab){
+  D.mtab=tab;
+  const stageOn=tab==='stage';
+  document.getElementById('D-mtab-stage').classList.toggle('on',stageOn);
+  document.getElementById('D-mtab-findings').classList.toggle('on',!stageOn);
+  document.querySelector('#D .drail').classList.toggle('mshow',!stageOn);
+  document.querySelector('#D .dstage').classList.toggle('mshow',stageOn);
+}
+function D_select(id){D.sel=id;const s=D_get(id);if(s){D.playMs=s.startMs;D_centerView(s);}D_mtabSet('stage');D_render();}
 
 // ---------- monitor (real frame at the playhead via the thumbnail endpoint) ----------
 function D_loadFrame(){
@@ -1647,7 +1718,8 @@ function D_editor(){
 
   document.getElementById('D-edcard').innerHTML=`
     <div class="edhead">${s?cchip(s)+`<span class="mono" style="color:var(--dim2);font-size:12px">#${s.id} · detected by ${esc(engineName[s.engine]||s.engine)}</span>`:'<span class="mono" style="color:var(--dim2);font-size:12px">No finding selected — scrub, then press <b>A</b> to add a cut</span>'}
-      <span class="zoomhint">scroll = zoom · drag the box on the map to pan · showing ${fmtShort(vs)}–${fmtShort(ve)}</span></div>
+      <span class="zoomhint">scroll or +/− = zoom · drag the box on the map to pan · showing ${fmtShort(vs)}–${fmtShort(ve)}</span>
+      <div class="edzoom"><button class="edstep" id="D-zoomout" title="Zoom out">−</button><button class="edstep" id="D-zoomin" title="Zoom in">+</button></div></div>
     <div class="edscroll" id="D-edscroll">
       <div class="edtrack" style="width:${W}px" id="D-edtrack">
         <div class="edfilm" style="width:${W}px">${strip}${shots}</div>
@@ -1707,7 +1779,7 @@ function D_editor(){
     el.innerHTML=`<div class="redge l"></div><div class="redge r"></div><div class="rlabel">${a.lbl}</div>`
       +`<div class="rlen mono">${((r.endMs-r.startMs)/1000).toFixed(1)}s</div>`
       +(r.recommendedAction!=='skip'?'<div class="rotag">render-only</div>':'');
-    el.addEventListener('mousedown',e=>{
+    el.addEventListener('pointerdown',e=>{
       if(e.target.classList.contains('redge'))D_dragEdge(e,r,e.target.classList.contains('l'),el);
       else D_dragBody(e,r,el);});
     lane.appendChild(el);});
@@ -1721,50 +1793,51 @@ function D_editor(){
     const wf=Math.max(0.02,Math.min(1,(D.viewEnd-D.viewStart)/RUNTIME_MS));
     edthumb.style.left=(L*100)+'%'; edthumb.style.width=(wf*100)+'%';};
   placeThumb();
-  edthumb.addEventListener('mousedown',e=>{e.preventDefault();e.stopPropagation();
+  edthumb.addEventListener('pointerdown',e=>{e.preventDefault();e.stopPropagation();
     const rect=edbar.getBoundingClientRect(), sp=D.viewEnd-D.viewStart, sx=e.clientX, vs0=D.viewStart;
     const move=ev=>{D.viewStart=vs0+(ev.clientX-sx)/rect.width*RUNTIME_MS;D.viewEnd=D.viewStart+sp;D_clampView();D_filmtl();D_editor();};
-    const up=()=>{document.removeEventListener('mousemove',move);document.removeEventListener('mouseup',up);D_render();};
-    document.addEventListener('mousemove',move);document.addEventListener('mouseup',up);});
-  edbar.addEventListener('mousedown',e=>{if(e.target===edthumb)return;
+    const up=()=>{document.removeEventListener('pointermove',move);document.removeEventListener('pointerup',up);D_render();};
+    document.addEventListener('pointermove',move);document.addEventListener('pointerup',up);});
+  edbar.addEventListener('pointerdown',e=>{if(e.target===edthumb)return;
     const rect=edbar.getBoundingClientRect(), sp=D.viewEnd-D.viewStart;
     const c=(e.clientX-rect.left)/rect.width*RUNTIME_MS;   // center the viewport where you clicked
     D.viewStart=c-sp/2;D.viewEnd=D.viewStart+sp;D_clampView();D_filmtl();D_editor();});
   // ◀/▶ step buttons: nudge the playhead a little bit; hold to repeat (fine scrub)
   const holdStep=(id,dir)=>{const b=document.getElementById(id);if(!b)return;
-    b.addEventListener('mousedown',e=>{e.preventDefault();if(D.playing)D_stop();
+    b.addEventListener('pointerdown',e=>{e.preventDefault();if(D.playing)D_stop();
       D.scrubbing=true; D_saCtx(); D_scrubStep(dir);
       const iv=setInterval(()=>D_scrubStep(dir),120);
       const stop=()=>{clearInterval(iv);D.scrubbing=false;D_saStop();
-        document.removeEventListener('mouseup',stop);document.removeEventListener('mouseleave',stop);
+        document.removeEventListener('pointerup',stop);document.removeEventListener('pointerleave',stop);document.removeEventListener('pointercancel',stop);
         const n=D_nearest(D.playMs);if(n)D.sel=n.id;D_render();};
-      document.addEventListener('mouseup',stop);document.addEventListener('mouseleave',stop);});};
+      document.addEventListener('pointerup',stop);document.addEventListener('pointerleave',stop);document.addEventListener('pointercancel',stop);});};
   holdStep('D-edleft',-1); holdStep('D-edright',1);
 
   // wheel = zoom the viewport around the cursor (the minimap box shrinks/grows to match)
   const track=document.getElementById('D-edtrack');
   document.getElementById('D-edscroll').addEventListener('wheel',e=>{e.preventDefault();
     const cursorT=vs+(e.clientX-track.getBoundingClientRect().left)/W*span;
-    const factor=e.deltaY<0?0.82:1.22;
-    const newSpan=Math.max(3000,Math.min(RUNTIME_MS,span*factor));
-    const frac=(cursorT-vs)/span;
-    D.viewStart=cursorT-frac*newSpan;D.viewEnd=D.viewStart+newSpan;D_clampView();
-    D_editor();D_filmtl();},{passive:false});
+    D_zoomBy(e.deltaY<0?0.82:1.22,cursorT);},{passive:false});
+  // +/- buttons: the touch equivalent of the wheel above (no wheel on a phone).
+  // Centered on the playhead when it's in view, else the view's midpoint.
+  const zoomCenter=()=>(D.playMs>=vs&&D.playMs<=ve)?D.playMs:(vs+ve)/2;
+  document.getElementById('D-zoomin').onclick=()=>D_zoomBy(0.72,zoomCenter());
+  document.getElementById('D-zoomout').onclick=()=>D_zoomBy(1.4,zoomCenter());
 
   // scrub (plain drag on film/wave/lane bg); shift+drag = audition
   const cv=document.querySelector('#D-edcard canvas');
   const tOf=cx=>Math.max(vs,Math.min(ve,Math.round((vs+(cx-track.getBoundingClientRect().left)/W*span)/25)*25));
   [document.querySelector('#D-edcard .edfilm'),cv,lane].forEach(bg=>{ if(!bg)return;
-    bg.addEventListener('mousedown',e=>{
+    bg.addEventListener('pointerdown',e=>{
       if(e.target.closest('.region'))return; e.preventDefault();
       if(e.shiftKey){D_audition(e);return;}
       if(D.playing)D_stop();   // seeking wins over playback — else ontimeupdate fights the scrub
       D.scrubbing=true; D_saCtx();   // prime the audio context on this gesture
       const move=ev=>{D.playMs=tOf(ev.clientX);edph.style.display='block';edph.style.left=ex(D.playMs)+'px';D_scrubAudio(D.playMs);D_monitor();D_filmtl();D_highlightNearest();};
       move(e);
-      const up=()=>{D.scrubbing=false;D_saStop();document.removeEventListener('mousemove',move);document.removeEventListener('mouseup',up);
+      const up=()=>{D.scrubbing=false;D_saStop();document.removeEventListener('pointermove',move);document.removeEventListener('pointerup',up);
         const n=D_nearest(D.playMs);if(n)D.sel=n.id;D_render();};
-      document.addEventListener('mousemove',move);document.addEventListener('mouseup',up);
+      document.addEventListener('pointermove',move);document.addEventListener('pointerup',up);
     });
   });
 
@@ -1882,9 +1955,9 @@ function D_dragBody(e,r,el){e.preventDefault();if(D.playing)D_stop();D.sel=r.id;
   const W=D_edW(),span=D.viewEnd-D.viewStart;const sx=e.clientX,s0=r.startMs,dur=r.endMs-r.startMs;
   const move=ev=>{let ns=Math.round((s0+(ev.clientX-sx)/W*span)/25)*25;ns=Math.max(0,ns);r.startMs=ns;r.endMs=ns+dur;
     el.style.left=D_ex(r.startMs)+'px';D_dragScrub(r.startMs);};   // follow the leading edge
-  const up=()=>{D.scrubbing=false;D_saStop();document.removeEventListener('mousemove',move);document.removeEventListener('mouseup',up);
+  const up=()=>{D.scrubbing=false;D_saStop();document.removeEventListener('pointermove',move);document.removeEventListener('pointerup',up);
     D_saveTiming(r);SEGS.sort((a,b)=>a.startMs-b.startMs);D_render();};
-  document.addEventListener('mousemove',move);document.addEventListener('mouseup',up);}
+  document.addEventListener('pointermove',move);document.addEventListener('pointerup',up);}
 function D_dragEdge(e,r,isLeft,el){e.preventDefault();if(D.playing)D_stop();D.sel=r.id;
   D.scrubbing=true; D_saCtx();
   const W=D_edW(),span=D.viewEnd-D.viewStart,track=document.getElementById('D-edtrack');
@@ -1898,8 +1971,8 @@ function D_dragEdge(e,r,isLeft,el){e.preventDefault();if(D.playing)D_stop();D.se
     if(el){el.style.left=D_ex(r.startMs)+'px';el.style.width=Math.max(4,D_ex(r.endMs)-D_ex(r.startMs))+'px';
       const rl=el.querySelector('.rlen');if(rl)rl.textContent=((r.endMs-r.startMs)/1000).toFixed(1)+'s';}
     D_dragScrub(isLeft?r.startMs:r.endMs);};   // follow the edge under the cursor
-  const up=()=>{D.scrubbing=false;D_saStop();document.removeEventListener('mousemove',move);document.removeEventListener('mouseup',up);D_saveTiming(r);D_render();};
-  document.addEventListener('mousemove',move);document.addEventListener('mouseup',up);}
+  const up=()=>{D.scrubbing=false;D_saStop();document.removeEventListener('pointermove',move);document.removeEventListener('pointerup',up);D_saveTiming(r);D_render();};
+  document.addEventListener('pointermove',move);document.addEventListener('pointerup',up);}
 
 function D_audition(e){const sel=document.getElementById('D-edsel'),track=document.getElementById('D-edtrack');
   const W=D_edW(),span=D.viewEnd-D.viewStart,ox=track.getBoundingClientRect().left;
@@ -2257,15 +2330,18 @@ function D_init(){
   const swin=document.getElementById('D-swinput');
   swin.oninput=()=>{clearTimeout(SW.timer);const q=swin.value;SW.timer=setTimeout(()=>D_swLoad(q),180);};
   swin.onkeydown=D_swKey;
-  document.addEventListener('mousedown',e=>{if(SW.open&&!e.target.closest('#D-switcher'))D_swClose();});
+  document.addEventListener('pointerdown',e=>{if(SW.open&&!e.target.closest('#D-switcher'))D_swClose();});
   document.getElementById('D-discreet').onclick=()=>{D.discreet=!D.discreet;
     document.getElementById('D-discreet').classList.toggle('on',D.discreet);D_monitor();};
   const rev=document.getElementById('D-reveal');
-  rev.onmousedown=()=>{D.held=true;D_monitor();};
-  ['mouseup','mouseleave'].forEach(ev=>rev.addEventListener(ev,()=>{D.held=false;D_monitor();}));
+  rev.onpointerdown=()=>{D.held=true;D_monitor();};
+  ['pointerup','pointerleave','pointercancel'].forEach(ev=>rev.addEventListener(ev,()=>{D.held=false;D_monitor();}));
   document.getElementById('D-pp').onclick=D_play;
   document.getElementById('D-back1').onclick=()=>D_seek(-1000);
   document.getElementById('D-fwd1').onclick=()=>D_seek(1000);
+  // mobile tab switch: Player <-> Findings (no-op above the breakpoint, see CSS)
+  document.getElementById('D-mtab-stage').onclick=()=>D_mtabSet('stage');
+  document.getElementById('D-mtab-findings').onclick=()=>D_mtabSet('findings');
   // picture mode (Visual ↔ Video) and audio mode (Normal / Cleaned / Muted)
   document.querySelectorAll('#D-picmode button').forEach(b=>b.onclick=()=>{
     D.picMode=b.dataset.pic;
@@ -2289,27 +2365,28 @@ function D_init(){
   document.getElementById('D-bulkcut').onclick=()=>D_bulk(true);
   document.getElementById('D-bulkleave').onclick=()=>D_bulk(false);
   // minimap background = seek; recenter the viewport if you land outside it.
-  document.getElementById('D-ftrack').addEventListener('mousedown',e=>{
+  document.getElementById('D-ftrack').addEventListener('pointerdown',e=>{
     if(e.target.id==='D-fbox')return;
     if(D.playing)D_stop();   // a click on the full-film bar seeks — it must win over playback
     const track=e.currentTarget, at=cx=>{const r=track.getBoundingClientRect();return Math.max(0,Math.min(RUNTIME_MS,(cx-r.left)/r.width*RUNTIME_MS));};
     D.scrubbing=true; D_saCtx();   // prime the audio context on this gesture
     D.playMs=at(e.clientX);D_scrubAudio(D.playMs);D_monitor();D_filmtl();D_highlightNearest();
     const move=ev=>{D.playMs=at(ev.clientX);D_scrubAudio(D.playMs);D_monitor();D_filmtl();D_highlightNearest();};
-    const up=()=>{D.scrubbing=false;D_saStop();document.removeEventListener('mousemove',move);document.removeEventListener('mouseup',up);
+    const up=()=>{D.scrubbing=false;D_saStop();document.removeEventListener('pointermove',move);document.removeEventListener('pointerup',up);
       if(D.playMs<D.viewStart||D.playMs>D.viewEnd){const span=D.viewEnd-D.viewStart;D.viewStart=D.playMs-span/2;D.viewEnd=D.viewStart+span;D_clampView();}
       const n=D_nearest(D.playMs);if(n)D.sel=n.id;D_render();};
-    document.addEventListener('mousemove',move);document.addEventListener('mouseup',up);});
+    document.addEventListener('pointermove',move);document.addEventListener('pointerup',up);});
   // drag the viewport box to pan the editor below
-  document.getElementById('D-fbox').addEventListener('mousedown',e=>{e.stopPropagation();e.preventDefault();
+  document.getElementById('D-fbox').addEventListener('pointerdown',e=>{e.stopPropagation();e.preventDefault();
     const track=document.getElementById('D-ftrack'),rect=track.getBoundingClientRect();
     const span=D.viewEnd-D.viewStart, sx=e.clientX, vs0=D.viewStart;
     const move=ev=>{D.viewStart=vs0+(ev.clientX-sx)/rect.width*RUNTIME_MS;D.viewEnd=D.viewStart+span;D_clampView();D_filmtl();D_editor();};
-    const up=()=>{document.removeEventListener('mousemove',move);document.removeEventListener('mouseup',up);D_render();};
-    document.addEventListener('mousemove',move);document.addEventListener('mouseup',up);});
+    const up=()=>{document.removeEventListener('pointermove',move);document.removeEventListener('pointerup',up);D_render();};
+    document.addEventListener('pointermove',move);document.addEventListener('pointerup',up);});
   document.getElementById('D-mergemode').onclick=()=>{D.merge=!D.merge;if(!D.merge)D.picks.clear();D_render();};
   document.getElementById('D-mergego').onclick=D_doMerge;
   document.getElementById('D-mergeclear').onclick=()=>{D.picks.clear();D_render();};
+  D_mtabSet('stage');   // initial mobile pane
 }
 
 D_init();
@@ -2345,7 +2422,9 @@ def _html_escape(text: str) -> str:
 # Studio. Served by GET /api/review with no ?path= — the entry point the plugin
 # links to so a reviewer can start from any video, analyzed or not.
 LANDING = r"""<!doctype html>
-<meta charset="utf-8"><title>Clean Media — review</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clean Media — review</title>
 <style>
 :root{--bg:#0d1013;--panel:#16191d;--panel2:#1d2126;--line:#2a2f36;--ink:#e6edf3;--dim:#9aa5b1;--dim2:#6e7681;--pick:#3b82f6;font-family:system-ui,-apple-system,Segoe UI,sans-serif}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:8vh 16px}

@@ -35,8 +35,11 @@ def test_discreet_mode_default_blurs_and_hold_to_reveal_clears(page):
     assert page.locator("#D-mframe").is_visible()  # the (blurred) frame is up, not hidden
 
     # Hold the reveal button: the blur drops (the .discreet class comes off) and a
-    # real frame is loaded.
-    page.dispatch_event("#D-reveal", "mousedown")
+    # real frame is loaded. The button listens for pointerdown/up (touch + mouse
+    # in one code path) — a real press fires both a mouse and a pointer event,
+    # but dispatch_event only injects the exact one named, so pointerdown/up is
+    # what must be dispatched here.
+    page.dispatch_event("#D-reveal", "pointerdown")
     page.wait_for_function(
         "() => !document.getElementById('D-monitor').classList.contains('discreet')"
     )
@@ -44,7 +47,7 @@ def test_discreet_mode_default_blurs_and_hold_to_reveal_clears(page):
         "() => { const i=document.getElementById('D-mframe');"
         " return i && i.naturalWidth > 0; }"
     )
-    page.dispatch_event("#D-reveal", "mouseup")
+    page.dispatch_event("#D-reveal", "pointerup")
     # Releasing re-blurs (the class returns).
     page.wait_for_function(
         "() => document.getElementById('D-monitor').classList.contains('discreet')"
@@ -471,12 +474,13 @@ def test_picture_mode_does_not_defeat_discreet_blur(page):
     page.click('#D-picmode button[data-pic="video"]')
     page.wait_for_timeout(150)
     assert "discreet" in (monitor.get_attribute("class") or "")  # still blurred
-    # Only hold-to-reveal clears it, in any picture mode.
-    page.dispatch_event("#D-reveal", "mousedown")
+    # Only hold-to-reveal clears it, in any picture mode. (pointerdown/up: see
+    # the comment in test_discreet_mode_default_blurs_and_hold_to_reveal_clears.)
+    page.dispatch_event("#D-reveal", "pointerdown")
     page.wait_for_function(
         "() => !document.getElementById('D-monitor').classList.contains('discreet')"
     )
-    page.dispatch_event("#D-reveal", "mouseup")
+    page.dispatch_event("#D-reveal", "pointerup")
     page.wait_for_function(
         "() => document.getElementById('D-monitor').classList.contains('discreet')"
     )
