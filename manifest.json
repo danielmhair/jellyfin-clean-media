@@ -9,6 +9,14 @@
     "imageUrl": "",
     "versions": [
       {
+        "version": "0.2.19.0",
+        "changelog": "- macOS: releases now also include `CleanMedia.pkg`, a native Installer.app\n  wizard alternative to `CleanMedia.dmg` for friends who'd rather not open a\n  Terminal window.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.19.0.zip",
+        "checksum": "c57dec87078e67d478db011e86534ad2",
+        "timestamp": "2026-08-27T12:46:02"
+      },
+      {
         "version": "0.2.18.0",
         "changelog": "- The review Studio now works properly on a phone: touch scrubbing and\n  dragging, a Player/Findings tab switch that fits a phone screen, and +/-\n  zoom buttons since there's no scroll wheel to zoom with.",
         "targetAbi": "10.11.0.0",

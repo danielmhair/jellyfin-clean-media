@@ -11,6 +11,12 @@ New entries are added automatically by the release workflow from the notes in
 [Releases page](../../releases) and in `manifest.json`.
 
 <!-- releases -->
+## 0.2.19.0 — 2026-08-27
+
+- macOS: releases now also include `CleanMedia.pkg`, a native Installer.app
+  wizard alternative to `CleanMedia.dmg` for friends who'd rather not open a
+  Terminal window.
+
 ## 0.2.18.0 — 2026-08-27
 
 - The review Studio now works properly on a phone: touch scrubbing and
