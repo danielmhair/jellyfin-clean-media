@@ -11,6 +11,13 @@ New entries are added automatically by the release workflow from the notes in
 [Releases page](../../releases) and in `manifest.json`.
 
 <!-- releases -->
+## 0.2.21.0 — 2026-08-27
+
+- Windows: `install-service.ps1` now also adds a **"Clean Media Worker"**
+  Desktop icon — the same status/restart/settings menu macOS got — and
+  `-Restart` genuinely re-applies a changed `-MediaRoots`/`-VlmHosts` instead
+  of silently ignoring them.
+
 ## 0.2.20.0 — 2026-08-27
 
 - macOS: installing now adds a **"Clean Media Worker"** icon to the Desktop —
