@@ -159,6 +159,56 @@ jobs:
       - name: Build the PKG
         run: bash scripts/build-pkg.sh
 
+      - name: Install it for real and verify the worker actually comes up
+        # There's no spare Mac to hand this to, so this is the next best
+        # thing: the runner IS a real macOS machine with a real console
+        # session and passwordless sudo, so `installer` runs the actual
+        # scripts/pkg/postinstall exactly as it would on a friend's Mac --
+        # console-user detection, dropping root, running install.sh
+        # unattended, registering the launchd service. Verify the invariant,
+        # not the exit code: `installer` can report success on a postinstall
+        # that quietly did nothing useful, so check the concrete things that
+        # actually matter instead of trusting its exit code alone.
+        #
+        # What this does NOT cover: the runner ships Homebrew pre-installed,
+        # so postinstall's "create a fresh prefix, chown it to the console
+        # user" branch -- the one that avoids a second password prompt on a
+        # genuinely bare Mac -- never fires here. That path stays unverified
+        # until this runs on an actual clean machine.
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          sudo installer -pkg dist/CleanMedia.pkg -target /
+
+          owner="$(stat -f '%Su' '/Library/Application Support/CleanMedia')"
+          [ "$owner" = "$(whoami)" ] || {
+            echo "install dir is owned by $owner, not $(whoami) -- the postinstall privilege drop failed"
+            exit 1
+          }
+
+          grep -q "You're set up" "/Library/Application Support/CleanMedia/install.log" || {
+            echo "install.log never reached the finish line:"
+            cat "/Library/Application Support/CleanMedia/install.log"
+            exit 1
+          }
+
+          test -f "$HOME/Library/LaunchAgents/com.cleanmedia.worker.plist" || {
+            echo "the launchd service was never registered"
+            exit 1
+          }
+
+          ok=0
+          for _ in $(seq 1 10); do
+            if curl -fsS --max-time 5 http://127.0.0.1:8765/api/health \
+                | python3 -c "import json,sys; sys.exit(0 if json.load(sys.stdin).get('status')=='ok' else 1)"; then
+              ok=1; break
+            fi
+            sleep 3
+          done
+          [ "$ok" = 1 ] || { echo "the worker never answered on :8765 after install"; exit 1; }
+
+          echo "verified: postinstall dropped to the console user, install.sh finished, the launchd service is registered, and the worker answers on :8765."
+
       - name: Attach it to the release
         env:
           GH_TOKEN: ${{ github.token }}

@@ -86,8 +86,11 @@ themselves. `scripts/setup.sh` once, then:
 - `scripts/build-pkg.sh` — package a native `.pkg` installer (macOS, Apple's
   own Welcome/License/Install wizard). `scripts/pkg/postinstall` runs as
   root and drops to the console user for anything Homebrew-related (Homebrew
-  refuses to run as root) — **new and untested on real hardware**; read that
-  script's comments and verify on a spare Mac before relying on it.
+  refuses to run as root). CI actually installs it on `macos-latest` and
+  checks the worker comes up (see `.github/workflows/release-plugin.yml`),
+  but that runner ships Homebrew pre-installed, so postinstall's
+  fresh-Homebrew-prefix branch specifically stays unverified until this runs
+  on a genuinely clean Mac — no such machine is available as of writing.
 
 Tests: `uv run pytest`. **The sandbox blocks pytest's default temp dir**, so
 pass `--basetemp` to a writable path when running here.

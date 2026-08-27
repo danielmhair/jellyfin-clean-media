@@ -442,12 +442,15 @@ Anyway).
 - **`CleanMedia.pkg`** — Apple's own Installer.app wizard (Welcome → License
   → Install), one native admin-password prompt, no `.command` file to figure
   out how to open. It runs unattended and opens a Terminal automatically so
-  progress is visible to anyone curious. Built by `scripts/build-pkg.sh`.
-  **This one is new and hasn't been exercised on real hardware yet** — its
+  progress is visible to anyone curious. Built by `scripts/build-pkg.sh`; its
   `postinstall` script does real root-level work (creating and handing off a
-  fresh Homebrew prefix) to avoid a second password prompt; read the comments
-  in `scripts/pkg/postinstall` and test it on a spare Mac/admin account
-  before pointing a friend at it.
+  fresh Homebrew prefix, dropping to the console user) to avoid a second
+  password prompt — read the comments in `scripts/pkg/postinstall` before
+  trusting it blindly. CI actually **installs** it for real on the
+  `macos-latest` runner and checks the worker comes up (see the "Install it
+  for real" step in `.github/workflows/release-plugin.yml`) — but that runner
+  ships with Homebrew already present, so the fresh-prefix branch specifically
+  stays unverified until this runs on a genuinely clean Mac.
 
 Both are built by `macos-latest` CI jobs right after each release is cut; to
 build either yourself, run the matching script on a Mac.
