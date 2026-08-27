@@ -345,7 +345,7 @@ From an **elevated** PowerShell in the repo root:
 ```powershell
 .\scripts\install-service.ps1
 .\scripts\install-service.ps1 -MediaRoots "D:\Movies;D:\TV" -Port 8765
-.\scripts\install-service.ps1 -Restart      # after pulling new worker code
+.\scripts\install-service.ps1 -MediaRoots "\\Nas\Movies" -VlmHosts "http://localhost:11434,http://100.95.155.5:11434" -Restart
 .\scripts\install-service.ps1 -Uninstall
 ```
 
@@ -353,7 +353,18 @@ This registers a scheduled task that starts at boot — before anyone logs
 in — and restarts the worker every minute if it dies. It is Task Scheduler
 rather than a real service because uvicorn is a console program: making it
 a true service needs NSSM or WinSW wrapped around it, for the same
-behaviour.
+behaviour. `-Restart` genuinely re-applies whatever's passed alongside it (or
+keeps the existing config if nothing's passed — it's read back from the
+current launcher, not reset to defaults), and validates each media folder and
+VLM host first, as a warning rather than a blocker (a NAS can be unmounted,
+or a GPU box off, at the exact moment this runs).
+
+The script also (re)writes a **"Clean Media Worker" Desktop shortcut** —
+double-click it any time for a small menu: check whether it's online,
+restart it, change the media folder or VLM hosts, or view recent activity.
+Restarting/reconfiguring from the menu pops the same UAC prompt this script
+itself needs (it shells back out to `install-service.ps1`, elevated); just
+checking status doesn't.
 
 The script starts the task and then polls `/api/health`, so it tells you
 whether the worker actually came up rather than just that the task
@@ -365,6 +376,7 @@ registered. It prints the LAN addresses to use as the plugin's Worker URL.
 | Log (raw stdout) | `%LOCALAPPDATA%\CleanMedia\worker.log` — everything the console printed, mixed together, truncated past 10 MB |
 | Launcher | `%LOCALAPPDATA%\CleanMedia\worker-service.cmd` (+ a `.vbs` wrapper that runs it with no visible window), regenerated on install |
 | Task | `CleanMediaWorker` in Task Scheduler |
+| Desktop icon | `Clean Media Worker.cmd` on the Desktop, regenerated on install/restart |
 
 The worker runs as a **background scheduled task**, so its output never
 appears in the PowerShell window you launched it from — that window only shows

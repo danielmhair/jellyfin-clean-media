@@ -77,7 +77,13 @@ themselves. `scripts/setup.sh` once, then:
 - `scripts/review.sh <film>` — open the review URL.
 - `scripts/render.sh <film>` — render a clean copy from *approved* findings.
 - `scripts/build-plugin.sh` / `release-plugin.sh` — package/publish the plugin.
-- `scripts/install-service.ps1` — run the worker at boot on Windows.
+- `scripts/install-service.ps1` — run the worker at boot on Windows. Also
+  (re)writes a **"Clean Media Worker" Desktop icon** on every install/restart
+  ([scripts/worker-manage.ps1](scripts/worker-manage.ps1): status, restart,
+  change media roots/VLM hosts, view recent activity). `-Restart` genuinely
+  re-applies changed `-MediaRoots`/`-VlmHosts` now (it used to silently kick
+  the existing process without them — same bug found and fixed on the macOS
+  side first, see below).
 - `scripts/install-service.sh` — run the worker at login on macOS (`launchd`).
   `install.sh` also drops a **"Clean Media Worker" Desktop icon** from
   [scripts/worker-icon-template.command](scripts/worker-icon-template.command)

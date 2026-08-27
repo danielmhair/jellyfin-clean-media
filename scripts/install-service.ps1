@@ -17,6 +17,18 @@
     Run from an *elevated* PowerShell: registering a boot-time task that runs
     without a logged-in user requires administrator rights.
 
+    -Restart genuinely re-applies the config, it doesn't just kick the
+    existing process: pass -MediaRoots/-VlmHosts alongside it to change them
+    and restart in one step. Omit them on a -Restart and this keeps whatever
+    was already configured — it reads that back out of the existing launcher
+    rather than resetting to the defaults below, so "just restart" never
+    silently drops a NAS path (see scripts/install-service.sh's matching
+    fix on macOS for the same bug, found first over there).
+
+    Also (re)writes a "Clean Media Worker" Desktop shortcut — a small
+    status/restart/settings menu (scripts/worker-manage.ps1), so managing
+    this day to day doesn't need a remembered PowerShell command.
+
 .PARAMETER Port
     Port the worker listens on. Must match the Worker URL in the Jellyfin
     plugin settings.
@@ -24,12 +36,14 @@
 .PARAMETER MediaRoots
     Semicolon-separated folders to search when Jellyfin asks about a file by
     its own path (/volume1/Movies/...) that does not exist on this machine.
-    Defaults to <repo>\movies.
+    Defaults to <repo>\movies on a fresh install; on -Restart, keeps whatever
+    is already configured unless you pass this explicitly.
 
 .PARAMETER VlmHosts
     Comma-separated Ollama base URLs to fan the visual pass across, e.g.
     "http://localhost:11434,http://192.168.68.102:11434". Lets a second
-    machine's GPU work the same film. Omit to use only the local Ollama.
+    machine's GPU work the same film. Omit to use only the local Ollama (or,
+    on -Restart, whatever is already configured).
 
 .PARAMETER UsePassword
     Store your Windows password with the task. Only needed if MediaRoots
@@ -46,6 +60,9 @@
 
 .EXAMPLE
     .\scripts\install-service.ps1 -MediaRoots "D:\Movies;D:\TV" -Port 8765
+
+.EXAMPLE
+    .\scripts\install-service.ps1 -MediaRoots "\\Nas\nas-8tb-hdd\Movies" -VlmHosts "http://localhost:11434,http://100.95.155.5:11434" -Restart
 
 .EXAMPLE
     .\scripts\install-service.ps1 -Uninstall
@@ -65,6 +82,8 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $repo = Split-Path -Parent $PSScriptRoot
+$mediaRootsExplicit = $PSBoundParameters.ContainsKey('MediaRoots')
+$vlmHostsExplicit = $PSBoundParameters.ContainsKey('VlmHosts')
 
 function Assert-Elevated {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -78,8 +97,6 @@ function Assert-Elevated {
 # orphaned and keeps the port — and once orphaned it runs in the S4U service
 # context, which only an *elevated* taskkill (or SYSTEM) can terminate. So a
 # clean stop is: end the task, then hunt down whatever still holds the port.
-# This is why picking up new worker code needs -Restart from an elevated shell,
-# not a bare Stop/Start.
 function Stop-WorkerProcesses {
     param([int]$OnPort)
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -120,26 +137,38 @@ function Wait-Healthy {
     return $null
 }
 
-Assert-Elevated
+# --- read back the existing launcher's config, for anything not explicitly --
+# passed this time (see the -Restart bug this fixes, in the .DESCRIPTION).
+$stateDir = Join-Path $env:LOCALAPPDATA 'CleanMedia'
+$launcher = Join-Path $stateDir 'worker-service.cmd'
+$vbsLauncher = Join-Path $stateDir 'worker-service.vbs'
+$logPath = Join-Path $stateDir 'worker.log'
+$iconPath = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Clean Media Worker.cmd'
 
-if ($Restart) {
-    $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    if ($null -eq $existing) {
-        throw "No task named '$TaskName'. Install it first: .\scripts\install-service.ps1"
+function Get-ExistingConfig {
+    $result = [PSCustomObject]@{ MediaRoots = $null; VlmHosts = $null }
+    if (Test-Path $launcher) {
+        $content = Get-Content $launcher -Raw
+        if ($content -match 'set "CLEANMEDIA_MEDIA_ROOTS=([^"]*)"') { $result.MediaRoots = $Matches[1] }
+        if ($content -match 'set "CLEANMEDIA_VLM_HOSTS=([^"]*)"') { $result.VlmHosts = $Matches[1] }
     }
-    Write-Host "Stopping the worker (and any orphaned process on port $Port)..."
-    if (-not (Stop-WorkerProcesses -OnPort $Port)) {
-        throw "Port $Port is still held. Reboot to clear the orphaned worker."
-    }
-    Start-ScheduledTask -TaskName $TaskName
-    Write-Host "Restarted. Waiting for the worker to answer (loads models, ~1-2 min)..."
-    $r = Wait-Healthy -OnPort $Port
-    if ($null -eq $r) {
-        throw "Worker did not come up. Check $env:LOCALAPPDATA\CleanMedia\worker.log"
-    }
-    Write-Host "Worker $($r.version) is up on new code."
-    return
+    return $result
 }
+
+# --- write (or refresh) the Desktop icon, regardless of install/restart/etc --
+# Called at the end of a successful run below; factored out so Uninstall can
+# leave a working icon behind too (it still opens the "set it up" flow).
+function Set-DesktopIcon {
+    $psScript = Join-Path $PSScriptRoot 'worker-manage.ps1'
+    $cmd = @"
+@echo off
+rem Generated by scripts\install-service.ps1 -- re-run it to regenerate.
+powershell -NoProfile -ExecutionPolicy Bypass -File "$psScript" -TaskName "$TaskName" -Port $Port
+"@
+    Set-Content -Path $iconPath -Value $cmd -Encoding ASCII
+}
+
+Assert-Elevated
 
 if ($Uninstall) {
     $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -150,11 +179,48 @@ if ($Uninstall) {
     Stop-WorkerProcesses -OnPort $Port | Out-Null
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
     Write-Host "Removed scheduled task '$TaskName'. The worker will not start at boot."
-    Write-Host "Logs and the launcher are left in place under $env:LOCALAPPDATA\CleanMedia."
+    Write-Host "Logs and the launcher are left in place under $stateDir."
     return
 }
 
-# --- locate uv -------------------------------------------------------------
+if ($Restart) {
+    $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($null -eq $existing) {
+        throw "No task named '$TaskName'. Install it first: .\scripts\install-service.ps1"
+    }
+}
+
+# A bare restart (nothing explicit passed) keeps whatever's already
+# configured, read back from the existing launcher rather than reset to the
+# hardcoded defaults below.
+$existingConfig = Get-ExistingConfig
+if (-not $mediaRootsExplicit -and $existingConfig.MediaRoots) { $MediaRoots = $existingConfig.MediaRoots }
+if (-not $vlmHostsExplicit -and $existingConfig.VlmHosts) { $VlmHosts = $existingConfig.VlmHosts }
+if ([string]::IsNullOrWhiteSpace($MediaRoots)) {
+    $MediaRoots = Join-Path $repo 'movies'
+}
+
+# --- checks: warn, don't block ----------------------------------------------
+# A NAS can be unmounted, or a GPU box turned off, at the exact moment this
+# runs -- the worker itself already tolerates an unreachable root/host, so
+# these are informational, not fatal.
+Write-Host "==> Checking configured paths and hosts"
+foreach ($root in ($MediaRoots -split ';' | Where-Object { $_ })) {
+    if (Test-Path $root) { Write-Host "  ok       media folder reachable: $root" }
+    else { Write-Host "  warn     media folder not found right now (unmounted?): $root" }
+}
+if (-not [string]::IsNullOrWhiteSpace($VlmHosts)) {
+    foreach ($h in ($VlmHosts -split ',' | Where-Object { $_ })) {
+        try {
+            Invoke-RestMethod -Uri "$h/api/tags" -TimeoutSec 3 -ErrorAction Stop | Out-Null
+            Write-Host "  ok       vlm host reachable: $h"
+        } catch {
+            Write-Host "  warn     vlm host unreachable right now: $h"
+        }
+    }
+}
+
+# --- locate uv ---------------------------------------------------------------
 # uv installs to ~\.local\bin, which is not on the PATH a scheduled task gets,
 # so resolve it to an absolute path now and bake that into the launcher.
 $uv = $null
@@ -175,30 +241,25 @@ if ($null -eq $uv) {
     throw "uv not found. Install it with: winget install astral-sh.uv"
 }
 
-if ([string]::IsNullOrWhiteSpace($MediaRoots)) {
-    $MediaRoots = Join-Path $repo 'movies'
-}
-
 # Something already holds the port — a hand-started worker, or a previous
 # task's orphaned uvicorn. Reclaim it rather than dying on a bind error that
-# only surfaces in the log. On reinstall this is the normal case.
+# only surfaces in the log. On reinstall (or restart) this is the normal case.
 $inUse = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
 if ($null -ne $inUse) {
-    Write-Host "Port $Port is in use; reclaiming it before (re)installing..."
+    Write-Host "Port $Port is in use; reclaiming it..."
     if (-not (Stop-WorkerProcesses -OnPort $Port)) {
         throw "Port $Port is still held after trying to stop it. Reboot to clear it, then re-run."
     }
 }
 
-# --- write the launcher ----------------------------------------------------
+# --- (re)write the launcher --------------------------------------------------
 # A scheduled task action cannot set environment variables, so the task runs a
 # small .cmd that sets them and then execs uv. It lives outside the repo so it
-# is not something you have to remember to gitignore.
-$stateDir = Join-Path $env:LOCALAPPDATA 'CleanMedia'
+# is not something you have to remember to gitignore. Regenerated on every
+# run, restart included -- deliberate: it's what makes -MediaRoots/-VlmHosts
+# passed alongside -Restart actually take effect, and re-registering with
+# Task Scheduler is cheap and idempotent either way.
 if (-not (Test-Path $stateDir)) { New-Item -ItemType Directory -Path $stateDir | Out-Null }
-$launcher = Join-Path $stateDir 'worker-service.cmd'
-$vbsLauncher = Join-Path $stateDir 'worker-service.vbs'
-$logPath = Join-Path $stateDir 'worker.log'
 
 # Optional: a pool of Ollama hosts for the visual pass (multi-GPU). One line
 # only when set, so a single-host setup keeps the exact launcher it had.
@@ -298,12 +359,19 @@ if ($AtLogon) {
 }
 
 Register-ScheduledTask @register | Out-Null
-Write-Host "Registered scheduled task '$TaskName'."
+if ($Restart) {
+    Write-Host "==> Restarted '$TaskName' with the config above."
+} else {
+    Write-Host "==> Registered scheduled task '$TaskName'."
+}
 Write-Host "  launcher   $launcher"
 Write-Host "  log        $logPath"
 Write-Host "  media root $MediaRoots"
 
-# --- start and verify ------------------------------------------------------
+Set-DesktopIcon
+Write-Host "  icon       $iconPath"
+
+# --- start and verify --------------------------------------------------------
 # Verify the invariant, not the exit code: a task that starts and immediately
 # dies still reports success.
 Start-ScheduledTask -TaskName $TaskName
@@ -313,34 +381,26 @@ Write-Host "speech and vision models, which takes a minute or two..."
 
 # Generous: a cold start on this machine took ~70s, and a too-short wait
 # would report failure on a worker that was merely still loading.
-$healthy = $false
-foreach ($i in 1..90) {
-    try {
-        # 15s, not 2s: /api/health pings Ollama and routinely takes ~2s, so a
-        # 2s timeout races it and falsely reports the worker as never answering.
-        $r = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 15
-        Write-Host "Worker $($r.version) is up after $($i * 2)s."
-        Write-Host "  engines: $(($r.engines.PSObject.Properties.Name) -join ', ')"
-        $healthy = $true
-        break
-    } catch {
-        Start-Sleep -Seconds 2
-    }
-}
-
-if (-not $healthy) {
+$r = Wait-Healthy -OnPort $Port
+if ($null -eq $r) {
     Write-Warning "The worker did not answer within 3 minutes. Check the log:"
     Write-Warning "  Get-Content '$logPath' -Tail 40"
     exit 1
 }
+Write-Host "Worker $($r.version) is up."
+if (-not $Restart) {
+    Write-Host "  engines: $(($r.engines.PSObject.Properties.Name) -join ', ')"
+}
 
-$ips = Get-NetIPAddress -AddressFamily IPv4 |
-    Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
-    Select-Object -ExpandProperty IPAddress
+if (-not $Restart) {
+    $ips = Get-NetIPAddress -AddressFamily IPv4 |
+        Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
+        Select-Object -ExpandProperty IPAddress
 
-Write-Host ""
-Write-Host "Set the Worker URL in the Jellyfin plugin settings to one of:"
-foreach ($ip in $ips) { Write-Host "    http://${ip}:$Port" }
-Write-Host ""
-Write-Host "Use the address on the same LAN as your Jellyfin server. A Tailscale"
-Write-Host "address will not work if Jellyfin runs in a Docker bridge network."
+    Write-Host ""
+    Write-Host "Set the Worker URL in the Jellyfin plugin settings to one of:"
+    foreach ($ip in $ips) { Write-Host "    http://${ip}:$Port" }
+    Write-Host ""
+    Write-Host "Use the address on the same LAN as your Jellyfin server. A Tailscale"
+    Write-Host "address will not work if Jellyfin runs in a Docker bridge network."
+}
