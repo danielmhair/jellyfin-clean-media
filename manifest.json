@@ -9,6 +9,14 @@
     "imageUrl": "",
     "versions": [
       {
+        "version": "0.2.17.0",
+        "changelog": "- The worker now checks for newer releases and shows an **Update now** button\n  on the settings page when one's available \u2014 nothing is ever applied\n  without that click.\n- macOS: `scripts/install.sh` can now set the worker up as a background\n  service (`scripts/install-service.sh`), and every release now includes a\n  double-clickable `CleanMedia.dmg` installer for friends who'd rather not\n  use a terminal.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.17.0.zip",
+        "checksum": "472a24bff91ee250de8c3b628e3af3f7",
+        "timestamp": "2026-08-27T03:56:43"
+      },
+      {
         "version": "0.2.16.0",
         "changelog": "Fixed profanity analysis failing on large films from a network share. A big file's audio decode could get cut short by a momentary drop in the share connection \u2014 sometimes reporting the film as clean when only its opening minutes were actually checked, and on the largest films failing the job outright with no retry. Films above 1 GB on a network share are now copied to local disk first (resuming automatically if the copy itself is interrupted), decoded there, and the temporary copy is removed afterward \u2014 so an unreliable share no longer costs you a wasted multi-hour pass. Nothing to configure.",
         "targetAbi": "10.11.0.0",

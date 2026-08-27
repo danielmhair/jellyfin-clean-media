@@ -11,6 +11,16 @@ New entries are added automatically by the release workflow from the notes in
 [Releases page](../../releases) and in `manifest.json`.
 
 <!-- releases -->
+## 0.2.17.0 — 2026-08-27
+
+- The worker now checks for newer releases and shows an **Update now** button
+  on the settings page when one's available — nothing is ever applied
+  without that click.
+- macOS: `scripts/install.sh` can now set the worker up as a background
+  service (`scripts/install-service.sh`), and every release now includes a
+  double-clickable `CleanMedia.dmg` installer for friends who'd rather not
+  use a terminal.
+
 ## 0.2.16.0 — 2026-08-26
 
 Fixed profanity analysis failing on large films from a network share. A big file's audio decode could get cut short by a momentary drop in the share connection — sometimes reporting the film as clean when only its opening minutes were actually checked, and on the largest films failing the job outright with no retry. Films above 1 GB on a network share are now copied to local disk first (resuming automatically if the copy itself is interrupted), decoded there, and the temporary copy is removed afterward — so an unreliable share no longer costs you a wasted multi-hour pass. Nothing to configure.
