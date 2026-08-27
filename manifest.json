@@ -9,6 +9,14 @@
     "imageUrl": "",
     "versions": [
       {
+        "version": "0.2.20.0",
+        "changelog": "- macOS: installing now adds a **\"Clean Media Worker\"** icon to the Desktop \u2014\n  double-click it any time to check whether the worker's running, restart it,\n  change the media folder or add a second GPU machine, or view recent\n  activity. `scripts/install-service.sh` gained a matching `--vlm-hosts` flag\n  and `--restart` now actually re-applies changed settings instead of just\n  kicking the existing process.\n- The `.pkg` installer's progress window now closes itself when the install\n  finishes successfully, and shows a clear \"send this log to whoever gave you\n  the installer\" message (with the log file revealed in Finder) if it doesn't.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.20.0.zip",
+        "checksum": "58536724bfc45efdad0f3e485e5d5655",
+        "timestamp": "2026-08-27T19:21:35"
+      },
+      {
         "version": "0.2.19.0",
         "changelog": "- macOS: releases now also include `CleanMedia.pkg`, a native Installer.app\n  wizard alternative to `CleanMedia.dmg` for friends who'd rather not open a\n  Terminal window.",
         "targetAbi": "10.11.0.0",

@@ -11,6 +11,18 @@ New entries are added automatically by the release workflow from the notes in
 [Releases page](../../releases) and in `manifest.json`.
 
 <!-- releases -->
+## 0.2.20.0 — 2026-08-27
+
+- macOS: installing now adds a **"Clean Media Worker"** icon to the Desktop —
+  double-click it any time to check whether the worker's running, restart it,
+  change the media folder or add a second GPU machine, or view recent
+  activity. `scripts/install-service.sh` gained a matching `--vlm-hosts` flag
+  and `--restart` now actually re-applies changed settings instead of just
+  kicking the existing process.
+- The `.pkg` installer's progress window now closes itself when the install
+  finishes successfully, and shows a clear "send this log to whoever gave you
+  the installer" message (with the log file revealed in Finder) if it doesn't.
+
 ## 0.2.19.0 — 2026-08-27
 
 - macOS: releases now also include `CleanMedia.pkg`, a native Installer.app
