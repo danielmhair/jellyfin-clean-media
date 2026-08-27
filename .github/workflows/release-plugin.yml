@@ -178,7 +178,15 @@ jobs:
         timeout-minutes: 25
         run: |
           set -euo pipefail
-          sudo installer -pkg dist/CleanMedia.pkg -target /
+          # A postinstall script's own stdout/stderr is captured by macOS into
+          # /var/log/install.log, NOT echoed to `installer`'s own terminal
+          # output -- so on failure, that log (not this step's visible output)
+          # is where the real reason lives. Dump its tail before failing loud.
+          if ! sudo installer -pkg dist/CleanMedia.pkg -target /; then
+            echo "----- tail of /var/log/install.log -----"
+            sudo tail -n 200 /var/log/install.log || true
+            exit 1
+          fi
 
           owner="$(stat -f '%Su' '/Library/Application Support/CleanMedia')"
           [ "$owner" = "$(whoami)" ] || {

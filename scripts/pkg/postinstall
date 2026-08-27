@@ -22,10 +22,18 @@ INSTALL_DIR="/Library/Application Support/CleanMedia"
 # --- who is actually sitting at this Mac? ------------------------------------
 # The standard, widely-used way to find the logged-in GUI user from a root
 # context (Installer.app, launchd, MDM postinstall scripts all use this same
-# stat trick). Empty, "root", or "loginwindow" all mean nobody is signed in --
-# most commonly a remote/unattended install with no console session, which
-# this cannot recover from: Homebrew and uv need a real user account to own.
+# stat trick) -- correct for a double-clicked .pkg, but there may be no real
+# console *login* session at all when this runs some other way (`sudo
+# installer` from a terminal, or a CI runner that supports GUI automation
+# without an interactive Aqua login tied to /dev/console). For that case,
+# fall back to $SUDO_USER, which sudo always sets to whoever actually invoked
+# it -- a well-defined "the installing user" in a non-GUI context too.
 CONSOLE_USER="$(stat -f "%Su" /dev/console 2>/dev/null || true)"
+if [ -z "$CONSOLE_USER" ] || [ "$CONSOLE_USER" = "root" ] || [ "$CONSOLE_USER" = "loginwindow" ]; then
+  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    CONSOLE_USER="$SUDO_USER"
+  fi
+fi
 if [ -z "$CONSOLE_USER" ] || [ "$CONSOLE_USER" = "root" ] || [ "$CONSOLE_USER" = "loginwindow" ]; then
   log "no one appears to be logged in at the console -- sign in and re-run the installer."
   exit 1
