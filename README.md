@@ -430,12 +430,27 @@ already-mounted network shares. Logs go to
 ### A double-clickable installer
 
 Every [release](https://github.com/danielmhair/jellyfin-clean-media/releases)
-includes a `CleanMedia.dmg` — a friend downloads it, double-clicks
-**Install Clean Media.command**, and gets the same install flow as the
-one-liner above without needing Git Bash. It's unsigned, so the first launch
-needs the usual Gatekeeper bypass (right-click → Open). It's built by a
-`macos-latest` CI job (`scripts/build-dmg.sh`) right after each release is
-cut; to build one yourself, run that script on a Mac.
+includes two installers for friends who'd rather not use Git Bash — both run
+the same `scripts/install.sh` underneath, they just differ in how it's
+presented. Both are unsigned, so the first launch needs the usual Gatekeeper
+bypass (right-click → Open, or System Settings → Privacy & Security → Open
+Anyway).
+
+- **`CleanMedia.dmg`** — double-click **Install Clean Media.command** inside
+  it, and a Terminal window runs the same interactive flow as the one-liner
+  above. Built by `scripts/build-dmg.sh`.
+- **`CleanMedia.pkg`** — Apple's own Installer.app wizard (Welcome → License
+  → Install), one native admin-password prompt, no `.command` file to figure
+  out how to open. It runs unattended and opens a Terminal automatically so
+  progress is visible to anyone curious. Built by `scripts/build-pkg.sh`.
+  **This one is new and hasn't been exercised on real hardware yet** — its
+  `postinstall` script does real root-level work (creating and handing off a
+  fresh Homebrew prefix) to avoid a second password prompt; read the comments
+  in `scripts/pkg/postinstall` and test it on a spare Mac/admin account
+  before pointing a friend at it.
+
+Both are built by `macos-latest` CI jobs right after each release is cut; to
+build either yourself, run the matching script on a Mac.
 
 ### Updating
 

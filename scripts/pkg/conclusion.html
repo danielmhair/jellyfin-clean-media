@@ -1,0 +1,15 @@
+<html><body style="font: 13px -apple-system, sans-serif; color: #1d1d1f;">
+<p><b>Installed.</b> If a Terminal window is still open, it's showing the
+tail end of setup — safe to close once it says it's done.</p>
+<p>Two things left, in Jellyfin itself:</p>
+<ol>
+<li>Dashboard → Plugins → Repositories → add:<br>
+<code>https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/manifest.json</code><br>
+then install <b>Clean Media</b> from the catalogue and restart Jellyfin.</li>
+<li>Dashboard → Plugins → Clean Media → set the Worker URL to this
+Mac's address (e.g. <code>http://&lt;this-machine-ip&gt;:8765</code>) and
+click Test connection.</li>
+</ol>
+<p>If Test connection doesn't succeed right away, give the worker a minute —
+first start loads the vision model.</p>
+</body></html>

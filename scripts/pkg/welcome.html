@@ -1,0 +1,19 @@
+<html><body style="font: 13px -apple-system, sans-serif; color: #1d1d1f;">
+<p><b>This installs the Clean Media worker</b> — the local analysis engine
+that detects objectionable content in your own media, for review inside
+Jellyfin. Nothing leaves this machine.</p>
+<p>Clicking Install will:</p>
+<ul>
+<li>Install <b>uv</b> (a Python toolchain), <b>FFmpeg</b>, and <b>Ollama</b>
+with the vision model, if any are missing</li>
+<li>Set the worker up to run automatically in the background (a
+<code>launchd</code> service), so there's nothing to leave running</li>
+</ul>
+<p>You'll see one macOS password prompt (this installer's own). After that,
+a Terminal window opens automatically so you can watch progress — it isn't
+required, just there if you're curious. The whole thing can take several
+minutes the first time.</p>
+<p>The Jellyfin plugin itself isn't included here — that installs from
+inside Jellyfin (Dashboard → Plugins → Repositories), and this installer
+prints the exact steps when it finishes.</p>
+</body></html>

@@ -1,0 +1,100 @@
+#!/bin/bash
+# Runs as root, right after Installer.app copies the payload to
+# /Library/Application Support/CleanMedia (see scripts/build-pkg.sh). Its only
+# job is to get out of root's way as fast as possible and finish the install
+# as the actual logged-in person -- Homebrew refuses outright to run as root,
+# and everything this needs to touch (uv's install, ~/.local/bin, the venv,
+# the launchd LaunchAgent) belongs to that person, not to root.
+#
+# The one thing that DOES need root is creating a fresh Homebrew prefix
+# (/opt/homebrew on Apple Silicon, /usr/local on Intel) -- so this does that
+# part itself, chowns it to the console user, and only then drops down. That
+# means Homebrew's own installer never has to ask for a second password: the
+# one admin prompt Installer.app already showed for this .pkg is the only one
+# a friend ever sees. If Homebrew is already installed, none of that runs --
+# this only touches a prefix it is about to create itself.
+set -u
+
+log() { echo "[postinstall] $*"; }
+
+INSTALL_DIR="/Library/Application Support/CleanMedia"
+
+# --- who is actually sitting at this Mac? ------------------------------------
+# The standard, widely-used way to find the logged-in GUI user from a root
+# context (Installer.app, launchd, MDM postinstall scripts all use this same
+# stat trick). Empty, "root", or "loginwindow" all mean nobody is signed in --
+# most commonly a remote/unattended install with no console session, which
+# this cannot recover from: Homebrew and uv need a real user account to own.
+CONSOLE_USER="$(stat -f "%Su" /dev/console 2>/dev/null || true)"
+if [ -z "$CONSOLE_USER" ] || [ "$CONSOLE_USER" = "root" ] || [ "$CONSOLE_USER" = "loginwindow" ]; then
+  log "no one appears to be logged in at the console -- sign in and re-run the installer."
+  exit 1
+fi
+CONSOLE_UID="$(id -u "$CONSOLE_USER" 2>/dev/null || true)"
+CONSOLE_GROUP="$(id -gn "$CONSOLE_USER" 2>/dev/null || echo staff)"
+if [ -z "$CONSOLE_UID" ]; then
+  log "could not resolve a uid for console user '$CONSOLE_USER'."
+  exit 1
+fi
+log "installing for $CONSOLE_USER (uid $CONSOLE_UID)"
+
+# --- the payload is root-owned straight off the copy; hand it over ----------
+chown -R "$CONSOLE_USER:$CONSOLE_GROUP" "$INSTALL_DIR"
+
+# --- pre-authorize a fresh Homebrew prefix, so its installer needs no sudo --
+# (`command` is a shell builtin, not a standalone binary -- sudo can only exec
+# real binaries, so this has to go through a shell rather than call it directly.)
+if ! sudo -u "$CONSOLE_USER" -H bash -lc 'command -v brew' >/dev/null 2>&1; then
+  if [ "$(uname -m)" = "arm64" ]; then BREW_PREFIX="/opt/homebrew"; else BREW_PREFIX="/usr/local"; fi
+  if [ ! -e "$BREW_PREFIX" ]; then
+    log "creating $BREW_PREFIX, owned by $CONSOLE_USER, so Homebrew's installer needs no extra password"
+    mkdir -p "$BREW_PREFIX"
+    chown -R "$CONSOLE_USER:$CONSOLE_GROUP" "$BREW_PREFIX"
+  else
+    log "$BREW_PREFIX already exists (not owned by $CONSOLE_USER via brew) -- leaving it alone;"
+    log "Homebrew's installer may need a password it cannot ask for here. See the log if it fails."
+  fi
+fi
+
+# --- open a Terminal so progress is visible without hunting for a log file --
+# install.sh takes several minutes (uv downloads PyTorch, Ollama pulls a
+# multi-GB model) and Installer.app's own window just shows a generic
+# "running package scripts" spinner the whole time -- it cannot show this
+# script's output live. `open -a Terminal` on a plain text file does not tail
+# it (Terminal has no such behavior for arbitrary files) -- a .command file is
+# what Terminal.app actually knows how to run, so wrap the tail in one. And a
+# bare `sudo -u user open ...` from a root context has no window-server
+# connection and silently does nothing; launchctl asuser is what actually
+# opens a GUI app in another user's session.
+LOGFILE="$INSTALL_DIR/install.log"
+: > "$LOGFILE"
+chown "$CONSOLE_USER:$CONSOLE_GROUP" "$LOGFILE"
+
+TAIL_CMD="$INSTALL_DIR/.watch-install.command"
+cat > "$TAIL_CMD" <<TAILEOF
+#!/bin/bash
+echo "Clean Media is installing -- this is just for progress, nothing to do here."
+echo 'Safe to close once you see "You are set up" (last line) below.'
+echo
+tail -f -n +1 "$LOGFILE"
+TAILEOF
+chmod +x "$TAIL_CMD"
+chown "$CONSOLE_USER:$CONSOLE_GROUP" "$TAIL_CMD"
+launchctl asuser "$CONSOLE_UID" sudo -u "$CONSOLE_USER" \
+  open -a Terminal "$TAIL_CMD" >/dev/null 2>&1 || log "could not open a visible progress window (non-fatal)"
+
+# --- run the real installer as the console user, not root -------------------
+# No tty here, so scripts/install.sh's own `[ ! -t 0 ]` fallback already makes
+# every prompt take its default -- --yes is belt-and-suspenders, matching how
+# scripts/build-dmg.sh's .command runs the interactive version of this same
+# script. -H sets HOME to the console user's, which uv/ollama/launchd all need
+# to land in the right place.
+sudo -u "$CONSOLE_USER" -H bash -lc "cd '$INSTALL_DIR' && bash scripts/install.sh --yes" >>"$LOGFILE" 2>&1
+status=$?
+
+if [ "$status" -eq 0 ]; then
+  log "install.sh finished — see $LOGFILE for the full run"
+else
+  log "install.sh exited $status — see $LOGFILE (still open in Terminal) for why"
+fi
+exit "$status"

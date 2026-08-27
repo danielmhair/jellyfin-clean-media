@@ -80,8 +80,14 @@ themselves. `scripts/setup.sh` once, then:
 - `scripts/install-service.ps1` — run the worker at boot on Windows.
 - `scripts/install-service.sh` — run the worker at login on macOS (`launchd`).
 - `scripts/build-dmg.sh` — package a double-clickable `.dmg` installer (macOS,
-  wraps `install.sh`). See [worker/update.py](worker/update.py) for the
-  check-and-prompt auto-update this pairs with.
+  wraps `install.sh` in a `.command` run from Terminal). See
+  [worker/update.py](worker/update.py) for the check-and-prompt auto-update
+  this pairs with.
+- `scripts/build-pkg.sh` — package a native `.pkg` installer (macOS, Apple's
+  own Welcome/License/Install wizard). `scripts/pkg/postinstall` runs as
+  root and drops to the console user for anything Homebrew-related (Homebrew
+  refuses to run as root) — **new and untested on real hardware**; read that
+  script's comments and verify on a spare Mac before relying on it.
 
 Tests: `uv run pytest`. **The sandbox blocks pytest's default temp dir**, so
 pass `--basetemp` to a writable path when running here.
