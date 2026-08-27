@@ -35,7 +35,10 @@ jobs:
     # retrigger workflows anyway — this is belt-and-suspenders.)
     if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
     outputs:
-      version: ${{ steps.ver.outputs.next3 }}   # e.g. "0.2.17" — the dmg job's tag is v<this>
+      # The 4-segment plugin version, e.g. "0.2.17.0" — this is what the tag
+      # actually is ("v$VERSION" below uses this same next, not next3), so the
+      # dmg job must check out v<this>, not the 3-segment worker version.
+      version: ${{ steps.ver.outputs.next }}
     steps:
       - uses: actions/checkout@v4
         with:
