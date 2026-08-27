@@ -9,6 +9,14 @@
     "imageUrl": "",
     "versions": [
       {
+        "version": "0.2.18.0",
+        "changelog": "- The review Studio now works properly on a phone: touch scrubbing and\n  dragging, a Player/Findings tab switch that fits a phone screen, and +/-\n  zoom buttons since there's no scroll wheel to zoom with.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.18.0.zip",
+        "checksum": "a292c493b9f70a7bd85d21f98ecb6033",
+        "timestamp": "2026-08-27T04:06:56"
+      },
+      {
         "version": "0.2.17.0",
         "changelog": "- The worker now checks for newer releases and shows an **Update now** button\n  on the settings page when one's available \u2014 nothing is ever applied\n  without that click.\n- macOS: `scripts/install.sh` can now set the worker up as a background\n  service (`scripts/install-service.sh`), and every release now includes a\n  double-clickable `CleanMedia.dmg` installer for friends who'd rather not\n  use a terminal.",
         "targetAbi": "10.11.0.0",

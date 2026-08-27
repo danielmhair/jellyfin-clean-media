@@ -11,6 +11,12 @@ New entries are added automatically by the release workflow from the notes in
 [Releases page](../../releases) and in `manifest.json`.
 
 <!-- releases -->
+## 0.2.18.0 — 2026-08-27
+
+- The review Studio now works properly on a phone: touch scrubbing and
+  dragging, a Player/Findings tab switch that fits a phone screen, and +/-
+  zoom buttons since there's no scroll wheel to zoom with.
+
 ## 0.2.17.0 — 2026-08-27
 
 - The worker now checks for newer releases and shows an **Update now** button
