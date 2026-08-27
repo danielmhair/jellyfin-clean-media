@@ -66,17 +66,47 @@ fi
 # bare `sudo -u user open ...` from a root context has no window-server
 # connection and silently does nothing; launchctl asuser is what actually
 # opens a GUI app in another user's session.
+#
+# The tail window and install.sh below run concurrently (fire the window,
+# then run the install), with no direct link between them -- so a status
+# *file*, written after install.sh finishes, is how the window knows to react
+# instead of just tailing forever. On success it tries to close itself; on
+# failure it stays open with the one thing a non-technical friend needs to
+# know: which file to send back.
 LOGFILE="$INSTALL_DIR/install.log"
+STATUS_FILE="$INSTALL_DIR/.install-status"
 : > "$LOGFILE"
+rm -f "$STATUS_FILE"
 chown "$CONSOLE_USER:$CONSOLE_GROUP" "$LOGFILE"
 
 TAIL_CMD="$INSTALL_DIR/.watch-install.command"
 cat > "$TAIL_CMD" <<TAILEOF
 #!/bin/bash
-echo "Clean Media is installing -- this is just for progress, nothing to do here."
-echo 'Safe to close once you see "You are set up" (last line) below.'
+LOGFILE="$LOGFILE"
+STATUS_FILE="$STATUS_FILE"
+echo "Clean Media is installing -- this can take several minutes the first time"
+echo "(it downloads a vision-AI model and some dependencies)."
 echo
-tail -f -n +1 "$LOGFILE"
+tail -f -n +1 "\$LOGFILE" &
+tailpid=\$!
+while [ ! -f "\$STATUS_FILE" ]; do sleep 1; done
+sleep 1
+kill "\$tailpid" 2>/dev/null
+wait "\$tailpid" 2>/dev/null
+echo
+status="\$(cat "\$STATUS_FILE" 2>/dev/null)"
+if [ "\$status" = "0" ]; then
+  echo "All done -- you're set up. A \"Clean Media Worker\" icon on the Desktop"
+  echo "manages it from here (status, restart, media folder, GPU hosts)."
+  echo "This window will close itself in a few seconds."
+  sleep 5
+  osascript -e "tell application \"Terminal\" to close (every window whose tty is \"\$(tty)\")" >/dev/null 2>&1 &
+else
+  echo "Something went wrong (exit code \${status:-unknown}). This is not something"
+  echo "to troubleshoot yourself -- copy this window's text (or the log file this"
+  echo "just revealed in Finder) and send it to whoever gave you this installer."
+  open -R "\$LOGFILE" >/dev/null 2>&1 || true
+fi
 TAILEOF
 chmod +x "$TAIL_CMD"
 chown "$CONSOLE_USER:$CONSOLE_GROUP" "$TAIL_CMD"
@@ -91,6 +121,8 @@ launchctl asuser "$CONSOLE_UID" sudo -u "$CONSOLE_USER" \
 # to land in the right place.
 sudo -u "$CONSOLE_USER" -H bash -lc "cd '$INSTALL_DIR' && bash scripts/install.sh --yes" >>"$LOGFILE" 2>&1
 status=$?
+echo "$status" > "$STATUS_FILE"
+chown "$CONSOLE_USER:$CONSOLE_GROUP" "$STATUS_FILE"
 
 if [ "$status" -eq 0 ]; then
   log "install.sh finished — see $LOGFILE for the full run"

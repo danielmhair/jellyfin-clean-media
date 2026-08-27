@@ -405,6 +405,26 @@ if [ "$OS" = mac ]; then
   fi
 fi
 
+# ---- 6b. a Desktop icon: status, restart, change settings -----------------
+# Always create this on macOS, whether or not step 6 above set up the
+# service: with the service, this is how you check on it, restart it, or
+# change the media folder / VLM hosts later; without it -- the friend said
+# no, or install-service.sh had trouble -- it's also the fallback way to get
+# the worker running at all, so it has to work standalone either way.
+if [ "$OS" = mac ]; then
+  step "Desktop icon to manage the worker"
+  UV_ABS="$(command -v uv || true)"
+  # mkdir -p, not assumed to exist: a stripped-down account (or a CI runner)
+  # may not have a Desktop folder, and under set -e a failed cp here would
+  # otherwise abort the whole script on its very last step.
+  mkdir -p "$HOME/Desktop"
+  ICON="$HOME/Desktop/Clean Media Worker.command"
+  cp "$REPO/scripts/worker-icon-template.command" "$ICON"
+  sed -i '' "s#__REPO__#$REPO#g; s#__UV__#$UV_ABS#g" "$ICON"
+  chmod +x "$ICON"
+  ok "created ~/Desktop/Clean Media Worker.command"
+fi
+
 # ---- 7. next steps ----------------------------------------------------------
 
 MANIFEST="https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/manifest.json"
@@ -421,7 +441,11 @@ if [ "$SERVICE_INSTALLED" = 1 ]; then
   cat <<EOF
 
   You're set up. The worker is already running in the background (it will
-  restart itself at login, and after any future update). Two things left:
+  restart itself at login, and after any future update) -- there's a
+  "Clean Media Worker" icon on your Desktop too: double-click it any time to
+  check whether it's running, restart it, change the media folder or add a
+  second GPU machine, or peek at recent activity. Not something you need to
+  click now, just there when you want it. Two things left:
 
   1. Install the plugin in Jellyfin — no building needed:
        Dashboard -> Plugins -> Repositories -> add this URL:
@@ -444,10 +468,16 @@ else
   1. Start the worker (leave this running whenever you want to analyze):
          bash scripts/worker.sh
 EOF
-  [ "$OS" = mac ] && cat <<EOF
-       Or run it in the background instead, so you don't have to keep a
-       window open: bash scripts/install-service.sh
+  if [ "$OS" = mac ]; then
+    cat <<EOF
+       Or just double-click the "Clean Media Worker" icon on your Desktop --
+       it's a small menu: start/check status, restart, change the media
+       folder or add a GPU machine, or view recent activity. If it starts
+       the worker directly (no background service set up), closing that
+       window stops it -- pick the "set it up to run automatically" option
+       from the menu to fix that permanently.
 EOF
+  fi
   cat <<EOF
 
   2. Install the plugin in Jellyfin — no building needed:

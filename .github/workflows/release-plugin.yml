@@ -192,6 +192,17 @@ jobs:
             exit 1
           }
 
+          # The tail-window script (opened automatically during install) watches
+          # for this exact file to know when to auto-close itself or show the
+          # "send this to the developer" failure message -- confirm postinstall
+          # actually writes it, and with the right content, not just that the
+          # install happened to succeed by some other measure.
+          status_content="$(cat '/Library/Application Support/CleanMedia/.install-status' 2>/dev/null || true)"
+          [ "$status_content" = "0" ] || {
+            echo ".install-status is '$status_content', expected '0'"
+            exit 1
+          }
+
           test -f "$HOME/Library/LaunchAgents/com.cleanmedia.worker.plist" || {
             echo "the launchd service was never registered"
             exit 1
@@ -207,7 +218,19 @@ jobs:
           done
           [ "$ok" = 1 ] || { echo "the worker never answered on :8765 after install"; exit 1; }
 
-          echo "verified: postinstall dropped to the console user, install.sh finished, the launchd service is registered, and the worker answers on :8765."
+          # The Desktop icon is how a friend manages the worker from here on
+          # (status/restart/settings) -- confirm install.sh actually created
+          # it, and that it runs cleanly (menu choice 4 = quit immediately).
+          icon="$HOME/Desktop/Clean Media Worker.command"
+          test -x "$icon" || { echo "the Desktop icon was never created"; exit 1; }
+          printf '4\n' | bash "$icon" >/tmp/icon-smoke.log 2>&1
+          grep -q "Clean Media Worker" /tmp/icon-smoke.log || {
+            echo "the Desktop icon did not produce its status menu:"
+            cat /tmp/icon-smoke.log
+            exit 1
+          }
+
+          echo "verified: postinstall dropped to the console user, install.sh finished, the launchd service is registered, the worker answers on :8765, and the Desktop icon works."
 
       - name: Attach it to the release
         env:

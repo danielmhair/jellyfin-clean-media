@@ -79,6 +79,11 @@ themselves. `scripts/setup.sh` once, then:
 - `scripts/build-plugin.sh` / `release-plugin.sh` — package/publish the plugin.
 - `scripts/install-service.ps1` — run the worker at boot on Windows.
 - `scripts/install-service.sh` — run the worker at login on macOS (`launchd`).
+  `install.sh` also drops a **"Clean Media Worker" Desktop icon** from
+  [scripts/worker-icon-template.command](scripts/worker-icon-template.command)
+  (a status/restart/settings menu, not just "start") — the plist is the one
+  source of truth for current media roots/VLM hosts, so the icon reads it
+  fresh each run rather than caching values that could drift.
 - `scripts/build-dmg.sh` — package a double-clickable `.dmg` installer (macOS,
   wraps `install.sh` in a `.command` run from Terminal). See
   [worker/update.py](worker/update.py) for the check-and-prompt auto-update

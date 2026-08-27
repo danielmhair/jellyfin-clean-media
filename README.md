@@ -411,14 +411,31 @@ own checkpoint; others start that film over). You will see a
 ### Keeping it running (macOS)
 
 `scripts/install.sh` offers to set this up for you at the end of a normal
-install. To do it by hand, or on a machine you installed on earlier:
+install, and also adds a **"Clean Media Worker" icon to the Desktop** — the
+easiest way to manage all of this day to day. Double-click it for a small
+menu: check whether the worker's online, restart it, change the media
+folder(s) or the VLM host pool, or view recent activity. It works whether or
+not the background service below is installed — without it, the icon is the
+way to start the worker at all (it runs in that window until you close it);
+with it, the icon is a convenience layered on top.
+
+To manage the service directly instead:
 
 ```bash
 scripts/install-service.sh                                   # install + start
-scripts/install-service.sh --media-roots "$HOME/Movies"       # custom media root
-scripts/install-service.sh --restart                          # pick up new code
+scripts/install-service.sh --media-roots "/Volumes/NAS/Movies:$HOME/Movies"
+scripts/install-service.sh --vlm-hosts "http://localhost:11434,http://100.95.155.5:11434"
+scripts/install-service.sh --restart                          # re-apply current config + restart
 scripts/install-service.sh --uninstall
 ```
+
+`--restart` genuinely re-applies whatever's passed alongside it (or, if
+nothing's passed, whatever was already configured — it reads that back out of
+the existing plist rather than resetting to defaults) and validates it first:
+each media folder is checked that it's actually reachable right now, each VLM
+host is pinged, both as warnings rather than blockers (a NAS can be
+unmounted, or a GPU box off, at the exact moment this runs — the worker
+itself already tolerates that).
 
 This registers a `launchd` **LaunchAgent** (`~/Library/LaunchAgents/com.cleanmedia.worker.plist`)
 that starts the worker at login and restarts it if it dies — the macOS
