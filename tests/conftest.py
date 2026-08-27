@@ -25,3 +25,7 @@ os.environ["CLEANMEDIA_DB"] = os.path.join(_scratch, "test-jobs.db")
 # Empty = no rotating file handler, so tests don't append to data/logs/worker.log
 # (which the live worker is also writing to).
 os.environ.setdefault("CLEANMEDIA_LOG_FILE", "")
+
+# worker.update starts a background GitHub-polling thread at import time;
+# without this the suite would hit the real network on every run.
+os.environ.setdefault("CLEANMEDIA_UPDATE_CHECK", "0")

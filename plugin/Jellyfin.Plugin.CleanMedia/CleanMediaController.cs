@@ -733,7 +733,33 @@ public class CleanMediaController : ControllerBase
             queueSize = health.QueueSize,
             paused = health.Paused,
             gpu = health.Gpu is null || !health.Gpu.Available ? "none" : health.Gpu.Name,
+            updateAvailable = health.UpdateAvailable,
+            latestVersion = health.LatestVersion,
         });
+    }
+
+    /// <summary>
+    /// Start applying the latest release on the worker. Never called except by
+    /// an explicit "Update now" click on the settings page — see worker/update.py.
+    /// </summary>
+    [HttpPost("Update")]
+    public async Task<ActionResult<object>> ApplyUpdate(CancellationToken cancellationToken)
+    {
+        var (ok, error) = await _worker.ApplyUpdateAsync(cancellationToken).ConfigureAwait(false);
+        return Ok(new { ok, error });
+    }
+
+    /// <summary>Progress of an in-progress (or just-finished) update, for the settings page to poll.</summary>
+    [HttpGet("UpdateStatus")]
+    public async Task<ActionResult<object>> UpdateStatus(CancellationToken cancellationToken)
+    {
+        var status = await _worker.GetUpdateStatusAsync(cancellationToken).ConfigureAwait(false);
+        if (status is null)
+        {
+            return Ok(new { unreachable = true });
+        }
+
+        return Ok(status);
     }
 
     /// <summary>

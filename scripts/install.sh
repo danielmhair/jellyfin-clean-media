@@ -20,6 +20,10 @@
 #   - Ollama    the local vision model server  (skipped with --ollama existing)
 #   - the vision model  (qwen3-vl:4b-instruct by default)
 #
+# On macOS it also offers to install the worker as a background service
+# (scripts/install-service.sh) so there's no terminal window to babysit --
+# see scripts/build-dmg.sh for a double-clickable .dmg wrapping this script.
+#
 # It deliberately does NOT install dotnet: a friend installs the Jellyfin
 # plugin from the manifest URL (printed at the end), so they never build it.
 set -euo pipefail
@@ -142,8 +146,21 @@ ensure_brew() {
   step "Installing Homebrew (needed to install ffmpeg and Ollama on macOS)"
   info "Homebrew's installer will ask for your Mac password — that is expected."
   ask_yes "Install Homebrew now?" y || return 1
-  NONINTERACTIVE=1 /bin/bash -c \
-    "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  # Only force Homebrew's own installer into non-interactive mode when WE have
+  # no tty either. NONINTERACTIVE makes Homebrew check sudo access with
+  # `sudo -n -v` (never prompt, fail if no cached credentials) instead of the
+  # normal `sudo -v` (which prompts for the password on the tty). With a real
+  # terminal attached, let it run interactively so it can actually ask for the
+  # password — forcing NONINTERACTIVE here made it fail with "Need sudo
+  # access... needs to be an Administrator" even for a genuine admin, because
+  # it was never allowed to prompt in the first place.
+  if [ -t 0 ]; then
+    /bin/bash -c \
+      "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  else
+    NONINTERACTIVE=1 /bin/bash -c \
+      "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  fi
   [ -x /opt/homebrew/bin/brew ] && eval "$(/opt/homebrew/bin/brew shellenv)"
   [ -x /usr/local/bin/brew ]    && eval "$(/usr/local/bin/brew shellenv)"
   have brew
@@ -372,7 +389,23 @@ else
   warn "Ollama not reachable at $OLLAMA_HOST (fine if it's a box you'll turn on later)"
 fi
 
-# ---- 6. next steps --------------------------------------------------------
+# ---- 6. run in the background (macOS only for now) ------------------------
+
+SERVICE_INSTALLED=0
+if [ "$OS" = mac ]; then
+  step "Run automatically in the background"
+  info "Without this, the worker only runs while you keep a Terminal window open."
+  if ask_yes "Set the worker to start automatically and keep running (recommended)?" y; then
+    if bash "$REPO/scripts/install-service.sh"; then
+      SERVICE_INSTALLED=1
+    else
+      warn "could not install the background service — you can run it later:"
+      warn "    bash scripts/install-service.sh"
+    fi
+  fi
+fi
+
+# ---- 7. next steps ----------------------------------------------------------
 
 MANIFEST="https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/manifest.json"
 step "Done${FAIL:+ (with warnings above)}"
@@ -384,12 +417,38 @@ if [ "$NEED_REOPEN" = 1 ]; then
   the worker, so it can find everything.
 EOF
 fi
-cat <<EOF
+if [ "$SERVICE_INSTALLED" = 1 ]; then
+  cat <<EOF
+
+  You're set up. The worker is already running in the background (it will
+  restart itself at login, and after any future update). Two things left:
+
+  1. Install the plugin in Jellyfin — no building needed:
+       Dashboard -> Plugins -> Repositories -> add this URL:
+         $MANIFEST
+       then install "Clean Media" from the catalogue and restart Jellyfin.
+
+  2. In Dashboard -> Plugins -> Clean Media, set the Worker URL to this
+     machine (e.g. http://<this-machine-ip>:8765) and click Test connection.
+
+  Then analyze a film:
+       bash scripts/analyze-audio.sh movies/                  # profanity, ~1 min each
+       bash scripts/analyze.sh "movies/Some Film (2010).mkv"  # + visual (GPU, hours)
+
+EOF
+else
+  cat <<EOF
 
   You're set up. Three things left, none of them require a terminal again:
 
   1. Start the worker (leave this running whenever you want to analyze):
          bash scripts/worker.sh
+EOF
+  [ "$OS" = mac ] && cat <<EOF
+       Or run it in the background instead, so you don't have to keep a
+       window open: bash scripts/install-service.sh
+EOF
+  cat <<EOF
 
   2. Install the plugin in Jellyfin — no building needed:
        Dashboard -> Plugins -> Repositories -> add this URL:
@@ -404,3 +463,4 @@ cat <<EOF
        bash scripts/analyze.sh "movies/Some Film (2010).mkv"  # + visual (GPU, hours)
 
 EOF
+fi

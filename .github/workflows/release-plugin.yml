@@ -34,6 +34,8 @@ jobs:
     # Don't loop on the workflow's own release commit. (GITHUB_TOKEN pushes don't
     # retrigger workflows anyway — this is belt-and-suspenders.)
     if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    outputs:
+      version: ${{ steps.ver.outputs.next3 }}   # e.g. "0.2.17" — the dmg job's tag is v<this>
     steps:
       - uses: actions/checkout@v4
         with:
@@ -116,3 +118,25 @@ jobs:
             --notes-file "$RUNNER_TEMP/notes.md" \
             --target "$(git rev-parse HEAD)" \
             "plugin/releases/clean-media-$VERSION.zip"
+
+  dmg:
+    # scripts/build-dmg.sh needs hdiutil, so this can't run alongside the
+    # plugin build on ubuntu-latest — a separate macOS job, attaching the
+    # .dmg to the release the job above already cut. If this job fails, the
+    # release still exists (with the plugin zip); re-run this job alone from
+    # the Actions tab, or run scripts/build-dmg.sh locally on a Mac and
+    # `gh release upload` it by hand.
+    needs: release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.release.outputs.version }}
+
+      - name: Build the DMG
+        run: bash scripts/build-dmg.sh
+
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "v${{ needs.release.outputs.version }}" dist/CleanMedia.dmg --clobber

@@ -45,6 +45,7 @@ from .models import (
     Timeline,
 )
 from . import schedule
+from . import update
 from .queue import JobQueue
 from .schedule import Schedule, ScheduleView
 from .review import (
@@ -90,6 +91,7 @@ jobs = JobQueue(store)
 _QUIET_GET_PREFIXES = (
     "/api/status", "/api/jobs", "/api/health", "/api/segments",
     "/api/thumbnail", "/api/filmstrip", "/api/peaks", "/api/clip",
+    "/api/update/status",
 )
 
 # Negative-lookup cache for /api/segments. The plugin polls this endpoint for
@@ -187,6 +189,10 @@ threading.Thread(
     target=_warm_media_index_logged, name="media-index-warm", daemon=True
 ).start()
 
+# Keep the "update available" cache fresh so /api/health never blocks on
+# GitHub. No-op in tests (see CLEANMEDIA_UPDATE_CHECK in worker/update.py).
+update.start_background_checker()
+
 
 def _gpu_info() -> dict:
     try:
@@ -201,6 +207,7 @@ def _gpu_info() -> dict:
 
 @app.get("/api/health")
 def health() -> dict:
+    upd = update.status()
     return {
         "status": "ok",
         "version": __version__,
@@ -213,7 +220,36 @@ def health() -> dict:
         # The configured media roots, so tools (e.g. the clean-copy migration)
         # can discover where films live without re-deriving service config.
         "mediaRoots": [str(r) for r in media_roots()],
+        # From update.py's cache (no network call here) — the settings page
+        # shows this passively and offers a one-click "Update now".
+        "updateAvailable": upd["updateAvailable"],
+        "latestVersion": upd["latestVersion"],
     }
+
+
+@app.get("/api/update/status")
+def update_status() -> dict:
+    """Cached update check + any in-progress apply's status."""
+    return update.status()
+
+
+@app.post("/api/update/check")
+def update_check() -> dict:
+    """Force a fresh GitHub check now, instead of waiting for the timer."""
+    return update.check_now()
+
+
+@app.post("/api/update/apply")
+def update_apply() -> dict:
+    """Kick off installing the latest release. Never applies on its own —
+    only ever called from an explicit "Update now" click."""
+    try:
+        update.begin_apply()
+    except update.UpdateInProgress as exc:
+        raise HTTPException(409, str(exc))
+    except update.NoUpdateAvailable as exc:
+        raise HTTPException(400, str(exc))
+    return {"status": "updating"}
 
 
 @app.get("/api/schedule", response_model=ScheduleView)

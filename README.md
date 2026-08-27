@@ -169,7 +169,11 @@ the plugin from the manifest URL, start the worker):
 bash scripts/worker.sh          # start the worker, leave it running
 ```
 
-**On a Mac** this works out of the box (Terminal already has `bash`). **On
+**On a Mac** this works out of the box (Terminal already has `bash`), and at
+the end it offers to set the worker up as a background service — see
+[Keeping it running (macOS)](#keeping-it-running-macos) — so there's no
+terminal window to leave open. Prefer double-clicking to typing a command?
+See [A double-clickable installer](#a-double-clickable-installer). **On
 Windows**, install [Git Bash](https://git-scm.com/download/win) once
 (`winget install Git.Git`), then run the same `bash scripts/install.sh` from the
 repo folder in Git Bash.
@@ -269,6 +273,8 @@ is not on `PATH` in a fresh shell.
 | `build-plugin.sh [dir]` | Build and package the Jellyfin plugin | seconds |
 | `release-plugin.sh <version>` | Cut a plugin release by hand (normally automatic — see [Releasing](#releasing-maintainers)) | seconds |
 | `install-service.ps1` | Windows only: run the worker at boot (see below) | seconds |
+| `install-service.sh` | macOS only: run the worker at login (see below) | 1-2 min |
+| `build-dmg.sh` | macOS only: package a double-clickable installer `.dmg` | seconds |
 | `organize-library.ps1` | Windows only: give every movie its own folder (see below) | seconds |
 
 ### A typical run
@@ -401,6 +407,44 @@ re-queues everything still unfinished — in the original submission order — a
 resumes. A pass that was mid-run is re-run (the `vlm` engine resumes from its
 own checkpoint; others start that film over). You will see a
 `recovery: re-queued N unfinished job(s)` line in the log right after startup.
+
+### Keeping it running (macOS)
+
+`scripts/install.sh` offers to set this up for you at the end of a normal
+install. To do it by hand, or on a machine you installed on earlier:
+
+```bash
+scripts/install-service.sh                                   # install + start
+scripts/install-service.sh --media-roots "$HOME/Movies"       # custom media root
+scripts/install-service.sh --restart                          # pick up new code
+scripts/install-service.sh --uninstall
+```
+
+This registers a `launchd` **LaunchAgent** (`~/Library/LaunchAgents/com.cleanmedia.worker.plist`)
+that starts the worker at login and restarts it if it dies — the macOS
+equivalent of the Windows scheduled task above. It runs inside your logged-in
+session (not as a system daemon), so it gets your normal Keychain and any
+already-mounted network shares. Logs go to
+`~/Library/Application Support/CleanMedia/worker.log`.
+
+### A double-clickable installer
+
+Every [release](https://github.com/danielmhair/jellyfin-clean-media/releases)
+includes a `CleanMedia.dmg` — a friend downloads it, double-clicks
+**Install Clean Media.command**, and gets the same install flow as the
+one-liner above without needing Git Bash. It's unsigned, so the first launch
+needs the usual Gatekeeper bypass (right-click → Open). It's built by a
+`macos-latest` CI job (`scripts/build-dmg.sh`) right after each release is
+cut; to build one yourself, run that script on a Mac.
+
+### Updating
+
+The worker checks GitHub for a newer release every few hours. When one's
+available, the plugin's settings page shows an **Update now** banner next to
+the worker connection status — nothing is ever applied without that click.
+Applying downloads the new release, re-syncs dependencies, and (if the
+worker is running as the `launchd` service above) restarts itself into the
+new code automatically.
 
 ### One folder per movie
 

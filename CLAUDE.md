@@ -78,6 +78,10 @@ themselves. `scripts/setup.sh` once, then:
 - `scripts/render.sh <film>` — render a clean copy from *approved* findings.
 - `scripts/build-plugin.sh` / `release-plugin.sh` — package/publish the plugin.
 - `scripts/install-service.ps1` — run the worker at boot on Windows.
+- `scripts/install-service.sh` — run the worker at login on macOS (`launchd`).
+- `scripts/build-dmg.sh` — package a double-clickable `.dmg` installer (macOS,
+  wraps `install.sh`). See [worker/update.py](worker/update.py) for the
+  check-and-prompt auto-update this pairs with.
 
 Tests: `uv run pytest`. **The sandbox blocks pytest's default temp dir**, so
 pass `--basetemp` to a writable path when running here.

@@ -48,6 +48,10 @@
                                 </div>
                                 <button class="cmbtn mini" id="CmTestConn" style="margin-top:15px;">Test connection</button>
                                 <span id="CmTestResult" class="help" style="margin-left:.6em;"></span>
+                                <div id="CmUpdateBanner" class="help connwarn" style="margin-top:10px;display:none;">
+                                    <span id="CmUpdateMsg"></span>
+                                    <button class="cmbtn mini" id="CmUpdateNow" style="margin-left:8px;">Update now</button>
+                                </div>
                             </div>
 
                             <!-- playback -->
@@ -447,7 +451,8 @@
         renderedSeen: null,         // ids already 'rendered' (null until first load)
         addView: null,              // null = collections; else a collection {id,name}
         collections: [], films: [], searchTerm: '', dirty: false,
-        sessions: [], remotePoll: null, padMs: 1500  // Remote tab: what's playing
+        sessions: [], remotePoll: null, padMs: 1500,  // Remote tab: what's playing
+        updating: false              // true while an "Update now" apply is in flight
     };
 
     // ---- generic helpers -------------------------------------------------
@@ -1301,6 +1306,18 @@
                 // A version mismatch is worth showing even on a silent (auto) check.
                 result.textContent = incompatible ? (res.compatMessage || 'The worker and plugin versions do not match.') : (silent ? result.textContent : '');
                 result.className = incompatible ? 'help connwarn' : 'help';
+                // Leave the banner alone while an update is actively applying —
+                // that flow owns CmUpdateMsg until it finishes (see pollUpdateStatus).
+                if (!state.updating) {
+                    var updateBanner = page.querySelector('#CmUpdateBanner');
+                    if (res.updateAvailable) {
+                        page.querySelector('#CmUpdateMsg').textContent =
+                            'Update available: v' + esc(res.latestVersion) + ' (running v' + esc(res.version) + ').';
+                        updateBanner.style.display = '';
+                    } else {
+                        updateBanner.style.display = 'none';
+                    }
+                }
             } else {
                 pill.className = 'connpill bad';
                 pill.innerHTML = '<span class="dot-live off"></span>Not reachable';
@@ -1313,6 +1330,70 @@
             pill.innerHTML = '<span class="dot-live off"></span>Test failed';
             if (!silent) { result.textContent = 'Test failed: ' + err; }
         });
+    }
+
+    // Click -> POST the apply, then poll until the worker reports it's done
+    // (or has come back up after restarting itself into the new version).
+    function applyUpdate() {
+        var btn = page.querySelector('#CmUpdateNow'), msg = page.querySelector('#CmUpdateMsg');
+        state.updating = true;
+        btn.disabled = true; btn.textContent = 'Updating…';
+        msg.textContent = 'Starting the update…';
+        api('POST', 'Update', {}, {}).then(function (res) {
+            if (!res.ok) {
+                state.updating = false;
+                btn.disabled = false; btn.textContent = 'Update now';
+                msg.textContent = 'Update failed: ' + (res.error || 'unknown error');
+                return;
+            }
+            pollUpdateStatus();
+        }).catch(function (err) {
+            state.updating = false;
+            btn.disabled = false; btn.textContent = 'Update now';
+            msg.textContent = 'Update failed: ' + err;
+        });
+    }
+
+    function pollUpdateStatus() {
+        var btn = page.querySelector('#CmUpdateNow'), msg = page.querySelector('#CmUpdateMsg');
+        var misses = 0;
+        // The worker restarts itself partway through (launchd), so a stretch of
+        // "unreachable" is expected, not a failure — only give up after ~2 minutes.
+        var iv = setInterval(function () {
+            api('GET', 'UpdateStatus', {}).then(function (s) {
+                if (s.unreachable) {
+                    misses++;
+                    msg.textContent = 'Updating — worker is restarting…';
+                    if (misses > 40) { giveUp('The worker did not come back after restarting — check it by hand.'); }
+                    return;
+                }
+                misses = 0;
+                if (s.updating) {
+                    msg.textContent = s.latestVersion ? ('Updating to v' + esc(s.latestVersion) + '…') : 'Updating…';
+                    return;
+                }
+                clearInterval(iv);
+                state.updating = false;
+                if (s.applyError) {
+                    btn.disabled = false; btn.textContent = 'Update now';
+                    msg.textContent = 'Update failed: ' + s.applyError;
+                } else {
+                    btn.style.display = 'none';
+                    msg.textContent = 'Updated to v' + esc(s.currentVersion) + '.';
+                    testConnection(true);
+                }
+            }).catch(function () {
+                misses++;
+                if (misses > 40) { giveUp('Lost contact with the worker — check it by hand.'); }
+            });
+        }, 3000);
+
+        function giveUp(text) {
+            clearInterval(iv);
+            state.updating = false;
+            btn.disabled = false; btn.textContent = 'Update now';
+            msg.textContent = text;
+        }
     }
 
     function setLive(ok, text, gpu) {
@@ -1469,6 +1550,7 @@
     page.querySelector('#CmSaveSettings').onclick = saveSettings;
     page.querySelector('#CmDiscard').onclick = function () { loadSettings(); };
     page.querySelector('#CmTestConn').onclick = function () { testConnection(false); };
+    page.querySelector('#CmUpdateNow').onclick = applyUpdate;
 
     // queue controls
     page.querySelector('#CmShowAll').onclick = function () { state.hidden = {}; renderQueue(); };

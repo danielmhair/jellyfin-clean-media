@@ -111,6 +111,12 @@ public class WorkerHealth
     /// <summary>Whether the queue is paused (holding the start of the next job).</summary>
     [JsonPropertyName("paused")] public bool Paused { get; set; }
 
+    /// <summary>Whether the worker's own GitHub check found a newer release.</summary>
+    [JsonPropertyName("updateAvailable")] public bool UpdateAvailable { get; set; }
+
+    /// <summary>The newer version, if <see cref="UpdateAvailable"/> is true.</summary>
+    [JsonPropertyName("latestVersion")] public string? LatestVersion { get; set; }
+
     [JsonPropertyName("engines")]
     public Dictionary<string, object> Engines { get; set; } = new();
 }
@@ -681,6 +687,67 @@ public class WorkerClient
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {
             _logger.LogWarning(ex, "Clean Media worker unreachable at {Url}", config.WorkerUrl);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Start applying the latest release on the worker's own machine. Returns
+    /// immediately once the worker has confirmed there's something to apply;
+    /// poll <see cref="GetUpdateStatusAsync"/> for progress. The worker
+    /// restarts itself partway through if it's running as the installed
+    /// service, so a request that "fails" with unreachable right after this
+    /// call can be the update actually working.
+    /// </summary>
+    public async Task<(bool Ok, string? Error)> ApplyUpdateAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var client = NewClient();
+            using var response = await client
+                .PostAsync($"{Base}/api/update/apply", null, cancellationToken)
+                .ConfigureAwait(false);
+            if (response.IsSuccessStatusCode)
+            {
+                return (true, null);
+            }
+
+            var detail = await ReadDetailAsync(response, cancellationToken).ConfigureAwait(false);
+            return (false, detail ?? $"the worker refused the update (HTTP {(int)response.StatusCode}).");
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            _logger.LogWarning(ex, "Clean Media update request failed at {Url}", Config.WorkerUrl);
+            return (false, "worker unreachable");
+        }
+    }
+
+    /// <summary>
+    /// Progress of the last check/apply, as raw JSON (worker.py's update.status()
+    /// shape) — passed through opaquely like the schedule endpoints. Null while
+    /// the worker is unreachable, which is expected for a few seconds mid-update
+    /// while it restarts.
+    /// </summary>
+    public async Task<JsonElement?> GetUpdateStatusAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var client = NewClient();
+            using var response = await client
+                .GetAsync($"{Base}/api/update/status", cancellationToken)
+                .ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            return await response.Content
+                .ReadFromJsonAsync<JsonElement>(cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            _logger.LogWarning(ex, "Clean Media update status request failed at {Url}", Config.WorkerUrl);
             return null;
         }
     }
