@@ -183,8 +183,15 @@ jobs:
           # output -- so on failure, that log (not this step's visible output)
           # is where the real reason lives. Dump its tail before failing loud.
           if ! sudo installer -pkg dist/CleanMedia.pkg -target /; then
-            echo "----- tail of /var/log/install.log -----"
+            echo "----- tail of /var/log/install.log (macOS's own install log) -----"
             sudo tail -n 200 /var/log/install.log || true
+            # The more useful one: postinstall redirects install.sh's own
+            # stdout/stderr here, so THIS is where an install.sh failure
+            # (as opposed to postinstall itself failing) actually explains
+            # itself -- distinct from /var/log/install.log above, which only
+            # shows that "the postinstall script" failed, not why.
+            echo "----- tail of CleanMedia's own install.log -----"
+            sudo tail -n 200 "/Library/Application Support/CleanMedia/install.log" || true
             exit 1
           fi
 

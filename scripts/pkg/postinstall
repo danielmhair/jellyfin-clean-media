@@ -53,7 +53,16 @@ chown -R "$CONSOLE_USER:$CONSOLE_GROUP" "$INSTALL_DIR"
 # (`command` is a shell builtin, not a standalone binary -- sudo can only exec
 # real binaries, so this has to go through a shell rather than call it directly.)
 if ! sudo -u "$CONSOLE_USER" -H bash -lc 'command -v brew' >/dev/null 2>&1; then
-  if [ "$(uname -m)" = "arm64" ]; then BREW_PREFIX="/opt/homebrew"; else BREW_PREFIX="/usr/local"; fi
+  # Prefer actual filesystem evidence over `uname -m` for picking the prefix:
+  # under Rosetta translation a translated process's uname -m reports the
+  # emulated architecture, not the real hardware (build-pkg.sh's
+  # hostArchitectures declaration avoids that translation happening at all,
+  # but this stays robust even if some other path ends up translated too).
+  if [ -e /opt/homebrew ]; then BREW_PREFIX="/opt/homebrew"
+  elif [ -e /usr/local/Homebrew ] || [ -e /usr/local/bin/brew ]; then BREW_PREFIX="/usr/local"
+  elif [ "$(uname -m)" = "arm64" ]; then BREW_PREFIX="/opt/homebrew"
+  else BREW_PREFIX="/usr/local"
+  fi
   if [ ! -e "$BREW_PREFIX" ]; then
     log "creating $BREW_PREFIX, owned by $CONSOLE_USER, so Homebrew's installer needs no extra password"
     mkdir -p "$BREW_PREFIX"

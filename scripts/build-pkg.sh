@@ -81,7 +81,13 @@ cat > "$DIST" <<XML
     <title>Clean Media</title>
     <organization>$IDENTIFIER</organization>
     <domains enable_localSystem="true"/>
-    <options customize="never" require-scripts="true" rootVolumeOnly="true"/>
+    <!-- hostArchitectures: the payload is scripts/text only, no compiled
+         binaries for productbuild to infer architecture from, so without
+         this it assumes Intel only and runs the whole install, including
+         postinstall, translated through Rosetta on Apple Silicon, which
+         would make uname -m inside postinstall lie about the real
+         hardware architecture. Declare both explicitly instead. -->
+    <options customize="never" require-scripts="true" rootVolumeOnly="true" hostArchitectures="arm64,x86_64"/>
     <welcome file="welcome.html" mime-type="text/html"/>
     <license file="license.txt" mime-type="text/plain"/>
     <conclusion file="conclusion.html" mime-type="text/html"/>
