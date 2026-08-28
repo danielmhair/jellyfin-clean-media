@@ -9,6 +9,14 @@
     "imageUrl": "",
     "versions": [
       {
+        "version": "0.2.22.0",
+        "changelog": "Release plugin 0.2.21.0 [skip ci]",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.22.0.zip",
+        "checksum": "68cdf300a7ddd4b1b8c38c77fa359721",
+        "timestamp": "2026-08-28T18:12:53"
+      },
+      {
         "version": "0.2.21.0",
         "changelog": "- Windows: `install-service.ps1` now also adds a **\"Clean Media Worker\"**\n  Desktop icon \u2014 the same status/restart/settings menu macOS got \u2014 and\n  `-Restart` genuinely re-applies a changed `-MediaRoots`/`-VlmHosts` instead\n  of silently ignoring them.",
         "targetAbi": "10.11.0.0",

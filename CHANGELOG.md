@@ -11,6 +11,10 @@ New entries are added automatically by the release workflow from the notes in
 [Releases page](../../releases) and in `manifest.json`.
 
 <!-- releases -->
+## 0.2.22.0 — 2026-08-28
+
+Release plugin 0.2.21.0 [skip ci]
+
 ## 0.2.21.0 — 2026-08-27
 
 - Windows: `install-service.ps1` now also adds a **"Clean Media Worker"**
