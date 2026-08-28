@@ -9,6 +9,14 @@
     "imageUrl": "",
     "versions": [
       {
+        "version": "0.2.23.0",
+        "changelog": "fix(pkg): dump install.sh's own log on CI failure; avoid Rosetta translation\n\npostinstall's SUDO_USER fallback worked (confirmed in the last CI failure's\nsystem log: \"[postinstall] installing for runner\" printed correctly) -- the\nactual failure is install.sh itself exiting 1 inside postinstall, which the\nCI step couldn't show because the whole `installer` command dies before\nreaching this script's later checks. Now dumps the tail of CleanMedia's own\ninstall.log (what install.sh's stdout/stderr actually went to) alongside\nthe system install.log, so the next failure explains itself.\n\nAlso found and fixed a real, separate bug while reading that same log: the\npackage runs under Rosetta translation (\"Distribution failed architecture\ncheck... about to be re-executed as Intel\") because distribution.xml never\ndeclares which architectures it supports, and a script-only payload gives\nproductbuild nothing to infer from -- so it assumes Intel and translates the\nwhole install, postinstall included. A translated process's `uname -m`\nreports the emulated architecture, not the real hardware, which could send\npostinstall's Homebrew-prefix detection to /usr/local instead of\n/opt/homebrew on real Apple Silicon. Fixed at the source (hostArchitectures\non distribution.xml's <options>) and defensively in postinstall (prefer\nactual filesystem evidence -- which prefix already exists -- over uname -m).\n\nOne more bug this caught: the hostArchitectures comment used \"--\" as a\nseparator (this repo's usual style), which is invalid inside an XML comment\nbody and would have made every future pkg build silently malformed --\ncaught by actually parsing the generated XML, not just eyeballing it.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.23.0.zip",
+        "checksum": "0e8bcdad67e20431370268d7209ef9e4",
+        "timestamp": "2026-08-28T23:05:53"
+      },
+      {
         "version": "0.2.22.0",
         "changelog": "Release plugin 0.2.21.0 [skip ci]",
         "targetAbi": "10.11.0.0",

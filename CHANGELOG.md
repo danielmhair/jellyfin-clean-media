@@ -11,6 +11,35 @@ New entries are added automatically by the release workflow from the notes in
 [Releases page](../../releases) and in `manifest.json`.
 
 <!-- releases -->
+## 0.2.23.0 — 2026-08-28
+
+fix(pkg): dump install.sh's own log on CI failure; avoid Rosetta translation
+
+postinstall's SUDO_USER fallback worked (confirmed in the last CI failure's
+system log: "[postinstall] installing for runner" printed correctly) -- the
+actual failure is install.sh itself exiting 1 inside postinstall, which the
+CI step couldn't show because the whole `installer` command dies before
+reaching this script's later checks. Now dumps the tail of CleanMedia's own
+install.log (what install.sh's stdout/stderr actually went to) alongside
+the system install.log, so the next failure explains itself.
+
+Also found and fixed a real, separate bug while reading that same log: the
+package runs under Rosetta translation ("Distribution failed architecture
+check... about to be re-executed as Intel") because distribution.xml never
+declares which architectures it supports, and a script-only payload gives
+productbuild nothing to infer from -- so it assumes Intel and translates the
+whole install, postinstall included. A translated process's `uname -m`
+reports the emulated architecture, not the real hardware, which could send
+postinstall's Homebrew-prefix detection to /usr/local instead of
+/opt/homebrew on real Apple Silicon. Fixed at the source (hostArchitectures
+on distribution.xml's <options>) and defensively in postinstall (prefer
+actual filesystem evidence -- which prefix already exists -- over uname -m).
+
+One more bug this caught: the hostArchitectures comment used "--" as a
+separator (this repo's usual style), which is invalid inside an XML comment
+body and would have made every future pkg build silently malformed --
+caught by actually parsing the generated XML, not just eyeballing it.
+
 ## 0.2.22.0 — 2026-08-28
 
 Release plugin 0.2.21.0 [skip ci]
