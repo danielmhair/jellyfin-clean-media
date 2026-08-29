@@ -54,7 +54,9 @@ spoken word while keeping music/ambient, windowed per finding, render-only.
 
 - `worker/` — FastAPI worker (the engine). `main.py` API, `models.py`,
   `policy.py`, `review.py`, `render.py`, `shots.py`, `store.py`, `batch.py`,
-  `queue.py` (job queue), `schedule.py` (analysis-hours gating).
+  `queue.py` (job queue), `schedule.py` (analysis-hours gating),
+  `cleancopy.py` (where a clean copy goes, and how to get back from one to
+  the film it was rendered from).
 - `worker/engines/` — one adapter per detector behind a common interface
   (`base.py`): `subtitle_engine` (profanity from subs), `whisper_engine`,
   `vlm_engine` (Ollama Qwen3-VL vision), `pureframe_engine`, `vobsub` (OCR),
@@ -158,6 +160,15 @@ release; it reads the note from the `CHANGELOG` env var.
   `policy.py` decides what *counts*. Models don't obey negative instructions
   ("a shirtless man is NOT nudity" failed badly), and observations are cheap
   to re-interpret without re-running a multi-hour pass.
+- **A clean copy is an output, never a source of truth**
+  ([worker/cleancopy.py](worker/cleancopy.py)). Every render rebuilds
+  `<folder> - Clean.mkv` from the *film's* approved findings, so anything
+  recorded against the copy is thrown away by the next render. Flags made
+  while watching the copy are therefore written to the film — shifted back
+  through the cuts that render removed (recorded in a
+  `.cleanmedia-origin.json` beside the copy), since a cut moves every later
+  moment. Re-rendering reads the film, and asks whether to overwrite the
+  existing copy or add a `Clean 2` version beside it.
 - **Review → approve → act** — `review.py` serves the admin UI and writes
   approvals to the sidecar. `GET /api/segments?path=…&approvedOnly=true` is
   what the plugin reads. The plugin reports approved *skips* to Jellyfin as

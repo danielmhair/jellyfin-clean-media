@@ -17,7 +17,12 @@ import pytest
 
 from worker.engines.base import EngineAdapter
 from worker.models import Job, JobCreate, JobStatus, Timeline
-from worker.queue import JobQueue, clean_output_path
+from worker.cleancopy import (
+    clean_output_path,
+    next_clean_output_path,
+    render_plan,
+)
+from worker.queue import JobQueue
 from worker.store import Store
 
 BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -252,3 +257,75 @@ def test_clean_copy_falls_back_for_an_episode_under_a_season_folder(tmp_path):
     media = season / "Show - S01E01.mkv"
     out = clean_output_path(media)
     assert out == season / "cleaned" / "Show - S01E01 (Clean).mkv"
+
+
+# -- re-rendering from a clean copy -------------------------------------------
+# Reviewing the clean copy (not the original) is how a missed word is normally
+# found, so a clean copy is a routine *input* to the next render. It has to stay
+# in the same version family, and it must not be clobbered without being asked.
+
+
+def _film(tmp_path):
+    folder = tmp_path / "Some Film (2010)"
+    folder.mkdir()
+    media = folder / "Some Film (2010).mkv"
+    media.write_bytes(b"original")
+    return folder, media
+
+
+def test_re_rendering_a_clean_copy_targets_the_same_version_not_a_nested_one(tmp_path):
+    folder, _ = _film(tmp_path)
+    clean = folder / "Some Film (2010) - Clean.mkv"
+    assert clean_output_path(clean) == clean  # not "Clean (Clean)", not cleaned/
+
+
+def test_a_kept_alongside_copy_is_its_own_jellyfin_version(tmp_path):
+    folder, media = _film(tmp_path)
+    assert clean_output_path(media, 2) == folder / "Some Film (2010) - Clean 2.mkv"
+    # And numbering continues from a numbered copy, rather than restarting.
+    numbered = folder / "Some Film (2010) - Clean 2.mkv"
+    assert clean_output_path(numbered, 3) == folder / "Some Film (2010) - Clean 3.mkv"
+
+
+def test_next_clean_output_path_skips_the_copies_already_on_disk(tmp_path):
+    folder, media = _film(tmp_path)
+    assert next_clean_output_path(media) == folder / "Some Film (2010) - Clean.mkv"
+    (folder / "Some Film (2010) - Clean.mkv").write_bytes(b"c1")
+    (folder / "Some Film (2010) - Clean 2.mkv").write_bytes(b"c2")
+    assert next_clean_output_path(media) == folder / "Some Film (2010) - Clean 3.mkv"
+
+
+def test_render_plan_from_the_original_replaces_the_existing_clean_copy(tmp_path):
+    folder, media = _film(tmp_path)
+    (folder / "Some Film (2010) - Clean.mkv").write_bytes(b"c1")
+    plan = render_plan(media)
+    assert plan["sourceIsCleanCopy"] is False
+    assert plan["replacePath"] == str(folder / "Some Film (2010) - Clean.mkv")
+    assert plan["replaceExists"] is True
+    assert plan["newPath"] == str(folder / "Some Film (2010) - Clean 2.mkv")
+    assert (plan["replaceLabel"], plan["newLabel"]) == ("Clean", "Clean 2")
+
+
+def test_render_plan_from_a_clean_copy_replaces_that_copy(tmp_path):
+    folder, _ = _film(tmp_path)
+    clean = folder / "Some Film (2010) - Clean.mkv"
+    clean.write_bytes(b"c1")
+    plan = render_plan(clean)
+    assert plan["sourceIsCleanCopy"] is True
+    assert plan["replacePath"] == str(clean)      # the copy being watched
+    assert plan["newPath"] == str(folder / "Some Film (2010) - Clean 2.mkv")
+
+
+def test_an_episode_in_a_flat_show_folder_is_not_mistaken_for_a_version(tmp_path):
+    # "Show - S01E01.mkv" is folder-prefixed too. Reading that as a version
+    # label would collide every episode onto one "Show - Clean.mkv".
+    show = tmp_path / "Show"
+    show.mkdir()
+    media = show / "Show - S01E01.mkv"
+    assert clean_output_path(media) == show / "cleaned" / "Show - S01E01 (Clean).mkv"
+
+
+def test_a_legacy_cleaned_copy_re_renders_as_a_sibling_not_a_nest(tmp_path):
+    media = tmp_path / "cleaned" / "Some Film (2010) (Clean).mkv"
+    assert clean_output_path(media) == media
+    assert clean_output_path(media, 2) == media.with_name("Some Film (2010) (Clean 2).mkv")

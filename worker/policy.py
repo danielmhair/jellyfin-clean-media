@@ -14,6 +14,7 @@ out of the prompt matters for two reasons:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
 # Observation keys the model is asked to answer true/false.
@@ -27,6 +28,58 @@ OBSERVATIONS = (
     "kissing_sexual",
     "sexualised_framing",
 )
+
+# The default per-field definition text for each observation — what an
+# administrator can override from the plugin's Advanced tab. This is the only
+# part of the VLM prompt that is ever user-editable: the calibration
+# paragraphs above it ("ignore statues/mannequins", "clothing counts as
+# clothing") and the JSON-schema footer below it are fixed in code, so no
+# edit here can ever change *what* the model is asked to return — only how it
+# judges each field, which is the actual "what counts as nudity/suggestive"
+# knob a family would want to turn.
+DEFAULT_FIELD_GUIDANCE: dict[str, str] = {
+    "female_topless": (
+        "a woman's BARE breast or nipple is visible, OR she is clearly nude "
+        "seen from behind with bare back and buttocks. A clothed back, "
+        "straps, or a bare shoulder alone is false."
+    ),
+    "buttocks_or_genitals": (
+        "actual BARE skin of buttocks or genitals is visible on a real "
+        "person. Anyone clothed — trousers, shorts, a jumpsuit, tight "
+        "outfit, underwear — is false."
+    ),
+    "underwear_only": "a person is in bra/underwear/lingerie with nothing over it.",
+    "male_shirtless": "a man's bare chest is visible.",
+    "sex_act": (
+        "people are actively having sex or simulating it, or lying together "
+        "in evident intimate physical contact in bed."
+    ),
+    "kissing": (
+        "two people's LIPS ARE TOUCHING. Faces merely close, foreheads "
+        "together, an embrace, or about-to-kiss is false."
+    ),
+    "kissing_sexual": (
+        "lips are touching AND it is sustained open-mouthed kissing with "
+        "roaming hands or partial undress."
+    ),
+    "sexualised_framing": (
+        "the camera lingers on a real body as an object of desire — posing, "
+        "stripping — not incidental (sport, fighting, washing, medical)."
+    ),
+}
+
+
+def observe_json_footer() -> str:
+    """The fixed JSON-schema tail of the VLM prompt, generated from OBSERVATIONS.
+
+    Never editable from the plugin — classify() depends on this exact key
+    set, so no admin edit to a field's guidance text can ever break the
+    parse; at worst it makes a field's judgement worse, never crashes the
+    pass.
+    """
+    fields = {name: False for name in OBSERVATIONS}
+    fields["description"] = "<what you see, under 12 words>"
+    return "Respond with JSON only:\n" + json.dumps(fields)
 
 
 @dataclass

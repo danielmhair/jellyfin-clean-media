@@ -29,6 +29,13 @@
     status/restart/settings menu (scripts/worker-manage.ps1), so managing
     this day to day doesn't need a remembered PowerShell command.
 
+    Also registers a second, always-on task ("<TaskName>Supervisor",
+    worker/supervisor.py) with -RunLevel Highest, on Port+1, so the Jellyfin
+    plugin's "Restart worker" button works even when the worker itself is
+    unresponsive or fully down. Removed together with -Uninstall; a
+    plugin-side "disable" only stops it from acting, never from listening,
+    so it can always be turned back on later from the plugin.
+
 .PARAMETER Port
     Port the worker listens on. Must match the Worker URL in the Jellyfin
     plugin settings.
@@ -84,6 +91,17 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $mediaRootsExplicit = $PSBoundParameters.ContainsKey('MediaRoots')
 $vlmHostsExplicit = $PSBoundParameters.ContainsKey('VlmHosts')
+
+# The always-on recovery helper (worker/supervisor.py) — a second task, on
+# port+1, registered with -RunLevel Highest so it can taskkill the orphaned
+# S4U worker child (see Stop-WorkerProcesses) and restart the worker task on
+# request from the Jellyfin plugin's "Restart worker" button, even when the
+# worker itself is unresponsive or fully down. Elevation is authorized once,
+# right here (this whole script already requires an elevated PowerShell) —
+# Task Scheduler then runs every future `schtasks /run` of it elevated with
+# no further UAC prompt, the same mechanism the worker's own -RestartCount
+# self-heal already relies on.
+$SupervisorTaskName = "${TaskName}Supervisor"
 
 function Assert-Elevated {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -178,7 +196,9 @@ if ($Uninstall) {
     }
     Stop-WorkerProcesses -OnPort $Port | Out-Null
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-    Write-Host "Removed scheduled task '$TaskName'. The worker will not start at boot."
+    Get-ScheduledTask -TaskName $SupervisorTaskName -ErrorAction SilentlyContinue |
+        Unregister-ScheduledTask -Confirm:$false
+    Write-Host "Removed scheduled tasks '$TaskName' and '$SupervisorTaskName'. Neither will start at boot."
     Write-Host "Logs and the launcher are left in place under $stateDir."
     return
 }
@@ -391,6 +411,28 @@ Write-Host "Worker $($r.version) is up."
 if (-not $Restart) {
     Write-Host "  engines: $(($r.engines.PSObject.Properties.Name) -join ', ')"
 }
+
+# --- register the always-on recovery helper (worker/supervisor.py) ----------
+# Always AtStartup + S4U, regardless of -AtLogon above: it only makes HTTP
+# calls and runs schtasks/taskkill, none of which need an interactive session
+# or network credentials, and it needs to be reachable before anyone logs in.
+$supervisorPort = $Port + 1
+$supervisorAction = New-ScheduledTaskAction -Execute $uv `
+    -Argument "run python -m worker.supervisor --port $supervisorPort --worker-port $Port --task-name $TaskName" `
+    -WorkingDirectory $repo
+$supervisorTrigger = New-ScheduledTaskTrigger -AtStartup
+$supervisorSettings = New-ScheduledTaskSettingsSet `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
+    -MultipleInstances IgnoreNew -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
+    -ExecutionTimeLimit ([TimeSpan]::Zero)
+$supervisorPrincipal = New-ScheduledTaskPrincipal -UserId $user -LogonType S4U -RunLevel Highest
+
+Register-ScheduledTask -TaskName $SupervisorTaskName -Action $supervisorAction `
+    -Trigger $supervisorTrigger -Settings $supervisorSettings -Principal $supervisorPrincipal `
+    -Description "Clean Media recovery helper. Lets the Jellyfin plugin restart the worker." `
+    -Force | Out-Null
+Start-ScheduledTask -TaskName $SupervisorTaskName
+Write-Host "  recovery helper running on port $supervisorPort"
 
 if (-not $Restart) {
     $ips = Get-NetIPAddress -AddressFamily IPv4 |

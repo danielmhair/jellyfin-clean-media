@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import enum
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -136,6 +136,12 @@ class SegmentCreate(BaseModel):
 
 class RenderRequest(BaseModel):
     outputPath: Optional[str] = None
+    #: Which of the two targets ``/api/render/plan`` offers to write:
+    #: ``replace`` rewrites the clean copy this render supersedes (the source
+    #: itself when re-rendering a clean copy), ``new`` writes the next free
+    #: "Clean N" beside it so the existing copy stays playable. Ignored when
+    #: ``outputPath`` names a file outright.
+    mode: Literal["replace", "new"] = "replace"
 
 
 class JobBrief(BaseModel):

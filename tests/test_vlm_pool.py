@@ -234,3 +234,56 @@ def test_hosts_env_default(monkeypatch):
         "http://a",
         "http://b",
     ]
+
+
+def test_hosts_settings_store_wins_over_env(monkeypatch, tmp_path):
+    from worker import settings as worker_settings
+
+    monkeypatch.setattr(worker_settings, "_PATH", tmp_path / "settings.json")
+    monkeypatch.setattr(worker_settings, "_current", None)
+    monkeypatch.setenv("CLEANMEDIA_VLM_HOSTS", "http://env-only:11434")
+
+    eng = VLMEngine()
+    # No settings-store value yet → falls through to the env var, same as
+    # test_hosts_env_default (the new tier is additive, not a replacement).
+    assert eng._hosts({}) == ["http://env-only:11434"]
+
+    worker_settings.set_settings(
+        worker_settings.WorkerSettings(vlmHosts="http://from-plugin:11434,http://second:11434")
+    )
+    assert eng._hosts({}) == ["http://from-plugin:11434", "http://second:11434"]
+
+    # An explicit per-job option still wins over the settings store too.
+    assert eng._hosts({"host": "http://explicit:11434"}) == ["http://explicit:11434"]
+    assert eng._hosts({"hosts": ["http://x", "http://y"]}) == ["http://x", "http://y"]
+
+
+def test_observe_prompt_default_matches_original_hardcoded_text(monkeypatch, tmp_path):
+    from worker import settings as worker_settings
+    from worker.engines.vlm_engine import DEFAULT_FIELD_GUIDANCE, _observe_prompt
+    from worker.policy import observe_json_footer
+
+    monkeypatch.setattr(worker_settings, "_PATH", tmp_path / "settings.json")
+    monkeypatch.setattr(worker_settings, "_current", None)
+
+    prompt = _observe_prompt()
+    assert prompt.startswith("You are looking at one frame from a film.")
+    assert prompt.endswith(observe_json_footer())
+    for text in DEFAULT_FIELD_GUIDANCE.values():
+        assert text in prompt
+
+
+def test_observe_prompt_uses_field_override_from_settings(monkeypatch, tmp_path):
+    from worker import settings as worker_settings
+    from worker.engines.vlm_engine import _observe_prompt
+
+    monkeypatch.setattr(worker_settings, "_PATH", tmp_path / "settings.json")
+    monkeypatch.setattr(worker_settings, "_current", None)
+    worker_settings.set_settings(
+        worker_settings.WorkerSettings(vlmGuidance={"kissing_sexual": "a custom, stricter definition"})
+    )
+
+    prompt = _observe_prompt()
+    assert '- "kissing_sexual": a custom, stricter definition' in prompt
+    # Untouched fields keep their default wording.
+    assert "a man's bare chest is visible." in prompt

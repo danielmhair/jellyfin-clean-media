@@ -21,8 +21,10 @@ import time
 from pathlib import Path, PurePosixPath
 from typing import Optional
 
+from .cleancopy import cuts_of, is_clean_copy, source_of, to_source_ms
 from .models import Segment, Timeline
 from .render import BLUR_SIGMA
+from .settings import get_settings
 from .store import media_fingerprint
 
 THUMB_WIDTH = 480
@@ -37,9 +39,22 @@ def sidecar_for(media: Path) -> Path:
     return media.with_name(media.stem + ".cleanmedia.json")
 
 
+def _configured_media_roots() -> str:
+    """The raw roots string driving media_roots() and the index staleness
+    signature — kept as one function so both always see the same value.
+
+    The settings store (edited from the plugin's Settings tab) wins when
+    non-empty — an admin who explicitly set it there means it — else
+    CLEANMEDIA_MEDIA_ROOTS (the pre-plugin way to set this), else empty
+    (media_roots() falls back to the bundled movies/ test folder).
+    """
+    stored = get_settings().mediaRoots.strip()
+    return stored or os.environ.get("CLEANMEDIA_MEDIA_ROOTS", "")
+
+
 def media_roots() -> list[Path]:
     """Directories to search when a caller's path does not exist locally."""
-    configured = os.environ.get("CLEANMEDIA_MEDIA_ROOTS", "")
+    configured = _configured_media_roots()
     roots = [Path(p) for p in configured.split(os.pathsep) if p.strip()]
     if not roots:
         roots = [Path(__file__).resolve().parent.parent / "movies"]
@@ -56,6 +71,58 @@ def media_roots() -> list[Path]:
     return usable
 
 
+def browse_dir(path: str = "") -> dict:
+    """List subdirectories of ``path``, for the plugin's media-roots folder
+    picker on the Settings tab.
+
+    The plugin runs in a browser that is often on a different machine from
+    the worker (and its filesystem) entirely, so a native OS file dialog or
+    an HTML file-input can't work here — this mirrors how Sonarr/Radarr/Plex
+    do it: browse the *server's* filesystem over the API instead. Only
+    directories are listed (never files) since this exists purely to build a
+    media-roots path.
+
+    An empty ``path`` means "give me somewhere to start": every media root
+    that currently resolves, plus platform-appropriate starting points (drive
+    letters on Windows, ``/`` and the home directory elsewhere) — useful even
+    before any media root is configured.
+    """
+    if not path:
+        seen: set[str] = set()
+        entries = []
+        for root in media_roots():
+            entries.append({"name": str(root), "path": str(root)})
+            seen.add(str(root))
+        if os.name == "nt":
+            import string
+
+            for letter in string.ascii_uppercase:
+                drive = f"{letter}:\\"
+                if drive not in seen and Path(drive).is_dir():
+                    entries.append({"name": drive, "path": drive})
+        else:
+            for extra in ("/", str(Path.home())):
+                if extra not in seen and Path(extra).is_dir():
+                    entries.append({"name": extra, "path": extra})
+        return {"path": "", "parent": None, "dirs": entries}
+
+    target = Path(path)
+    if not target.is_dir():
+        raise NotADirectoryError(path)
+    dirs = []
+    try:
+        for child in sorted(target.iterdir(), key=lambda c: c.name.lower()):
+            try:
+                if child.is_dir() and not child.name.startswith("."):
+                    dirs.append({"name": child.name, "path": str(child)})
+            except OSError:
+                continue  # a broken symlink or permission error, skip it
+    except PermissionError:
+        pass  # an unreadable directory still gets its parent link back
+    parent = str(target.parent) if target.parent != target else None
+    return {"path": str(target), "parent": parent, "dirs": dirs}
+
+
 # Filename -> path index over the media roots. Building it walks every root,
 # which is cheap for a handful of test files but expensive over a real NAS
 # library (thousands of files, often on SMB) — and the review grid resolves
@@ -70,9 +137,10 @@ _index_lock = threading.Lock()
 _index_cache: Optional[dict[str, Path]] = None
 _sidecar_cache: Optional[set[str]] = None
 _index_built_at = 0.0
-#: The CLEANMEDIA_MEDIA_ROOTS the cache was built for. Comparing this (a cheap
-#: string, no I/O) means a roots change — a reconfig, or a different root per
-#: test — rebuilds the index instead of serving a stale one.
+#: The configured roots string (settings store or CLEANMEDIA_MEDIA_ROOTS) the
+#: cache was built for. Comparing this (a cheap string, no I/O) means a roots
+#: change — from the plugin, the env var, or a different root per test —
+#: rebuilds the index instead of serving a stale one.
 _index_roots_sig: Optional[str] = None
 
 
@@ -105,7 +173,7 @@ def _build_media_index() -> tuple[dict[str, Path], set[str]]:
 def _ensure_index(refresh: bool = False) -> tuple[dict[str, Path], set[str]]:
     global _index_cache, _sidecar_cache, _index_built_at, _index_roots_sig
     with _index_lock:
-        sig = os.environ.get("CLEANMEDIA_MEDIA_ROOTS", "")
+        sig = _configured_media_roots()
         stale = (
             _index_cache is None
             or sig != _index_roots_sig
@@ -159,6 +227,18 @@ def resolve_media(path: str) -> Optional[Path]:
     if hit is not None and hit.is_file():
         return hit
     return None
+
+
+def review_target(media: Path) -> Path:
+    """The file whose findings a review of ``media`` should show.
+
+    Opening a clean copy — from a stale link, or the player's "review this
+    film" button while the copy is what's playing — shows the film instead.
+    The copy has no review decisions of its own: it is rebuilt from the film's
+    approvals every time it is rendered, so the film is where a decision has to
+    land to survive.
+    """
+    return source_of(media) or media
 
 
 def load_timeline(media: Path) -> Optional[Timeline]:
@@ -249,13 +329,17 @@ def library_view(query: str = "", limit: int = 50, offset: int = 0) -> dict:
     — analyzed films, needs-review first (most-undecided first), then reviewed.
     With a ``query`` it fuzzy-matches **every** video in every collection
     (including unanalyzed ones, which open for manual review), ranked by match.
-    Rendered (Clean) copies are excluded — they're outputs, not sources.
+
+    Rendered clean copies are excluded — they're outputs, not sources. Findings
+    are held against the film, and a render rebuilds the copy from it, so the
+    film is the only thing there is to review; opening a copy redirects there
+    (see :func:`review_target`).
     """
     index, sidecars = _ensure_index()
     q = query.strip().lower()
     items: list[dict] = []
     for name, path in index.items():
-        if path.suffix.lower() not in VIDEO_EXTS or "(clean)" in name:
+        if path.suffix.lower() not in VIDEO_EXTS or is_clean_copy(path):
             continue
         analyzed = sidecar_for(path).name.lower() in sidecars
         if not q and not analyzed:
@@ -378,6 +462,29 @@ def delete_segment(media: Path, segment_id: int) -> bool:
     return True
 
 
+def _redirect_to_source(
+    media: Path, start_ms: int, end_ms: int, reasoning: Optional[str]
+) -> tuple[Path, int, int, Optional[str]]:
+    """Move a hand-added finding from a clean copy onto the film it came from.
+
+    Returns the arguments unchanged for an ordinary file, or for a copy whose
+    film can no longer be found — better a finding on the copy than a finding
+    dropped. The cut list comes from the copy's origin record, written when it
+    was rendered; without one the times are taken as they are, which is exactly
+    right whenever the copy has no cuts in it (mute and blur move nothing) and
+    the closest thing to right when it does.
+    """
+    source = source_of(media)
+    if source is None or source == media:
+        return media, start_ms, end_ms, reasoning
+
+    cuts = cuts_of(media)
+    mapped_start = to_source_ms(start_ms, cuts)
+    mapped_end = to_source_ms(end_ms, cuts)
+    note = f"flagged on {media.name}"
+    return source, mapped_start, mapped_end, f"{reasoning} ({note})" if reasoning else note
+
+
 def create_segment(
     media: Path,
     start_ms: int,
@@ -394,7 +501,18 @@ def create_segment(
     must outlive any model's.
 
     Defaults to approved: adding a finding deliberately *is* the decision.
+
+    Flagged while watching a *clean copy* — the usual way a missed word turns
+    up — the finding is written against the film instead, at the matching
+    moment in it. A copy is rebuilt from the film's approvals on every render,
+    so a finding recorded on the copy would be wiped by the next one; and
+    because a render's cuts shorten the copy, the flagged time is shifted back
+    through them (:func:`worker.cleancopy.to_source_ms`) rather than taken at
+    face value.
     """
+    media, start_ms, end_ms, reasoning = _redirect_to_source(
+        media, start_ms, end_ms, reasoning
+    )
     timeline = load_timeline(media)
     if timeline is None:
         # First finding on a film nothing has analyzed yet.

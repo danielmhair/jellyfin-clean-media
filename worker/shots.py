@@ -133,12 +133,17 @@ def detect_shots(media_path: Path, threshold: float = 27.0) -> list[Shot]:
     so we neither drop the tail of a telecined rip nor analyze a partial one.
     """
     from scenedetect import ContentDetector, SceneManager, open_video
+    from scenedetect.video_stream import VideoOpenFailure
 
     fps, duration, frames = true_fps(media_path)
 
     # One full detection pass. A partial decode (a dropped share read) trips the
     # coverage guard below as PartialTimeline, which retry_media_read re-runs —
     # so a flaky read gets another decode rather than failing the whole film.
+    # VideoOpenFailure at the open() call itself is the same class of flaky-NAS
+    # symptom (see worker/retry.py) — a dropped SMB session mid-open, not a
+    # corrupt file — so it gets the same retry rather than failing the job
+    # outright on one bad moment.
     def one_pass() -> list[Shot]:
         video = open_video(str(media_path))
         manager = SceneManager()
@@ -174,7 +179,7 @@ def detect_shots(media_path: Path, threshold: float = 27.0) -> list[Shot]:
             return [Shot(0, 0, frames, 0.0, duration)]
         return shots
 
-    return retry_media_read(one_pass, transient=(TransientMediaRead,))
+    return retry_media_read(one_pass, transient=(TransientMediaRead, VideoOpenFailure))
 
 
 def sample_times(

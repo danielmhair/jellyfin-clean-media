@@ -12,6 +12,13 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import schedule as schedule_mod
+from .cleancopy import (
+    clean_output_path,
+    next_clean_output_path,
+    render_source,
+    render_target,
+    write_origin_record,
+)
 from .engines import ENGINES
 from .logging_config import get_logger
 from .models import Job, JobCreate, JobStatus, Timeline
@@ -34,29 +41,6 @@ def _fmt_duration(seconds: float) -> str:
     if whole < 3600:
         return f"{whole // 60}m{whole % 60:02d}s"
     return f"{whole // 3600}h{(whole % 3600) // 60:02d}m"
-
-
-def clean_output_path(media: Path) -> Path:
-    """Where a film's clean copy should be written.
-
-    Jellyfin groups multiple files in one *movie folder* as selectable versions
-    of the same movie, as long as each file name begins — character for
-    character — with the folder name, followed by ``" - <label>"``. So when the
-    film sits in its own folder (``Movie (2014)/Movie (2014).mkv``) we write the
-    clean copy alongside it as ``Movie (2014) - Clean.mkv``: it shows up as a
-    "Clean" version to pick in the player, and the original is never touched.
-
-    When the film is *not* in its own folder (a flat library, or an episode
-    under ``Season 01/``), version grouping can't work — naming a file after the
-    shared parent folder would either fail to group or collide — so we fall back
-    to a ``cleaned/`` subfolder, which is safe but won't appear as a version.
-    """
-    # A dedicated per-movie folder is the standard Jellyfin layout and the only
-    # one where the file name equals the folder name. That exact match is also
-    # what version grouping requires, so it's the right condition to key on.
-    if media.stem == media.parent.name:
-        return media.parent / f"{media.parent.name} - Clean{media.suffix}"
-    return media.parent / "cleaned" / f"{media.stem} (Clean){media.suffix}"
 
 
 class JobCancelled(Exception):
@@ -325,7 +309,10 @@ class JobQueue:
         return job
 
     def submit_media_render(
-        self, media_path: str, output_path: Optional[str] = None
+        self,
+        media_path: str,
+        output_path: Optional[str] = None,
+        mode: str = "replace",
     ) -> Job:
         """Render a clean copy from a film's APPROVED sidecar findings, by path.
 
@@ -335,12 +322,27 @@ class JobQueue:
         and folds every approved skip/mute/blur into one clean copy via the
         combined renderer. It is what the Jellyfin film view calls: it knows a
         film by path, not by job id, and only approved findings are acted on.
+
+        ``mode`` picks between the two targets :func:`render_plan` offers —
+        ``"replace"`` rewrites the clean copy this render supersedes,
+        ``"new"`` writes the next free ``Clean N`` and leaves the old copy
+        playable. An explicit ``output_path`` overrides both.
         """
         from .review import load_timeline
 
-        media = Path(media_path)
-        if not media.is_file():
-            raise FileNotFoundError(f"media not found: {media}")
+        asked = Path(media_path)
+        if not asked.is_file():
+            raise FileNotFoundError(f"media not found: {asked}")
+        # The target is worked out from the file the caller named — asking to
+        # render "Clean 2" and choosing "overwrite" has to mean that copy, not
+        # the film's first one.
+        target = Path(output_path) if output_path else render_target(asked, mode)
+        # The *input* is always the film. A clean copy renders from what it was
+        # made from, never from itself: the film plus today's approvals is the
+        # whole answer, so a re-render picks up every finding rather than
+        # stacking one edit on another, and it encodes the original once
+        # instead of re-encoding an encode.
+        media = render_source(asked)
         timeline = load_timeline(media)
         if timeline is None:
             raise ValueError(f"no analysis found for {media.name}; analyze it first")
@@ -358,8 +360,12 @@ class JobQueue:
             status=JobStatus.rendering,
             stage="queued for rendering",
         )
-        if output_path:
-            job.options["renderOutputPath"] = output_path
+        # Resolved now, not at run time, so the caller can say where the copy is
+        # going while the administrator is still looking at the dialog. A "new"
+        # target is re-checked when the job runs, in case another render claimed
+        # that number from the queue in the meantime.
+        job.options["renderMode"] = mode
+        job.options["renderOutputPath"] = str(target)
         with self._cond:
             job.queuePosition = self._alloc_position()
             self.store.save_job(job)
@@ -676,6 +682,12 @@ class JobQueue:
             raise RuntimeError("no approved findings to render")
 
         output = Path(job.options.get("renderOutputPath") or clean_output_path(media))
+        if job.options.get("renderMode") == "new" and output.exists():
+            # "Keep the old copy" was chosen, but that number was taken between
+            # queueing and now (a second render, or a hand-copied file). Move to
+            # the next free one rather than overwriting the copy we promised to
+            # spare.
+            output = next_clean_output_path(media)
         started = time.monotonic()
         log.info(
             "job %s rendering: %s -> %s (%d approved finding(s))",
@@ -694,6 +706,14 @@ class JobQueue:
             output,
             self._progress_cb(job),
             duration_s=duration,
+        )
+
+        # Leave a trail from the copy back to the film and the cuts applied, so
+        # a moment flagged while watching the copy can be placed in the film.
+        write_origin_record(
+            rendered,
+            media,
+            [(s.startMs, s.endMs) for s in approved if s.recommendedAction == "skip"],
         )
 
         job = self.store.get_job(job.id) or job

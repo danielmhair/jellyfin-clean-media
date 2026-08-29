@@ -21,6 +21,14 @@ namespace Jellyfin.Plugin.CleanMedia;
 public class StatusRequest
 {
     public List<string>? ItemIds { get; set; }
+
+    /// <summary>Optional per-item version paths, aligned with ItemIds.</summary>
+    /// <remarks>
+    /// The film grid leaves this empty and gets each item's own file. The
+    /// per-film dialog sends the version the administrator picked, so the
+    /// status it shows (findings, approvals, clean copy) is that version's.
+    /// </remarks>
+    public List<string>? Paths { get; set; }
 }
 
 /// <summary>A decision, a retime, or both, for one finding.</summary>
@@ -62,12 +70,27 @@ public class AnalyzeRequest
     public List<string>? ItemIds { get; set; }
 
     public string Engine { get; set; } = "subtitles";
+
+    /// <summary>Which version of the film to work on, by file path.</summary>
+    /// <remarks>
+    /// A rendered clean copy is an alternate *version* of the movie, not a
+    /// library item of its own, so an item id alone can only ever mean the
+    /// original. Sent when the administrator picked a version; ignored unless
+    /// it is genuinely one of that item's versions.
+    /// </remarks>
+    public string? Path { get; set; }
 }
 
 /// <summary>A film to render a clean copy for.</summary>
 public class RenderRequest
 {
     public string? ItemId { get; set; }
+
+    /// <summary>Which version of the film to render from. See AnalyzeRequest.Path.</summary>
+    public string? Path { get; set; }
+
+    /// <summary>"replace" the clean copy this supersedes, or write a "new" one beside it.</summary>
+    public string Mode { get; set; } = "replace";
 }
 
 /// <summary>A new front-first order for the queued jobs, by id.</summary>
@@ -125,14 +148,22 @@ public class CleanMediaController : ControllerBase
         // Keep ids and paths aligned: the worker answers positionally.
         var ids = new List<Guid>();
         var paths = new List<string>();
-        foreach (var rawId in request.ItemIds ?? new List<string>())
+        var rawIds = request.ItemIds ?? new List<string>();
+        for (var i = 0; i < rawIds.Count; i++)
         {
+            var rawId = rawIds[i];
             if (!Guid.TryParse(rawId, out var id))
             {
                 continue;
             }
 
-            var path = library.GetItemById(id)?.Path;
+            // The grid sends ids only and gets each movie's own file; the
+            // per-film dialog also sends the version it is showing, so the
+            // counts it displays belong to that version.
+            var wanted = request.Paths is not null && request.Paths.Count > i
+                ? request.Paths[i]
+                : null;
+            var path = PathFor(rawId, wanted);
             if (string.IsNullOrEmpty(path))
             {
                 continue;
@@ -182,6 +213,162 @@ public class CleanMediaController : ControllerBase
 
         var path = Plugin.LibraryManager?.GetItemById(id)?.Path;
         return string.IsNullOrEmpty(path) ? null : path;
+    }
+
+    /// <summary>The file path for an item, honouring a version the caller named.</summary>
+    /// <remarks>
+    /// A rendered clean copy is an alternate *version* of the movie, not a
+    /// library item of its own, so an item id alone can only ever mean the
+    /// original — which is why the queue page could not offer the clean copy.
+    /// A named path is accepted only when it really is one of that item's
+    /// versions, so the page can pick one without being able to point the
+    /// worker at an arbitrary file; anything else falls back to the original.
+    /// </remarks>
+    private static string? PathFor(string? itemId, string? preferred)
+    {
+        var own = PathFor(itemId);
+        if (string.IsNullOrEmpty(preferred) || !Guid.TryParse(itemId, out var id))
+        {
+            return own;
+        }
+
+        var match = VersionPathsFor(id)
+            .FirstOrDefault(v => string.Equals(v, preferred, StringComparison.OrdinalIgnoreCase));
+        return match ?? own;
+    }
+
+    /// <summary>Every file Jellyfin holds as a version of one item, original first.</summary>
+    private static List<string> VersionPathsFor(Guid id)
+    {
+        var paths = new List<string>();
+        var item = Plugin.LibraryManager?.GetItemById(id);
+        if (item is null)
+        {
+            return paths;
+        }
+
+        if (!string.IsNullOrEmpty(item.Path))
+        {
+            paths.Add(item.Path);
+        }
+
+        if (item is Video video)
+        {
+            // Same-folder files named "<folder> - <label>" — where a rendered
+            // clean copy lands — plus versions linked in by hand.
+            foreach (var local in video.LocalAlternateVersions ?? Array.Empty<string>())
+            {
+                if (!string.IsNullOrEmpty(local))
+                {
+                    paths.Add(local);
+                }
+            }
+
+            foreach (var linked in video.GetLinkedAlternateVersions())
+            {
+                if (!string.IsNullOrEmpty(linked.Path))
+                {
+                    paths.Add(linked.Path);
+                }
+            }
+        }
+
+        return paths.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    /// <summary>The label Jellyfin lists a version file under.</summary>
+    /// <remarks>
+    /// "Movie (2014)/Movie (2014) - Clean.mkv" is the version "Clean"; the
+    /// folder-named file is the original. Mirrors the worker's naming rule
+    /// (worker/cleancopy.py) so both sides call the same file the same thing.
+    /// </remarks>
+    private static string VersionLabel(string path)
+    {
+        var stem = System.IO.Path.GetFileNameWithoutExtension(path) ?? string.Empty;
+        var folder = System.IO.Path.GetFileName(
+            System.IO.Path.GetDirectoryName(path) ?? string.Empty) ?? string.Empty;
+        if (folder.Length == 0)
+        {
+            return stem;
+        }
+
+        if (string.Equals(stem, folder, StringComparison.OrdinalIgnoreCase))
+        {
+            return "Original";
+        }
+
+        var prefix = folder + " - ";
+        return stem.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+            ? stem[prefix.Length..]
+            : stem;
+    }
+
+    /// <summary>The versions of one film the page can pick between.</summary>
+    /// <remarks>
+    /// The film list comes from Jellyfin's own API, which returns one item per
+    /// movie — a rendered clean copy is folded into it as an alternate version
+    /// and never appears on its own. This is how the page gets at it, so a pass
+    /// (or a re-render) can be aimed at the clean copy the administrator is
+    /// actually watching.
+    /// </remarks>
+    [HttpGet("Versions")]
+    public ActionResult<object> Versions([FromQuery] string itemId)
+    {
+        if (!Guid.TryParse(itemId, out var id))
+        {
+            return NotFound();
+        }
+
+        var paths = VersionPathsFor(id);
+        if (paths.Count == 0)
+        {
+            return NotFound();
+        }
+
+        return Ok(new
+        {
+            versions = paths.Select((p, i) => new
+            {
+                path = p,
+                name = VersionLabel(p),
+                isPrimary = i == 0,
+            }),
+        });
+    }
+
+    /// <summary>Where a render of one version would write, and what it replaces.</summary>
+    /// <remarks>
+    /// Asked before queueing a render so the administrator is not surprised: a
+    /// clean copy is a file they may be part-way through watching, and the
+    /// choice is theirs — overwrite it, or keep it and make another.
+    /// </remarks>
+    [HttpGet("RenderPlan")]
+    public async Task<ActionResult<object>> RenderPlan(
+        [FromQuery] string itemId,
+        [FromQuery] string? path,
+        CancellationToken cancellationToken)
+    {
+        var resolved = PathFor(itemId, path);
+        if (resolved is null)
+        {
+            return NotFound();
+        }
+
+        var plan = await _worker.GetRenderPlanAsync(resolved, cancellationToken).ConfigureAwait(false);
+        if (plan is null)
+        {
+            return Ok(new { unreachable = true });
+        }
+
+        return Ok(new
+        {
+            sourceIsCleanCopy = plan.SourceIsCleanCopy,
+            replacePath = plan.ReplacePath,
+            replaceLabel = plan.ReplaceLabel,
+            replaceExists = plan.ReplaceExists,
+            newPath = plan.NewPath,
+            newLabel = plan.NewLabel,
+        });
     }
 
     /// <summary>Every finding for one film, reviewed or not.</summary>
@@ -333,7 +520,7 @@ public class CleanMediaController : ControllerBase
         var queued = new List<object>();
         foreach (var itemId in request.ItemIds ?? new List<string>())
         {
-            var path = PathFor(itemId);
+            var path = PathFor(itemId, request.Path);
             if (path is null)
             {
                 continue;
@@ -368,13 +555,16 @@ public class CleanMediaController : ControllerBase
         [FromBody] RenderRequest request,
         CancellationToken cancellationToken)
     {
-        var path = PathFor(request.ItemId);
+        var path = PathFor(request.ItemId, request.Path);
         if (path is null)
         {
             return NotFound();
         }
 
-        var result = await _worker.RenderAsync(path, cancellationToken).ConfigureAwait(false);
+        var mode = string.Equals(request.Mode, "new", StringComparison.OrdinalIgnoreCase)
+            ? "new"
+            : "replace";
+        var result = await _worker.RenderAsync(path, mode, cancellationToken).ConfigureAwait(false);
         if (result.Unreachable)
         {
             return Ok(new { unreachable = true });
@@ -537,6 +727,117 @@ public class CleanMediaController : ControllerBase
         return Ok(view);
     }
 
+    /// <summary>Worker-owned settings — media roots, VLM guidance/hosts, and the
+    /// policy/profanity toggles — for the Settings/Advanced tabs to edit.</summary>
+    /// <remarks>Same reasoning as Schedule: these live on the worker (the
+    /// machine that actually resolves paths and calls the VLM), so the
+    /// settings page reads and writes them through here.</remarks>
+    [HttpGet("Settings")]
+    public async Task<ActionResult<object>> GetSettings(CancellationToken cancellationToken)
+    {
+        var view = await _worker.GetWorkerSettingsAsync(cancellationToken).ConfigureAwait(false);
+        if (view is null)
+        {
+            return Ok(new { unreachable = true });
+        }
+
+        return Ok(view);
+    }
+
+    /// <summary>Replace the worker's settings.</summary>
+    [HttpPost("Settings")]
+    public async Task<ActionResult<object>> SetSettings(
+        [FromBody] JsonElement settings,
+        CancellationToken cancellationToken)
+    {
+        var view = await _worker.SetWorkerSettingsAsync(settings, cancellationToken).ConfigureAwait(false);
+        if (view is null)
+        {
+            return Ok(new { unreachable = true });
+        }
+
+        return Ok(view);
+    }
+
+    /// <summary>List subdirectories on the worker's own filesystem, for the media-roots folder picker.</summary>
+    /// <remarks>The plugin's browser is often on a different machine from the
+    /// worker (and its filesystem), so a native OS file dialog can't work
+    /// here — this browses the worker's filesystem over the API instead, the
+    /// same approach Sonarr/Radarr/Plex use for library folders.</remarks>
+    [HttpGet("Browse")]
+    public async Task<ActionResult<object>> Browse(
+        [FromQuery] string path,
+        CancellationToken cancellationToken)
+    {
+        var result = await _worker.BrowseAsync(path ?? string.Empty, cancellationToken).ConfigureAwait(false);
+        if (result is null)
+        {
+            return Ok(new { unreachable = true });
+        }
+
+        return Ok(result);
+    }
+
+    /// <summary>Whether the worker is up and whether the recovery helper is
+    /// currently allowed to act. Null/unreachable when even the helper can't
+    /// be reached (an older install that hasn't re-run install-service since
+    /// this shipped, or the helper genuinely being down too).</summary>
+    [HttpGet("Supervisor")]
+    public async Task<ActionResult<object>> GetSupervisorStatus(CancellationToken cancellationToken)
+    {
+        var status = await _worker.GetSupervisorStatusAsync(cancellationToken).ConfigureAwait(false);
+        if (status is null)
+        {
+            return Ok(new { unreachable = true });
+        }
+
+        return Ok(status);
+    }
+
+    /// <summary>Start the worker via the recovery helper — works even when the worker is completely down.</summary>
+    [HttpPost("Supervisor/Start")]
+    public async Task<ActionResult<object>> SupervisorStart(CancellationToken cancellationToken)
+    {
+        var result = await _worker.SupervisorStartAsync(cancellationToken).ConfigureAwait(false);
+        return result is null ? Ok(new { unreachable = true }) : Ok(result);
+    }
+
+    /// <summary>Restart the worker via the recovery helper. Safe to use anytime
+    /// — any job in progress resumes automatically (the queue re-queues on
+    /// startup, and the visual pass resumes from its own checkpoint).</summary>
+    [HttpPost("Supervisor/Restart")]
+    public async Task<ActionResult<object>> SupervisorRestart(CancellationToken cancellationToken)
+    {
+        var result = await _worker.SupervisorRestartAsync(cancellationToken).ConfigureAwait(false);
+        return result is null ? Ok(new { unreachable = true }) : Ok(result);
+    }
+
+    /// <summary>Stop the worker via the recovery helper.</summary>
+    [HttpPost("Supervisor/Stop")]
+    public async Task<ActionResult<object>> SupervisorStop(CancellationToken cancellationToken)
+    {
+        var result = await _worker.SupervisorStopAsync(cancellationToken).ConfigureAwait(false);
+        return result is null ? Ok(new { unreachable = true }) : Ok(result);
+    }
+
+    /// <summary>Allow the recovery helper to start/restart the worker again after it was disabled.</summary>
+    [HttpPost("Supervisor/Enable")]
+    public async Task<ActionResult<object>> SupervisorEnable(CancellationToken cancellationToken)
+    {
+        var result = await _worker.SupervisorEnableAsync(cancellationToken).ConfigureAwait(false);
+        return result is null ? Ok(new { unreachable = true }) : Ok(result);
+    }
+
+    /// <summary>Stop the recovery helper from starting/restarting the worker —
+    /// it keeps listening (so this can always be undone from here later),
+    /// it just stops acting.</summary>
+    [HttpPost("Supervisor/Disable")]
+    public async Task<ActionResult<object>> SupervisorDisable(CancellationToken cancellationToken)
+    {
+        var result = await _worker.SupervisorDisableAsync(cancellationToken).ConfigureAwait(false);
+        return result is null ? Ok(new { unreachable = true }) : Ok(result);
+    }
+
     /// <summary>Bits of plugin config the review page needs in the browser.</summary>
     /// <remarks>
     /// The worker URL lets the page open the worker's own standalone review
@@ -594,9 +895,11 @@ public class CleanMediaController : ControllerBase
     /// this controller — the button is only shown to administrators anyway.
     /// </remarks>
     [HttpGet("ReviewUrl")]
-    public ActionResult<object> ReviewUrl([FromQuery] string itemId)
+    public ActionResult<object> ReviewUrl(
+        [FromQuery] string itemId,
+        [FromQuery] string? version = null)
     {
-        var path = PathFor(itemId);
+        var path = PathFor(itemId, version);
         if (path is null)
         {
             return NotFound();

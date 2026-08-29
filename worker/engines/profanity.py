@@ -11,6 +11,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from ..settings import get_settings
+
 # Matched as exact normalized words.
 STRONG_WORDS = {
     "fuck", "fucker", "fucking", "fucked", "motherfucker", "motherfucking",
@@ -77,6 +79,24 @@ def is_profane(
     if include_blasphemy and w in BLASPHEMY_WORDS:
         return True
     return bool(extra and w in extra)
+
+
+def resolve_flags(options: dict) -> tuple[bool, bool, set[str]]:
+    """Merge per-job profanity options with the worker's saved defaults.
+
+    A per-job option always wins (existing CLI/direct-API callers keep
+    working unchanged); the settings store (the plugin's Advanced tab) is
+    the fallback default, so a plugin save changes untouched jobs without
+    breaking a caller that already sets its own flags explicitly.
+    ``extraWords`` is additive from both sources — a one-off job extra word
+    shouldn't require repeating everything already configured on the plugin.
+    """
+    stored = get_settings()
+    include_mild = bool(options.get("includeMild", stored.profanityIncludeMild))
+    include_blasphemy = bool(options.get("includeBlasphemy", stored.profanityIncludeBlasphemy))
+    extra = {w.lower() for w in options.get("extraWords", [])}
+    extra |= {w.strip().lower() for w in stored.profanityExtraWords.split(",") if w.strip()}
+    return include_mild, include_blasphemy, extra
 
 
 @dataclass

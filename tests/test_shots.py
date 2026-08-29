@@ -113,6 +113,51 @@ def test_partial_decode_is_retried_then_succeeds(monkeypatch, tmp_path):
     assert shots and shots[-1].end_s == pytest.approx(1000.0)
 
 
+def test_open_failure_is_retried_then_succeeds(monkeypatch, tmp_path):
+    """A dropped SMB session at open() time (not mid-decode) raises
+    VideoOpenFailure — the same flaky-NAS symptom as a short decode, so it
+    must be retried too rather than failing the job on one bad moment."""
+    from scenedetect.video_stream import VideoOpenFailure
+
+    from worker import retry as retry_mod
+    from worker import shots as shots_mod
+
+    monkeypatch.setattr(retry_mod, "BACKOFFS_S", (0.0,))  # retry once, no real wait
+    media = tmp_path / "film.mkv"
+    media.touch()
+    monkeypatch.setattr(shots_mod, "true_fps", lambda _p: (24.0, 1000.0, 24000))
+
+    opens = iter([
+        VideoOpenFailure("Ensure file is valid video and system dependencies are up to date."),
+        object(),
+    ])
+
+    def fake_open_video(_p):
+        result = next(opens)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    class _Mgr:
+        def add_detector(self, _d):
+            pass
+
+        def detect_scenes(self, _v, show_progress=False):
+            pass
+
+        def get_scene_list(self):
+            return [(_TC(0.0), _TC(1000.0))]
+
+    import scenedetect
+
+    monkeypatch.setattr(scenedetect, "SceneManager", _Mgr)
+    monkeypatch.setattr(scenedetect, "open_video", fake_open_video)
+    monkeypatch.setattr(scenedetect, "ContentDetector", lambda threshold=27.0: None)
+
+    shots = shots_mod.detect_shots(media)
+    assert shots and shots[-1].end_s == pytest.approx(1000.0)
+
+
 def test_telecine_undercoverage_is_rescaled_not_rejected(monkeypatch, tmp_path):
     """A telecined rip whose timeline runs a few % short (like Salt at 93% or
     Jumper at 95%) is rescaled onto the true duration and analyzed in full,

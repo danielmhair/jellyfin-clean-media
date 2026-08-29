@@ -18,7 +18,7 @@ from ..shots import TransientMediaRead, media_duration
 from ..staging import local_media
 from .base import EngineAdapter, ProgressCb
 from .mute_render import render_muted
-from .profanity import Hit, is_profane, merge_hits
+from .profanity import Hit, is_profane, merge_hits, resolve_flags
 
 PAD_MS = 150
 DEFAULT_MODEL = "medium.en"
@@ -179,9 +179,7 @@ class WhisperEngine(EngineAdapter):
         import json
 
         model_name = options.get("model", DEFAULT_MODEL)
-        include_mild = bool(options.get("includeMild", False))
-        include_blasphemy = bool(options.get("includeBlasphemy", False))
-        extra = {w.lower() for w in options.get("extraWords", [])}
+        include_mild, include_blasphemy, extra = resolve_flags(options)
 
         # Transcription is the expensive part — cache it as a sidecar so
         # wordlist changes only re-match, never re-transcribe.

@@ -328,12 +328,21 @@ elif [ "$OLLAMA_MODE" = local ]; then
     ok "installed ollama"
   fi
 
-  # The model pull needs a running server. On mac/Windows the installer runs
-  # Ollama as a background service already; if nothing is answering, start one.
+  # The model pull needs a running server; if nothing is answering, start one.
+  # On Windows the installed app already runs itself at login. On mac/Linux,
+  # a bare `nohup ollama serve &` only lives as long as this install script's
+  # own process tree -- it does not survive a reboot, a logout, or getting
+  # killed under memory pressure (a real risk pairing a 4B vision model with
+  # an 8GB Mac also running Jellyfin itself). Prefer each platform's real
+  # service manager so Ollama gets the same "comes back on its own" guarantee
+  # install-service.sh/.ps1 already give the worker -- nohup is the last
+  # resort, not the default.
   if ! ollama_up "$OLLAMA_HOST"; then
     info "starting the Ollama server…"
     if [ "$OS" = linux ] && have systemctl; then
       sudo systemctl enable --now ollama 2>/dev/null || nohup ollama serve >/dev/null 2>&1 &
+    elif [ "$OS" = mac ] && have brew; then
+      brew services start ollama 2>/dev/null || nohup ollama serve >/dev/null 2>&1 &
     else
       nohup ollama serve >/dev/null 2>&1 &
     fi

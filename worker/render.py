@@ -234,6 +234,23 @@ def _run_render(
     audio_sr: Optional[int],
     audio_ch: Optional[int],
 ) -> Path:
+    # Rendering over an existing clean copy is routine — you find a missed word
+    # while watching the clean version and re-render from it — but ffmpeg's -y
+    # truncates its output the instant it starts, so a failure part-way through
+    # would destroy a good copy, and reading and writing one path cannot work at
+    # all. Write beside the target and swap in only once the new file is
+    # complete: the old copy stays playable throughout, at the cost of holding
+    # both for the length of the render.
+    final_path = output_path
+    try:
+        in_place = output_path.exists()
+    except OSError:
+        in_place = False
+    if in_place:
+        output_path = final_path.with_name(
+            f"{final_path.stem}.cm-partial{final_path.suffix}"
+        )
+
     cmd, n_blur, n_mute = build_command(
         media_path, timeline, output_path, use_nvenc=use_nvenc, duration_s=duration_s,
         audio_path=audio_path, audio_sr=audio_sr, audio_ch=audio_ch,
@@ -255,31 +272,41 @@ def _run_render(
 
     # stderr goes to a file, never an undrained pipe: ffmpeg blocks forever
     # once a pipe nobody is reading fills up.
-    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as err:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=err,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            if line.startswith("out_time_ms=") and duration_s:
-                try:
-                    secs = int(line.split("=", 1)[1]) / 1_000_000
-                except ValueError:
-                    continue
-                progress(
-                    min(secs / duration_s, 0.99), f"rendered {secs / 60:.1f} min"
-                )
-        proc.wait()
-        if proc.returncode != 0:
-            err.seek(0)
-            raise RuntimeError(f"ffmpeg render failed:\n{err.read()[-2000:]}")
+    try:
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as err:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=err,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                if line.startswith("out_time_ms=") and duration_s:
+                    try:
+                        secs = int(line.split("=", 1)[1]) / 1_000_000
+                    except ValueError:
+                        continue
+                    progress(
+                        min(secs / duration_s, 0.99), f"rendered {secs / 60:.1f} min"
+                    )
+            proc.wait()
+            if proc.returncode != 0:
+                err.seek(0)
+                raise RuntimeError(f"ffmpeg render failed:\n{err.read()[-2000:]}")
 
-    if not output_path.exists():
-        raise RuntimeError(f"ffmpeg reported success but {output_path} is missing")
-    progress(1.0, f"wrote {output_path.name}")
-    return output_path
+        if not output_path.exists():
+            raise RuntimeError(f"ffmpeg reported success but {output_path} is missing")
+        if in_place:
+            # Same directory, so this is a rename: the old copy is replaced only
+            # now that a complete new one exists.
+            os.replace(output_path, final_path)
+    except BaseException:
+        if in_place:
+            output_path.unlink(missing_ok=True)  # never leave a half file behind
+        raise
+
+    progress(1.0, f"wrote {final_path.name}")
+    return final_path

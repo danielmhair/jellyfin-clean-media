@@ -14,6 +14,7 @@ longer touch production state no matter what order things import in.
 
 import os
 import tempfile
+from pathlib import Path
 
 _scratch = tempfile.mkdtemp(prefix="cleanmedia-tests-")
 
@@ -29,3 +30,13 @@ os.environ.setdefault("CLEANMEDIA_LOG_FILE", "")
 # worker.update starts a background GitHub-polling thread at import time;
 # without this the suite would hit the real network on every run.
 os.environ.setdefault("CLEANMEDIA_UPDATE_CHECK", "0")
+
+# worker.schedule and worker.settings persist to DATA_DIR/*.json, and DATA_DIR
+# (worker/store.py) has no env override — so without this, a test that calls
+# their real get_*/set_* functions would read/write the real repo's data/
+# folder, same class of hazard CLEANMEDIA_DB exists to prevent above.
+import worker.schedule as _schedule  # noqa: E402
+import worker.settings as _settings  # noqa: E402
+
+_schedule._PATH = Path(_scratch) / "test-schedule.json"
+_settings._PATH = Path(_scratch) / "test-settings.json"

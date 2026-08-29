@@ -1,9 +1,11 @@
+import io
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from worker.models import Segment, Timeline
-from worker.render import approved_for_render, build_command, keep_intervals
+from worker.render import approved_for_render, build_command, keep_intervals, render
 
 
 def _tl(*segs):
@@ -157,3 +159,75 @@ def test_unreviewed_timeline_renders_nothing():
     # unreviewed film renders nothing, never every detection at once.
     tl = _tl(_seg(1, 0, 1000, "mute"), _seg(2, 2000, 3000, "mute"))
     assert approved_for_render(tl) == []
+
+
+# -- overwriting an existing clean copy ---------------------------------------
+# ffmpeg's -y truncates its output the instant it starts, so rendering straight
+# over a clean copy destroys a good file the moment anything goes wrong — and
+# re-rendering *from* that copy (read and write the same path) cannot work at
+# all. The renderer writes beside the target and swaps in only on success.
+
+
+class _FakePopen:
+    """Stand in for ffmpeg: writes the file it was told to, then exits."""
+
+    def __init__(self, cmd, returncode=0, **kwargs):
+        self.out = Path(cmd[-1])
+        self.returncode = returncode
+        if returncode == 0:
+            self.out.write_bytes(b"rendered")
+        else:
+            self.out.write_bytes(b"half a f")  # a partial file, as ffmpeg leaves
+        self.stdout = io.StringIO("")
+
+    def wait(self):
+        return self.returncode
+
+
+def _mute_timeline():
+    return Timeline(
+        mediaFingerprint="f",
+        segments=[
+            Segment(id=1, startMs=1000, endMs=2000, category="profanity",
+                    confidence=1.0, engine="subtitles", recommendedAction="mute",
+                    approved=True),
+        ],
+    )
+
+
+def _clean_film(tmp_path):
+    folder = tmp_path / "Some Film (2010)"
+    folder.mkdir()
+    (folder / "Some Film (2010).mkv").write_bytes(b"original")
+    clean = folder / "Some Film (2010) - Clean.mkv"
+    clean.write_bytes(b"the copy being watched")
+    return folder, clean
+
+
+def test_re_rendering_a_clean_copy_over_itself_swaps_in_the_new_file(tmp_path, monkeypatch):
+    _, clean = _clean_film(tmp_path)
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+
+    out = render(clean, _mute_timeline(), clean, lambda f, s: None, use_nvenc=False)
+
+    assert out == clean
+    assert clean.read_bytes() == b"rendered"
+    # No partial left over next to it.
+    assert sorted(p.name for p in clean.parent.iterdir()) == [
+        "Some Film (2010) - Clean.mkv", "Some Film (2010).mkv",
+    ]
+
+
+def test_a_failed_render_leaves_the_existing_clean_copy_playable(tmp_path, monkeypatch):
+    _, clean = _clean_film(tmp_path)
+    monkeypatch.setattr(
+        subprocess, "Popen", lambda cmd, **kw: _FakePopen(cmd, returncode=1, **kw)
+    )
+
+    with pytest.raises(RuntimeError):
+        render(clean, _mute_timeline(), clean, lambda f, s: None, use_nvenc=False)
+
+    assert clean.read_bytes() == b"the copy being watched"
+    assert sorted(p.name for p in clean.parent.iterdir()) == [
+        "Some Film (2010) - Clean.mkv", "Some Film (2010).mkv",
+    ]

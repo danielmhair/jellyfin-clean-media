@@ -31,7 +31,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..models import Segment, Timeline
-from ..policy import OBSERVATIONS, Policy, classify
+from ..policy import DEFAULT_FIELD_GUIDANCE, OBSERVATIONS, Policy, classify, observe_json_footer
+from ..settings import get_settings
 from ..shots import Shot, detect_shots, load_shots, sample_times, save_shots
 from .base import EngineAdapter, ProgressCb
 
@@ -90,23 +91,38 @@ DEFAULT_CATEGORIES = {
 # Observations are also cheap to re-interpret: policy is a pure function
 # over them, so changing what counts re-derives instantly instead of
 # costing another multi-hour pass over the film.
-OBSERVE_PROMPT = """You are looking at one frame from a film. Report only what is plainly visible in THIS frame. When genuinely uncertain, answer false — a human reviews every true.
+# The calibration paragraphs — always present, never editable from the
+# plugin. This is what stops the model drifting on statues/mannequins/dim
+# lighting; letting an admin edit *this* part is what would actually risk
+# breaking detection, unlike the per-field guidance below.
+_OBSERVE_INTRO = """You are looking at one frame from a film. Report only what is plainly visible in THIS frame. When genuinely uncertain, answer false — a human reviews every true.
 
-Ignore statues, sculptures, mannequins, paintings, cartoons, toys, food, and costumed or non-human creatures, however anatomical or flesh-coloured they look. Judge only real human bodies. A distant or dimly lit real person still counts — look carefully at low-light and small figures before deciding. Clothing in an unusual colour (a jumpsuit, bodysuit, or tight outfit) is still clothing, not bare skin, even where it hugs the body.
+Ignore statues, sculptures, mannequins, paintings, cartoons, toys, food, and costumed or non-human creatures, however anatomical or flesh-coloured they look. Judge only real human bodies. A distant or dimly lit real person still counts — look carefully at low-light and small figures before deciding. Clothing in an unusual colour (a jumpsuit, bodysuit, or tight outfit) is still clothing, not bare skin, even where it hugs the body."""
 
-Answer each field true only if the stated evidence is actually visible:
 
-- "female_topless": a woman's BARE breast or nipple is visible, OR she is clearly nude seen from behind with bare back and buttocks. A clothed back, straps, or a bare shoulder alone is false.
-- "buttocks_or_genitals": actual BARE skin of buttocks or genitals is visible on a real person. Anyone clothed — trousers, shorts, a jumpsuit, tight outfit, underwear — is false.
-- "underwear_only": a person is in bra/underwear/lingerie with nothing over it.
-- "male_shirtless": a man's bare chest is visible.
-- "sex_act": people are actively having sex or simulating it, or lying together in evident intimate physical contact in bed.
-- "kissing": two people's LIPS ARE TOUCHING. Faces merely close, foreheads together, an embrace, or about-to-kiss is false.
-- "kissing_sexual": lips are touching AND it is sustained open-mouthed kissing with roaming hands or partial undress.
-- "sexualised_framing": the camera lingers on a real body as an object of desire — posing, stripping — not incidental (sport, fighting, washing, medical).
+def _observe_prompt() -> str:
+    """Assemble the VLM's detection prompt from fixed + admin-editable parts.
 
-Respond with JSON only:
-{"female_topless": false, "buttocks_or_genitals": false, "underwear_only": false, "male_shirtless": false, "sex_act": false, "kissing": false, "kissing_sexual": false, "sexualised_framing": false, "description": "<what you see, under 12 words>"}"""
+    Only the per-field definitions (what counts as "female_topless",
+    "sexualised_framing", etc.) come from the settings store — the
+    calibration intro above and the JSON-schema footer
+    (:func:`worker.policy.observe_json_footer`) are always the code's own
+    text, so no plugin edit can ever break the JSON contract that
+    worker.policy.classify() depends on; at worst a bad edit makes one
+    field's judgement worse, never crashes the pass.
+    """
+    overrides = get_settings().vlmGuidance
+    lines = [
+        f'- "{key}": {(overrides.get(key) or "").strip() or DEFAULT_FIELD_GUIDANCE[key]}'
+        for key in OBSERVATIONS
+    ]
+    return (
+        _OBSERVE_INTRO
+        + "\n\nAnswer each field true only if the stated evidence is actually visible:\n\n"
+        + "\n".join(lines)
+        + "\n\n"
+        + observe_json_footer()
+    )
 
 PROMPT = """You are reviewing a single frame from a film to help a parent decide what to skip.
 
@@ -147,17 +163,19 @@ class VLMEngine(EngineAdapter):
         One film's samples are dispatched concurrently over this list, so two
         machines' GPUs work the same pass at once. Precedence: an explicit
         ``hosts`` option (list, or comma-separated string) wins; otherwise, if
-        no single ``host`` was given, the ``CLEANMEDIA_VLM_HOSTS`` env var lets
-        an operator set the pool once on the worker machine so both CLI and
-        plugin-triggered jobs use it; otherwise fall back to the single
-        ``host`` (default localhost). Duplicates and blanks are dropped, order
-        kept, so a one-host pool behaves exactly like the old serial path.
+        no single ``host`` was given, the settings store's ``vlmHosts`` (set
+        from the plugin's Advanced tab) wins, then the ``CLEANMEDIA_VLM_HOSTS``
+        env var (the pre-plugin way to set the pool once on the worker
+        machine), then a single ``host`` (default localhost). Duplicates and
+        blanks are dropped, order kept, so a one-host pool behaves exactly
+        like the old serial path.
         """
         raw = options.get("hosts")
         if raw:
             candidates = raw if isinstance(raw, list) else str(raw).split(",")
-        elif options.get("host") is None and os.environ.get("CLEANMEDIA_VLM_HOSTS"):
-            candidates = os.environ["CLEANMEDIA_VLM_HOSTS"].split(",")
+        elif options.get("host") is None:
+            pool = get_settings().vlmHosts.strip() or os.environ.get("CLEANMEDIA_VLM_HOSTS", "")
+            candidates = pool.split(",") if pool else [self._host(options)]
         else:
             candidates = [self._host(options)]
         hosts: list[str] = []
@@ -368,12 +386,13 @@ class VLMEngine(EngineAdapter):
             save_shots(shots, cache)
             progress(0.05, f"detected {len(shots)} shots")
 
+        stored = get_settings()
         policy = Policy(
-            flag_male_shirtless=bool(options.get("flagMaleShirtless", False)),
-            flag_underwear=bool(options.get("flagUnderwear", True)),
-            flag_any_kissing=bool(options.get("flagAnyKissing", False)),
+            flag_male_shirtless=bool(options.get("flagMaleShirtless", stored.flagMaleShirtless)),
+            flag_underwear=bool(options.get("flagUnderwear", stored.flagUnderwear)),
+            flag_any_kissing=bool(options.get("flagAnyKissing", stored.flagAnyKissing)),
         )
-        prompt = OBSERVE_PROMPT
+        prompt = _observe_prompt()
 
         min_samples = int(options.get("minSamples", 2))
         plan = [

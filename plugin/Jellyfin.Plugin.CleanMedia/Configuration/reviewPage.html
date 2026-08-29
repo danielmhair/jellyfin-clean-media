@@ -23,6 +23,7 @@
                     <button class="on" data-t="settings">Settings</button>
                     <button data-t="queue">Queue</button>
                     <button data-t="remote">Remote</button>
+                    <button data-t="advanced">Advanced</button>
                 </div>
 
                 <!-- ===================== SETTINGS ===================== -->
@@ -47,7 +48,9 @@
                                            style="max-width:130px;" />
                                 </div>
                                 <button class="cmbtn mini" id="CmTestConn" style="margin-top:15px;">Test connection</button>
+                                <button class="cmbtn mini ghost" id="CmRestartWorker" style="margin-top:15px;" title="Safe anytime — any job in progress resumes automatically">Restart worker</button>
                                 <span id="CmTestResult" class="help" style="margin-left:.6em;"></span>
+                                <p class="help" id="CmSupervisorNote" style="margin-top:8px;"></p>
                                 <div id="CmUpdateBanner" class="help connwarn" style="margin-top:10px;display:none;">
                                     <span id="CmUpdateMsg"></span>
                                     <button class="cmbtn mini" id="CmUpdateNow" style="margin-left:8px;">Update now</button>
@@ -73,6 +76,26 @@
                                 <p class="help" style="border-top:1px solid var(--cm-line);padding-top:12px;margin-top:13px;">
                                     Jellyfin can only <b>skip</b> during playback. Muting profanity and blurring need a
                                     rendered clean copy from the worker — no client supports them live.</p>
+                            </div>
+                        </div>
+
+                        <!-- media roots -->
+                        <div class="scard" style="margin-top:16px;">
+                            <h3>Media roots</h3>
+                            <p class="cdesc">Folder(s) on the <b>worker's own machine</b> your library lives in.
+                                <b>Required</b> — until this is set, the worker only finds its own bundled test folder,
+                                not your library.</p>
+                            <div class="field">
+                                <label for="CmMediaRoots">Media root path(s)</label>
+                                <div style="display:flex;gap:8px;align-items:flex-start;">
+                                    <input class="cminput" id="CmMediaRoots" type="text"
+                                           placeholder="D:\Movies or /mnt/movies" style="flex:1;" />
+                                    <button class="cmbtn mini" id="CmBrowseRoots" type="button">Browse…</button>
+                                </div>
+                                <p class="help" id="CmMediaRootsWarn" style="display:none;color:#e3b341;">
+                                    Not set — the worker is analyzing its own bundled test folder, not your library.</p>
+                                <p class="help">Separate multiple roots with <code>;</code> on Windows or
+                                    <code>:</code> on Linux/macOS (the worker's own OS path separator).</p>
                             </div>
                         </div>
 
@@ -106,8 +129,8 @@
                         </div>
 
                         <div class="savebar">
-                            <span class="dot-live" id="CmSaveDot" style="background:var(--cm-muted);box-shadow:none;"></span>
-                            <span class="help" style="margin:0;" id="CmSaveState">All changes saved</span>
+                            <span class="dot-live cmSaveDotEl" id="CmSaveDot" style="background:var(--cm-muted);box-shadow:none;"></span>
+                            <span class="help cmSaveStateEl" style="margin:0;" id="CmSaveState">All changes saved</span>
                             <div class="grow"></div>
                             <button class="cmbtn mini ghost" id="CmDiscard">Discard</button>
                             <button class="cmbtn primary" id="CmSaveSettings">Save settings</button>
@@ -173,6 +196,90 @@
                         unapproved finding for review, so you can mark a bad word or scene from your phone.</div>
                     <h2>Now playing <span class="count" id="CmCPlaying">0</span></h2>
                     <div class="rows" id="CmSessions"></div>
+                </div>
+
+                <!-- ===================== ADVANCED ===================== -->
+                <div id="tab-advanced" class="tabpanel" hidden>
+                    <div class="setwrap">
+                        <div class="scard">
+                            <h3>VLM detection guidance</h3>
+                            <p class="cdesc">What the vision model is told counts as each category. The intro
+                                calibration and the JSON it must answer in are fixed in code below this and can't be
+                                edited — your wording only shapes how each field is judged, so nothing here can break
+                                analysis, only make a field stricter or looser.</p>
+                            <div id="CmGuidanceFields"></div>
+                            <button class="cmbtn mini ghost" id="CmResetGuidance" style="margin-top:6px;">Reset all to defaults</button>
+                        </div>
+
+                        <div class="scard" style="margin-top:16px;">
+                            <h3>VLM hosts pool</h3>
+                            <p class="cdesc">Ollama endpoint(s) to fan one film's visual pass across — e.g. a second
+                                machine's GPU. Comma-separated.</p>
+                            <div class="field">
+                                <input class="cminput" id="CmVlmHosts" type="text" placeholder="http://localhost:11434" />
+                            </div>
+                        </div>
+
+                        <div class="scard" style="margin-top:16px;">
+                            <h3>Detection policy</h3>
+                            <div class="setrow first">
+                                <div class="switch" id="CmFlagMaleShirtless"><div class="knob"></div></div>
+                                <div class="txt"><div class="lab">Flag every bare male chest</div>
+                                    <p class="help">Off by default — only flags when the camera frames it sexually.</p></div>
+                            </div>
+                            <div class="setrow">
+                                <div class="switch" id="CmFlagUnderwear"><div class="knob"></div></div>
+                                <div class="txt"><div class="lab">Flag underwear/lingerie</div>
+                                    <p class="help">On by default.</p></div>
+                            </div>
+                            <div class="setrow">
+                                <div class="switch" id="CmFlagAnyKissing"><div class="knob"></div></div>
+                                <div class="txt"><div class="lab">Flag all kissing, not just the sexual kind</div>
+                                    <p class="help">Off by default — an ordinary romantic kiss stays unflagged.</p></div>
+                            </div>
+                        </div>
+
+                        <div class="scard" style="margin-top:16px;">
+                            <h3>Profanity</h3>
+                            <div class="setrow first">
+                                <div class="switch" id="CmProfanityMild"><div class="knob"></div></div>
+                                <div class="txt"><div class="lab">Include mild words</div>
+                                    <p class="help">Kid-level insults and toilet words (stupid, idiot, poop, …) — real
+                                        swearing is always flagged and needs no opt-in.</p></div>
+                            </div>
+                            <div class="setrow">
+                                <div class="switch" id="CmProfanityBlasphemy"><div class="knob"></div></div>
+                                <div class="txt"><div class="lab">Include blasphemy</div>
+                                    <p class="help">Taking the Lord's name in vain (god, jesus, christ, …).</p></div>
+                            </div>
+                            <div class="field" style="margin-top:14px;">
+                                <label for="CmProfanityExtra">Extra words to always flag</label>
+                                <input class="cminput" id="CmProfanityExtra" type="text" placeholder="word1, word2, …" />
+                                <p class="help">Comma-separated. Added on top of the built-in list, never replaces it.</p>
+                            </div>
+                        </div>
+
+                        <div class="scard" style="margin-top:16px;">
+                            <h3>Recovery helper</h3>
+                            <p class="cdesc">A small always-on helper alongside the worker that can start or restart
+                                it from this plugin even when the worker itself is unresponsive or fully down.</p>
+                            <p class="help" id="CmSupervisorNoteAdv"></p>
+                            <div class="setrow first">
+                                <div class="switch" id="CmSupervisorEnabled"><div class="knob"></div></div>
+                                <div class="txt"><div class="lab">Allow the recovery helper to start/restart the worker</div>
+                                    <p class="help">Turning this off only stops it from acting — it keeps listening,
+                                        so this can always be turned back on from here later.</p></div>
+                            </div>
+                        </div>
+
+                        <div class="savebar">
+                            <span class="dot-live cmSaveDotEl" id="CmSaveDotAdv" style="background:var(--cm-muted);box-shadow:none;"></span>
+                            <span class="help cmSaveStateEl" style="margin:0;" id="CmSaveStateAdv">All changes saved</span>
+                            <div class="grow"></div>
+                            <button class="cmbtn mini ghost" id="CmDiscardAdv">Discard</button>
+                            <button class="cmbtn primary" id="CmSaveSettingsAdv">Save settings</button>
+                        </div>
+                    </div>
                 </div>
 
             </div>
@@ -353,6 +460,7 @@
 .cmRoot .field label{display:block;font-size:12px;color:var(--cm-ink-2);font-weight:600;margin-bottom:6px;}
 .cmRoot .cminput{width:100%;background:var(--cm-panel-2);border:1px solid var(--cm-line);border-radius:9px;
   padding:10px 12px;color:var(--cm-ink);font-size:13.5px;}
+.cmRoot textarea.cminput{resize:vertical;font-family:inherit;line-height:1.4;}
 .cmRoot .help{font-size:12px;color:var(--cm-muted);margin:6px 0 0;}
 .cmRoot .switch{position:relative;width:42px;height:24px;border-radius:999px;background:#2c3138;
   border:1px solid var(--cm-line-2);flex:0 0 auto;cursor:pointer;transition:.15s background;}
@@ -452,8 +560,23 @@
         addView: null,              // null = collections; else a collection {id,name}
         collections: [], films: [], searchTerm: '', dirty: false,
         sessions: [], remotePoll: null, padMs: 1500,  // Remote tab: what's playing
-        updating: false              // true while an "Update now" apply is in flight
+        updating: false,             // true while an "Update now" apply is in flight
+        guidanceDefault: {},         // observation key -> default VLM guidance text
+        restarting: false            // true while a Restart-worker is in flight
     };
+
+    // Observation keys the VLM answers, in prompt order, with a human label
+    // for the Advanced tab (see worker/policy.py's OBSERVATIONS/DEFAULT_FIELD_GUIDANCE).
+    var GUIDANCE_FIELDS = [
+        { key: 'female_topless', label: 'Female topless' },
+        { key: 'buttocks_or_genitals', label: 'Buttocks or genitals' },
+        { key: 'underwear_only', label: 'Underwear only' },
+        { key: 'male_shirtless', label: 'Male shirtless' },
+        { key: 'sex_act', label: 'Sex act' },
+        { key: 'kissing', label: 'Kissing' },
+        { key: 'kissing_sexual', label: 'Sexual kissing' },
+        { key: 'sexualised_framing', label: 'Sexualised framing' }
+    ];
 
     // ---- generic helpers -------------------------------------------------
     function api(method, path, query, body) {
@@ -1071,22 +1194,84 @@
         ov.querySelector('.dx').onclick = close;
         ov.querySelector('.dcancel').onclick = close;
 
+        // A rendered clean copy is an alternate *version* of the movie, not a
+        // library item of its own, so it never appears in the film list. Ask
+        // for the item's versions and let the administrator pick one, which is
+        // what makes the clean copy reachable from here at all.
+        var versions = [];    // [{ path, name, isPrimary }]
+        var chosen = null;    // the version path this dialog is acting on
+        var plan = null;      // where a render would write (worker's answer)
+        var renderMode = 'replace';
+
         // Review… opens the worker's per-film findings editor for this film.
         // The worker needs the file path, so resolve it server-side by itemId.
         var reviewBtn = ov.querySelector('.dreview');
         reviewBtn.onclick = function () {
             reviewBtn.disabled = true;
-            api('GET', 'ReviewUrl', { itemId: itemId }).then(function (res) {
+            api('GET', 'ReviewUrl', { itemId: itemId, version: chosen || '' }).then(function (res) {
                 if (res && res.url) { window.open(res.url, '_blank'); close(); }
                 else { ov.querySelector('.dmsg').style.color = '#e3b341'; ov.querySelector('.dmsg').textContent = 'Set the worker URL in Settings to review.'; reviewBtn.disabled = false; }
             }).catch(function () { ov.querySelector('.dmsg').textContent = 'Couldn’t open review.'; reviewBtn.disabled = false; });
         };
 
-        api('POST', 'Status', {}, { itemIds: [itemId] }).then(function (res) {
-            var st = (res && res.items && res.items[0]) || null;
-            if (res && res.unreachable) { st = null; }
-            renderBody(st);
-        }).catch(function () { renderBody(null); });
+        api('GET', 'Versions', { itemId: itemId }).then(function (res) {
+            versions = (res && res.versions) || [];
+            var primary = versions.filter(function (v) { return v.isPrimary; })[0] || versions[0];
+            chosen = primary ? primary.path : null;
+            loadFor(chosen);
+        }).catch(function () { loadFor(null); });
+
+        // Everything the body shows belongs to one version, so status and the
+        // render plan are re-read together whenever the version changes.
+        function loadFor(path) {
+            ov.querySelector('.dbody').innerHTML =
+                '<div class="dloading">Checking what’s already done…</div>';
+            var body = { itemIds: [itemId] };
+            if (path) { body.paths = [path]; }
+            Promise.all([
+                api('POST', 'Status', {}, body).catch(function () { return null; }),
+                api('GET', 'RenderPlan', { itemId: itemId, path: path || '' })
+                    .catch(function () { return null; })
+            ]).then(function (r) {
+                var res = r[0];
+                var st = (res && res.items && res.items[0]) || null;
+                if (res && res.unreachable) { st = null; }
+                plan = (r[1] && !r[1].unreachable && r[1].replacePath) ? r[1] : null;
+                renderMode = 'replace';
+                renderBody(st);
+            });
+        }
+
+        // Which file of this movie the dialog is aimed at. Only drawn when
+        // there is a choice to make — most films have just the one file.
+        function versionPicker() {
+            if (versions.length < 2) { return ''; }
+            return '<p class="dhint">Which version of this film?</p><div class="modeseg" style="margin-bottom:6px">'
+                + versions.map(function (v, i) {
+                    return '<button data-ver="' + i + '"' + (v.path === chosen ? ' class="on"' : '')
+                        + '>' + esc(v.name) + '</button>';
+                }).join('') + '</div>';
+        }
+
+        // Where the clean copy will be written. A copy that already exists is
+        // a file someone may be part-way through watching, so overwriting it
+        // is a decision to make here, not a surprise afterwards.
+        function renderTarget() {
+            if (!plan) { return ''; }
+            var from = plan.sourceIsCleanCopy
+                ? '<p class="dhint">Renders from ' + esc(plan.sourceName || 'the original')
+                    + ' — a clean copy is rebuilt from the film’s approved findings, never from itself.</p>'
+                : '';
+            if (!plan.replaceExists) {
+                return from + '<p class="dhint">The clean copy will be added as the “'
+                    + esc(plan.newLabel) + '” version.</p>';
+            }
+            return from + '<p class="dhint">A “' + esc(plan.replaceLabel)
+                + '” copy already exists.</p><div class="modeseg">'
+                + '<button data-mode="replace" class="on">Overwrite “' + esc(plan.replaceLabel) + '”</button>'
+                + '<button data-mode="new">Keep it, add “' + esc(plan.newLabel) + '”</button>'
+                + '</div>';
+        }
 
         function renderBody(st) {
             var body = ov.querySelector('.dbody'), go = ov.querySelector('.dgo'), msg = ov.querySelector('.dmsg');
@@ -1108,14 +1293,29 @@
             } else {
                 summary = '<p class="dhint" style="color:#e3b341">Couldn’t reach the worker to check status; you can still queue passes.</p>';
             }
-            body.innerHTML = summary + cards.map(function (c, i) {
+            body.innerHTML = versionPicker() + summary + cards.map(function (c, i) {
                 return '<div class="pcard' + (c.sel ? ' sel' : '') + (c.disabled ? ' disabled' : '') + '" data-i="' + i + '">'
                     + '<div class="pglyph" style="background:' + hex(c.def.color, .16) + '">' + c.def.glyph + '</div>'
                     + '<div class="pinfo"><div class="pname">' + esc(c.def.label) + '</div>'
                     + '<div class="pstate"><span class="sbadge ' + c.ps.kind + '">' + c.ps.badge + '</span>'
                     + (c.note ? '<span>' + esc(c.note) + '</span>' : '') + '</div></div>'
                     + '<div class="pcheck">' + (c.sel ? '✓' : '') + '</div></div>';
-            }).join('');
+            }).join('') + renderTarget();
+
+            body.querySelectorAll('[data-ver]').forEach(function (b) {
+                b.onclick = function () {
+                    var v = versions[+b.getAttribute('data-ver')];
+                    if (v && v.path !== chosen) { chosen = v.path; loadFor(chosen); }
+                };
+            });
+            body.querySelectorAll('[data-mode]').forEach(function (b) {
+                b.onclick = function () {
+                    renderMode = b.getAttribute('data-mode');
+                    body.querySelectorAll('[data-mode]').forEach(function (x) {
+                        x.classList.toggle('on', x === b);
+                    });
+                };
+            });
 
             function refreshGo() {
                 var n = cards.filter(function (c) { return c.sel; }).length;
@@ -1140,11 +1340,11 @@
                 go.disabled = true; go.textContent = 'Adding…';
                 var calls = picked.map(function (c) {
                     if (c.engine === 'render') {
-                        return api('POST', 'Render', {}, { itemId: itemId }).then(function (r) {
+                        return api('POST', 'Render', {}, { itemId: itemId, path: chosen, mode: renderMode }).then(function (r) {
                             return { tag: c.def.tag, ok: !!(r && r.jobId), err: r && (r.error || (r.unreachable && 'worker unreachable')) };
                         }).catch(function (e) { return { tag: c.def.tag, ok: false, err: String(e) }; });
                     }
-                    return api('POST', 'Analyze', {}, { itemIds: [itemId], engine: c.engine }).then(function (r) {
+                    return api('POST', 'Analyze', {}, { itemIds: [itemId], engine: c.engine, path: chosen }).then(function (r) {
                         var q = (r.queued || []).filter(function (x) { return x.jobId; });
                         return { tag: c.def.tag, ok: q.length > 0, err: q.length ? null : 'not found under media roots' };
                     }).catch(function (e) { return { tag: c.def.tag, ok: false, err: String(e) }; });
@@ -1253,6 +1453,68 @@
         return { enabled: enabled, days: days, tz: browserTz() };
     }
 
+    // ---- worker-owned settings (media roots, VLM guidance/hosts, policy) --
+    function buildGuidanceFields() {
+        var host = page.querySelector('#CmGuidanceFields');
+        host.innerHTML = GUIDANCE_FIELDS.map(function (f) {
+            return '<div class="field" style="margin-top:10px;">'
+                + '<label for="CmGuidance_' + f.key + '">' + esc(f.label) + '</label>'
+                + '<textarea class="cminput" id="CmGuidance_' + f.key + '" data-key="' + f.key + '" rows="2"></textarea>'
+                + '</div>';
+        }).join('');
+        host.querySelectorAll('textarea').forEach(function (t) { t.addEventListener('input', markDirty); });
+    }
+
+    function fillWorkerSettings(view) {
+        var s = (view && view.settings) || {};
+        state.guidanceDefault = (view && view.vlmGuidanceDefault) || {};
+        var overrides = s.vlmGuidance || {};
+        GUIDANCE_FIELDS.forEach(function (f) {
+            var el = page.querySelector('#CmGuidance_' + f.key);
+            if (el) { el.value = overrides[f.key] || state.guidanceDefault[f.key] || ''; }
+        });
+        page.querySelector('#CmVlmHosts').value = s.vlmHosts || '';
+        page.querySelector('#CmFlagMaleShirtless').classList.toggle('on', !!s.flagMaleShirtless);
+        page.querySelector('#CmFlagUnderwear').classList.toggle('on', s.flagUnderwear !== false);
+        page.querySelector('#CmFlagAnyKissing').classList.toggle('on', !!s.flagAnyKissing);
+        page.querySelector('#CmProfanityMild').classList.toggle('on', !!s.profanityIncludeMild);
+        page.querySelector('#CmProfanityBlasphemy').classList.toggle('on', !!s.profanityIncludeBlasphemy);
+        page.querySelector('#CmProfanityExtra').value = s.profanityExtraWords || '';
+        page.querySelector('#CmSupervisorEnabled').classList.toggle('on', s.supervisorEnabled !== false);
+        page.querySelector('#CmMediaRoots').value = s.mediaRoots || '';
+        updateMediaRootsWarning();
+    }
+
+    function readWorkerSettings() {
+        var guidance = {};
+        GUIDANCE_FIELDS.forEach(function (f) {
+            var el = page.querySelector('#CmGuidance_' + f.key);
+            var val = el ? el.value.trim() : '';
+            // Untouched-from-default is stored as absent, so a future code
+            // update to the default text keeps reaching admins who never
+            // customized this field.
+            if (val && val !== (state.guidanceDefault[f.key] || '').trim()) { guidance[f.key] = val; }
+        });
+        return {
+            mediaRoots: page.querySelector('#CmMediaRoots').value.trim(),
+            vlmHosts: page.querySelector('#CmVlmHosts').value.trim(),
+            vlmGuidance: guidance,
+            flagMaleShirtless: page.querySelector('#CmFlagMaleShirtless').classList.contains('on'),
+            flagUnderwear: page.querySelector('#CmFlagUnderwear').classList.contains('on'),
+            flagAnyKissing: page.querySelector('#CmFlagAnyKissing').classList.contains('on'),
+            profanityIncludeMild: page.querySelector('#CmProfanityMild').classList.contains('on'),
+            profanityIncludeBlasphemy: page.querySelector('#CmProfanityBlasphemy').classList.contains('on'),
+            profanityExtraWords: page.querySelector('#CmProfanityExtra').value.trim(),
+            supervisorEnabled: page.querySelector('#CmSupervisorEnabled').classList.contains('on')
+        };
+    }
+
+    function updateMediaRootsWarning() {
+        var input = page.querySelector('#CmMediaRoots');
+        var warn = page.querySelector('#CmMediaRootsWarn');
+        if (warn) { warn.style.display = input.value.trim() ? 'none' : ''; }
+    }
+
     function loadSettings() {
         return ApiClient.getPluginConfiguration(pluginId).then(function (config) {
             page.querySelector('#CmWorkerUrl').value = config.WorkerUrl || '';
@@ -1264,12 +1526,16 @@
                 if (view && view.unreachable) { setMode(true); return; }
                 fillSchedule(view);
             }).catch(function () { /* leave defaults */ });
+        }).then(function () {
+            return api('GET', 'Settings', {}).then(function (view) {
+                if (view && view.unreachable) { return; }
+                fillWorkerSettings(view);
+            }).catch(function () { /* leave defaults */ });
         }).then(clearDirty);
     }
 
     function saveSettings() {
-        var out = page.querySelector('#CmSaveState');
-        out.textContent = 'Saving…';
+        page.querySelectorAll('.cmSaveStateEl').forEach(function (el) { el.textContent = 'Saving…'; });
         ApiClient.getPluginConfiguration(pluginId).then(function (config) {
             config.WorkerUrl = page.querySelector('#CmWorkerUrl').value;
             config.TimeoutSeconds = parseInt(page.querySelector('#CmTimeout').value, 10) || 15;
@@ -1279,9 +1545,13 @@
         }).then(function () {
             return api('POST', 'Schedule', {}, readSchedule());
         }).then(function () {
+            return api('POST', 'Settings', {}, readWorkerSettings());
+        }).then(function () {
             clearDirty();
             testConnection(true);
-        }).catch(function (err) { out.textContent = 'Could not save: ' + err; });
+        }).catch(function (err) {
+            page.querySelectorAll('.cmSaveStateEl').forEach(function (el) { el.textContent = 'Could not save: ' + err; });
+        });
     }
 
     function testConnection(silent) {
@@ -1396,6 +1666,149 @@
         }
     }
 
+    // ---- recovery helper (worker/supervisor.py) ---------------------------
+    // Polled independently of testConnection(): the whole point is staying
+    // reachable when the worker itself is not, so this must never depend on
+    // the worker being up.
+    function refreshSupervisorNote() {
+        api('GET', 'Supervisor').then(function (s) {
+            var note = (s && s.unreachable)
+                ? 'Recovery helper not reachable — re-run install-service on the worker machine to enable Restart.'
+                : (s.running
+                    ? (s.enabled ? 'Recovery helper: worker running.' : 'Recovery helper: worker running (helper disabled).')
+                    : (s.enabled ? 'Recovery helper: worker is DOWN — Restart will start it.' : 'Recovery helper: worker is DOWN and the helper is disabled.'));
+            var restartBtn = page.querySelector('#CmRestartWorker');
+            if (!state.restarting) { restartBtn.textContent = (s && !s.unreachable && !s.running) ? 'Start worker' : 'Restart worker'; }
+            restartBtn.disabled = !!(s && !s.unreachable && s.enabled === false);
+            page.querySelector('#CmSupervisorNote').textContent = note;
+            var adv = page.querySelector('#CmSupervisorNoteAdv');
+            if (adv) { adv.textContent = note; }
+        }).catch(function () {
+            page.querySelector('#CmSupervisorNote').textContent = 'Recovery helper not reachable.';
+        });
+    }
+
+    function restartWorker() {
+        var btn = page.querySelector('#CmRestartWorker');
+        var starting = btn.textContent === 'Start worker';
+        state.restarting = true;
+        btn.disabled = true;
+        btn.textContent = starting ? 'Starting…' : 'Restarting…';
+        var action = starting ? 'Supervisor/Start' : 'Supervisor/Restart';
+        api('POST', action, {}, {}).then(function (res) {
+            if (res && res.unreachable) {
+                giveUpRestart('Recovery helper not reachable — re-run install-service to enable this.');
+                return;
+            }
+            if (res && res.error) {
+                giveUpRestart(res.error);
+                return;
+            }
+            pollAfterRestart();
+        }).catch(function (err) { giveUpRestart(String(err)); });
+
+        function giveUpRestart(text) {
+            state.restarting = false;
+            btn.disabled = false;
+            page.querySelector('#CmSupervisorNote').textContent = text;
+        }
+    }
+
+    function pollAfterRestart() {
+        var tries = 0;
+        var iv = setInterval(function () {
+            tries++;
+            api('GET', 'Supervisor').then(function (s) {
+                if (s && !s.unreachable && s.running) {
+                    clearInterval(iv);
+                    state.restarting = false;
+                    page.querySelector('#CmRestartWorker').disabled = false;
+                    page.querySelector('#CmRestartWorker').textContent = 'Restart worker';
+                    testConnection(true);
+                    refreshSupervisorNote();
+                    return;
+                }
+                if (tries > 60) {
+                    clearInterval(iv);
+                    state.restarting = false;
+                    page.querySelector('#CmRestartWorker').disabled = false;
+                    page.querySelector('#CmRestartWorker').textContent = 'Restart worker';
+                    page.querySelector('#CmSupervisorNote').textContent = 'Worker did not come back within 2 minutes — check its log by hand.';
+                }
+            }).catch(function () { /* still restarting */ });
+        }, 2000);
+    }
+
+    // ---- media roots folder picker -----------------------------------------
+    // Browses the WORKER's filesystem over the API, not the browser's local
+    // one — the browser is often on a different machine from the worker
+    // entirely, so a native file dialog can't work here (same reason
+    // Sonarr/Radarr/Plex do it this way).
+    function openBrowseDialog() {
+        var ov = document.createElement('div');
+        ov.className = 'cmOv';
+        ov.innerHTML = '<div class="cmDlg cmRoot" role="dialog" aria-modal="true" aria-label="Choose a media folder">'
+            + '<div class="dhead"><div style="min-width:0"><div class="dtitle">Choose a media folder</div>'
+            + '<div class="dsub" id="CmBrowsePath">On the worker\'s machine</div></div>'
+            + '<button class="dx" title="Close" aria-label="Close">×</button></div>'
+            + '<div class="dbody"><div class="dloading">Loading…</div></div>'
+            + '<div class="dfoot"><span class="dmsg"></span>'
+            + '<button class="cmbtn ghost dcancel">Cancel</button>'
+            + '<button class="cmbtn primary dgo" disabled>Use this folder</button></div></div>';
+        document.body.appendChild(ov);
+        function close() { if (ov.parentNode) { ov.parentNode.removeChild(ov); } document.removeEventListener('keydown', onKey); }
+        function onKey(e) { if (e.key === 'Escape') { close(); } }
+        document.addEventListener('keydown', onKey);
+        ov.onclick = function (e) { if (e.target === ov) { close(); } };
+        ov.querySelector('.dx').onclick = close;
+        ov.querySelector('.dcancel').onclick = close;
+
+        var current = null; // the path a folder row would select
+        var goBtn = ov.querySelector('.dgo');
+        goBtn.onclick = function () {
+            if (current) {
+                page.querySelector('#CmMediaRoots').value = current;
+                updateMediaRootsWarning();
+                markDirty();
+            }
+            close();
+        };
+
+        function load(path) {
+            ov.querySelector('.dbody').innerHTML = '<div class="dloading">Loading…</div>';
+            goBtn.disabled = true;
+            api('GET', 'Browse', { path: path || '' }).then(function (res) {
+                if (res && res.unreachable) {
+                    ov.querySelector('.dbody').innerHTML = '<div class="dloading">Worker unreachable — set the Worker URL first.</div>';
+                    return;
+                }
+                if (res && res.detail) {
+                    ov.querySelector('.dbody').innerHTML = '<div class="dloading">' + esc(res.detail) + '</div>';
+                    return;
+                }
+                current = res.path || null;
+                goBtn.disabled = !current;
+                ov.querySelector('#CmBrowsePath').textContent = current || "On the worker's machine";
+                var rows = '';
+                if (res.parent != null) {
+                    rows += '<div class="pcard" data-path="' + esc(res.parent) + '"><div class="pglyph">⬆</div>'
+                        + '<div class="pinfo"><div class="pname">.. (up)</div></div></div>';
+                }
+                (res.dirs || []).forEach(function (d) {
+                    rows += '<div class="pcard" data-path="' + esc(d.path) + '"><div class="pglyph">📁</div>'
+                        + '<div class="pinfo"><div class="pname">' + esc(d.name) + '</div></div></div>';
+                });
+                ov.querySelector('.dbody').innerHTML = rows || '<div class="dloading">No subfolders here.</div>';
+                ov.querySelectorAll('.pcard').forEach(function (row) {
+                    row.onclick = function () { load(row.getAttribute('data-path')); };
+                });
+            }).catch(function () {
+                ov.querySelector('.dbody').innerHTML = '<div class="dloading">Could not list folders.</div>';
+            });
+        }
+        load('');
+    }
+
     function setLive(ok, text, gpu) {
         page.querySelector('#CmLiveDot').className = 'dot-live' + (ok ? '' : ' off');
         page.querySelector('#CmLiveText').textContent = text;
@@ -1405,16 +1818,19 @@
         } else { gpuStat.style.display = 'none'; }
     }
 
-    // ---- dirty tracking --------------------------------------------------
+    // ---- dirty tracking ----------------------------------------------------
+    // Two save bars share this state (Settings tab, Advanced tab) since they
+    // save together through the same saveSettings() call — both indicators
+    // are kept in sync via a shared class rather than one hardcoded id.
     function markDirty() {
         state.dirty = true;
-        page.querySelector('#CmSaveState').textContent = 'Unsaved changes';
-        page.querySelector('#CmSaveDot').style.background = 'var(--cm-accent)';
+        page.querySelectorAll('.cmSaveStateEl').forEach(function (el) { el.textContent = 'Unsaved changes'; });
+        page.querySelectorAll('.cmSaveDotEl').forEach(function (el) { el.style.background = 'var(--cm-accent)'; });
     }
     function clearDirty() {
         state.dirty = false;
-        page.querySelector('#CmSaveState').textContent = 'All changes saved';
-        page.querySelector('#CmSaveDot').style.background = 'var(--cm-muted)';
+        page.querySelectorAll('.cmSaveStateEl').forEach(function (el) { el.textContent = 'All changes saved'; });
+        page.querySelectorAll('.cmSaveDotEl').forEach(function (el) { el.style.background = 'var(--cm-muted)'; });
     }
 
     // ======================================================================
@@ -1529,13 +1945,14 @@
         b.onclick = function () {
             var t = b.dataset.t;
             page.querySelectorAll('#CmTabs button').forEach(function (x) { x.classList.toggle('on', x === b); });
-            ['settings', 'queue', 'remote'].forEach(function (name) {
+            ['settings', 'queue', 'remote', 'advanced'].forEach(function (name) {
                 page.querySelector('#tab-' + name).hidden = (name !== t);
             });
             stopPoll();
             stopRemotePoll();
             if (t === 'queue') { loadJobs(); }
             else if (t === 'remote') { startRemote(); }
+            else if (t === 'advanced') { refreshSupervisorNote(); }
         };
     });
 
@@ -1544,6 +1961,8 @@
     page.querySelector('#CmApprovedOnly').onclick = function () { this.classList.toggle('on'); markDirty(); };
     page.querySelector('#CmWorkerUrl').addEventListener('input', markDirty);
     page.querySelector('#CmTimeout').addEventListener('input', markDirty);
+    page.querySelector('#CmMediaRoots').addEventListener('input', function () { updateMediaRootsWarning(); markDirty(); });
+    page.querySelector('#CmBrowseRoots').onclick = openBrowseDialog;
     page.querySelectorAll('#CmModeSeg button').forEach(function (b) {
         b.onclick = function () { setMode(b.dataset.m === 'sched'); markDirty(); };
     });
@@ -1551,6 +1970,34 @@
     page.querySelector('#CmDiscard').onclick = function () { loadSettings(); };
     page.querySelector('#CmTestConn').onclick = function () { testConnection(false); };
     page.querySelector('#CmUpdateNow').onclick = applyUpdate;
+    page.querySelector('#CmRestartWorker').onclick = restartWorker;
+
+    // advanced tab toggles + inputs
+    page.querySelector('#CmVlmHosts').addEventListener('input', markDirty);
+    page.querySelector('#CmFlagMaleShirtless').onclick = function () { this.classList.toggle('on'); markDirty(); };
+    page.querySelector('#CmFlagUnderwear').onclick = function () { this.classList.toggle('on'); markDirty(); };
+    page.querySelector('#CmFlagAnyKissing').onclick = function () { this.classList.toggle('on'); markDirty(); };
+    page.querySelector('#CmProfanityMild').onclick = function () { this.classList.toggle('on'); markDirty(); };
+    page.querySelector('#CmProfanityBlasphemy').onclick = function () { this.classList.toggle('on'); markDirty(); };
+    page.querySelector('#CmProfanityExtra').addEventListener('input', markDirty);
+    page.querySelector('#CmSupervisorEnabled').onclick = function () {
+        var willEnable = !this.classList.contains('on');
+        this.classList.toggle('on');
+        markDirty();
+        // Also flip it live via the helper's own toggle, not just on the next
+        // Save — disabling recovery should take effect immediately, the same
+        // way every other worker-owned setting here does.
+        api('POST', willEnable ? 'Supervisor/Enable' : 'Supervisor/Disable', {}, {}).then(refreshSupervisorNote);
+    };
+    page.querySelector('#CmResetGuidance').onclick = function () {
+        GUIDANCE_FIELDS.forEach(function (f) {
+            var el = page.querySelector('#CmGuidance_' + f.key);
+            if (el) { el.value = state.guidanceDefault[f.key] || ''; }
+        });
+        markDirty();
+    };
+    page.querySelector('#CmSaveSettingsAdv').onclick = saveSettings;
+    page.querySelector('#CmDiscardAdv').onclick = function () { loadSettings(); };
 
     // queue controls
     page.querySelector('#CmShowAll').onclick = function () { state.hidden = {}; renderQueue(); };
@@ -1586,10 +2033,12 @@
         loadCollections().catch(function () { /* libraries optional */ });
         loadSettings();
         testConnection(true);
+        refreshSupervisorNote();
         Dashboard.hideLoadingMsg();
     }
 
     buildWeek();
+    buildGuidanceFields();
     page.addEventListener('pageshow', refresh);
     page.addEventListener('pagehide', function () { stopPoll(); stopRemotePoll(); });
     refresh();

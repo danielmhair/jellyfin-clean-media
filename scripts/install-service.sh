@@ -15,6 +15,13 @@
 # shares — the same tradeoff install-service.ps1's -AtLogon mode makes on
 # Windows, for the same reason.
 #
+# This also registers a second, always-on LaunchAgent — worker/supervisor.py,
+# on port+1 — so the Jellyfin plugin's "Restart worker" button works even
+# when the worker itself is unresponsive or fully down. It stays running when
+# you --uninstall the worker only via --uninstall itself (both are removed
+# together); a plugin-side "disable" only stops it from *acting*, never stops
+# it listening, so it can always be turned back on later.
+#
 # --restart re-*applies* the config, it doesn't just kick the existing
 # process: pass --media-roots/--vlm-hosts alongside it to change them and
 # restart in one step (matches install-service.ps1's -MediaRoots ... -Restart).
@@ -37,6 +44,16 @@ DOMAIN="gui/$(id -u)"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 STATE_DIR="$HOME/Library/Application Support/CleanMedia"
 LOG="$STATE_DIR/worker.log"
+
+# The always-on recovery helper (worker/supervisor.py) — a second, separate
+# LaunchAgent so it keeps running (and stays reachable from the Jellyfin
+# plugin's "Restart worker" button) even when the worker LaunchAgent above is
+# fully stopped or crashing. No elevation wrinkle on macOS the way there is
+# on Windows — an ordinary LaunchAgent in your own session can bootstrap/
+# kickstart/bootout a sibling LaunchAgent just fine.
+SUPERVISOR_LABEL="com.cleanmedia.supervisor"
+SUPERVISOR_PLIST="$HOME/Library/LaunchAgents/$SUPERVISOR_LABEL.plist"
+SUPERVISOR_LOG="$STATE_DIR/supervisor.log"
 
 PORT=8765
 MEDIA_ROOTS="$REPO/movies"
@@ -66,7 +83,9 @@ mkdir -p "$STATE_DIR"
 if [ "$DO_UNINSTALL" = 1 ]; then
   launchctl bootout "$DOMAIN" "$PLIST" 2>/dev/null || true
   rm -f "$PLIST"
-  echo "Removed $LABEL. The worker will not start at login. Logs are left at $LOG."
+  launchctl bootout "$DOMAIN" "$SUPERVISOR_PLIST" 2>/dev/null || true
+  rm -f "$SUPERVISOR_PLIST"
+  echo "Removed $LABEL and $SUPERVISOR_LABEL. Neither will start at login. Logs are left at $LOG."
   exit 0
 fi
 
@@ -134,6 +153,17 @@ if [ -n "$VLM_HOSTS" ]; then
   VLM_ENV_XML="        <key>CLEANMEDIA_VLM_HOSTS</key><string>$VLM_HOSTS</string>"
 fi
 
+# launchd does NOT hand a LaunchAgent your shell's PATH -- without this it
+# falls back to its own minimal default (/usr/bin:/bin:/usr/sbin:/sbin),
+# which doesn't include Homebrew's bin dir. Every engine shells out to bare
+# "ffmpeg"/"ffprobe" (resolved via PATH), so a worker started this way fails
+# every single job with "No such file or directory: 'ffprobe'" even though
+# `ffmpeg -version` works fine in your own Terminal. Bake in the PATH this
+# script itself sees right now (which already has Homebrew on it, however it
+# got there) plus the two Homebrew prefixes explicitly, in case this ever
+# runs from an environment where they haven't been added yet.
+WORKER_PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"
+
 # Generated, not checked in: every value below is machine-specific.
 cat > "$PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -153,6 +183,7 @@ cat > "$PLIST" <<PLIST
     <key>WorkingDirectory</key><string>$REPO</string>
     <key>EnvironmentVariables</key>
     <dict>
+        <key>PATH</key><string>$WORKER_PATH</string>
         <key>CLEANMEDIA_MEDIA_ROOTS</key><string>$MEDIA_ROOTS</string>
 $VLM_ENV_XML
     </dict>
@@ -175,6 +206,45 @@ else
 fi
 echo "  plist  $PLIST"
 echo "  log    $LOG"
+
+# --- (re)generate the supervisor plist and (re)start it too -------------------
+# Own port = worker port + 1, by convention the plugin also uses to find it
+# (see WorkerClient.cs) -- no separate setting needed for this.
+cat > "$SUPERVISOR_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>$SUPERVISOR_LABEL</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$uv</string>
+        <string>run</string>
+        <string>python</string>
+        <string>-m</string>
+        <string>worker.supervisor</string>
+        <string>--port</string><string>$((PORT + 1))</string>
+        <string>--worker-port</string><string>$PORT</string>
+        <string>--label</string><string>$LABEL</string>
+    </array>
+    <key>WorkingDirectory</key><string>$REPO</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key><string>$WORKER_PATH</string>
+    </dict>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>StandardOutPath</key><string>$SUPERVISOR_LOG</string>
+    <key>StandardErrorPath</key><string>$SUPERVISOR_LOG</string>
+</dict>
+</plist>
+PLIST
+
+launchctl bootout "$DOMAIN" "$SUPERVISOR_PLIST" 2>/dev/null || true
+launchctl bootstrap "$DOMAIN" "$SUPERVISOR_PLIST"
+launchctl enable "$DOMAIN/$SUPERVISOR_LABEL"
+launchctl kickstart -k "$DOMAIN/$SUPERVISOR_LABEL"
+echo "  recovery helper running on port $((PORT + 1)) ($SUPERVISOR_LOG)"
 
 # --- verify the invariant, not the exit code ----------------------------------
 echo "Waiting for the worker to answer on port $PORT (first start loads models, ~1-2 min)..."

@@ -33,7 +33,7 @@ from typing import Any, Optional
 from ..models import Segment, Timeline
 from .base import EngineAdapter, ProgressCb
 from .mute_render import render_muted
-from .profanity import Hit, is_profane, merge_hits, normalize
+from .profanity import Hit, is_profane, merge_hits, normalize, resolve_flags
 from .subtitles import (
     Cue,
     extract_srt,
@@ -229,9 +229,7 @@ class SubtitleEngine(EngineAdapter):
         progress: ProgressCb,
     ) -> tuple[Timeline, Optional[Path]]:
         language = options.get("language", "eng")
-        include_mild = bool(options.get("includeMild", False))
-        include_blasphemy = bool(options.get("includeBlasphemy", False))
-        extra = {w.lower() for w in options.get("extraWords", [])}
+        include_mild, include_blasphemy, extra = resolve_flags(options)
         whole_cue = bool(options.get("wholeCue", False))
         precise = bool(options.get("preciseTiming", True)) and not whole_cue
 

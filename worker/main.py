@@ -45,11 +45,15 @@ from .models import (
     Timeline,
 )
 from . import schedule
+from . import settings as worker_settings
 from . import update
+from .cleancopy import is_clean_copy, render_plan
 from .queue import JobQueue
 from .schedule import Schedule, ScheduleView
+from .settings import SettingsView, WorkerSettings
 from .review import (
     CLIP_PAD_S,
+    browse_dir,
     build_clip,
     build_filmstrip,
     build_peaks,
@@ -60,6 +64,7 @@ from .review import (
     grab_thumbnail,
     library_view,
     load_timeline,
+    review_target,
     media_roots,
     merge_into_one,
     render_landing,
@@ -154,7 +159,7 @@ async def log_requests(request: Request, call_next):
 
 def _log_startup_banner() -> None:
     tame_uvicorn_loggers()
-    roots = os.environ.get("CLEANMEDIA_MEDIA_ROOTS", "(none set)")
+    roots = ", ".join(str(r) for r in media_roots()) or "(none — using bundled movies/ test folder)"
     gpu = _gpu_info()
     gpu_desc = gpu.get("name", "none") if gpu.get("available") else "none (CPU only)"
     sched = schedule.view()
@@ -273,6 +278,46 @@ def put_schedule(new: Schedule) -> ScheduleView:
     else:
         log.info("schedule updated: unrestricted (analysis runs whenever queued)")
     return schedule.view()
+
+
+@app.get("/api/settings", response_model=SettingsView)
+def get_worker_settings() -> SettingsView:
+    """Worker-owned settings the Settings/Advanced tabs edit: media roots,
+    VLM guidance/hosts, and the policy/profanity toggles. Every field here
+    is read live by its call site, so a save takes effect on the next
+    queued job — no worker restart needed."""
+    return worker_settings.view()
+
+
+@app.put("/api/settings", response_model=SettingsView)
+def put_worker_settings(new: WorkerSettings) -> SettingsView:
+    saved = worker_settings.set_settings(new)
+    extra_words = len([w for w in saved.profanityExtraWords.split(",") if w.strip()])
+    log.info(
+        "settings updated: mediaRoots=%s vlmHosts=%s guidanceOverrides=%d "
+        "flags(shirtless=%s,underwear=%s,kissing=%s) "
+        "profanity(mild=%s,blasphemy=%s,extraWords=%d)",
+        saved.mediaRoots or "(NOT SET — falling back to env/movies/)",
+        saved.vlmHosts or "(env/default)",
+        len(saved.vlmGuidance),
+        saved.flagMaleShirtless, saved.flagUnderwear, saved.flagAnyKissing,
+        saved.profanityIncludeMild, saved.profanityIncludeBlasphemy, extra_words,
+    )
+    return worker_settings.view()
+
+
+@app.get("/api/browse")
+def browse_media_roots(path: str = "") -> dict:
+    """List subdirectories of ``path``, for the plugin's media-roots folder
+    picker — the plugin's browser is often on a different machine from the
+    worker, so this browses the worker's own filesystem over the API rather
+    than needing a native file dialog (same approach Sonarr/Radarr/Plex use)."""
+    try:
+        return browse_dir(path)
+    except NotADirectoryError:
+        raise HTTPException(404, f"not a directory: {path}")
+    except PermissionError:
+        raise HTTPException(403, f"permission denied: {path}")
 
 
 @app.get("/api/capabilities")
@@ -400,6 +445,9 @@ def review_page(path: str = "") -> HTMLResponse:
         media = literal if literal.is_file() else None
     if media is None:
         raise HTTPException(404, f"media not found: {path}")
+    # A clean copy holds no decisions of its own — it is rebuilt from the film's
+    # approvals on every render — so reviewing one reviews the film.
+    media = review_target(media)
     timeline = load_timeline(media)
     if timeline is None:
         # No analysis — open an empty Studio for manual review. The real
@@ -697,6 +745,11 @@ def _has_clean_copy(media: Path, film_jobs: list[Job]) -> bool:
         for j in film_jobs
         if j.status == JobStatus.rendered and j.renderedPath
     ]
+    if is_clean_copy(media):
+        # Reviewing the clean copy itself is normal — a missed word is usually
+        # found while watching it — and then the clean copy is the open file,
+        # not a sibling to go looking for.
+        return True
     candidates.append(media.parent / f"{media.parent.name} - Clean{media.suffix}")
     candidates.append(media.parent / "cleaned" / f"{media.stem} (Clean){media.suffix}")
     for path in candidates:
@@ -907,6 +960,22 @@ def render(job_id: str, req: RenderRequest | None = None) -> Job:
         raise HTTPException(409, str(exc))
 
 
+@app.get("/api/render/plan")
+def render_plan_for(path: str) -> dict:
+    """Where a render of this film would write, and what it would replace.
+
+    A clean copy is a file someone may be part-way through watching — and it is
+    a perfectly ordinary thing to review and re-render, since a missed word is
+    usually spotted while watching the clean version. So the caller is told both
+    targets and picks: ``replace`` rewrites the copy this render supersedes,
+    ``new`` writes the next free "Clean N" and leaves the old one playable.
+    """
+    media = resolve_media(path)
+    if media is None:
+        raise HTTPException(404, f"media not found: {path}")
+    return render_plan(media)
+
+
 @app.post("/api/render", response_model=Job, status_code=202)
 def render_media(path: str, req: RenderRequest | None = None) -> Job:
     """Render a clean copy from a film's APPROVED findings, by media path.
@@ -922,7 +991,11 @@ def render_media(path: str, req: RenderRequest | None = None) -> Job:
     if media is None:
         raise HTTPException(404, f"media not found: {path}")
     try:
-        return jobs.submit_media_render(str(media), req.outputPath if req else None)
+        return jobs.submit_media_render(
+            str(media),
+            req.outputPath if req else None,
+            mode=req.mode if req else "replace",
+        )
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc))
     except ValueError as exc:

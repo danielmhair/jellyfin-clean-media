@@ -137,6 +137,22 @@ public class JobBrief
     [JsonPropertyName("engine")] public string Engine { get; set; } = string.Empty;
 }
 
+/// <summary>The two places a render could write, from the worker.</summary>
+public class RenderPlan
+{
+    [JsonPropertyName("sourceIsCleanCopy")] public bool SourceIsCleanCopy { get; set; }
+
+    [JsonPropertyName("replacePath")] public string? ReplacePath { get; set; }
+
+    [JsonPropertyName("replaceLabel")] public string? ReplaceLabel { get; set; }
+
+    [JsonPropertyName("replaceExists")] public bool ReplaceExists { get; set; }
+
+    [JsonPropertyName("newPath")] public string? NewPath { get; set; }
+
+    [JsonPropertyName("newLabel")] public string? NewLabel { get; set; }
+}
+
 /// <summary>Review state of one film.</summary>
 public class MediaStatus
 {
@@ -281,6 +297,40 @@ public class WorkerClient
         }
     }
 
+    /// <summary>Where a render of this file would go, and what it would replace.</summary>
+    /// <remarks>
+    /// A clean copy is a file the administrator may be part-way through
+    /// watching, so the page asks first and offers the worker's two targets:
+    /// replace the copy this render supersedes, or write the next "Clean N"
+    /// beside it and leave the old one playable.
+    /// </remarks>
+    public async Task<RenderPlan?> GetRenderPlanAsync(
+        string mediaPath, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var client = NewClient();
+            using var response = await client
+                .GetAsync(
+                    $"{Base}/api/render/plan?path={Uri.EscapeDataString(mediaPath)}",
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            return await response.Content
+                .ReadFromJsonAsync<RenderPlan>(cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            _logger.LogWarning(ex, "Clean Media worker unreachable at {Url}", Config.WorkerUrl);
+            return null;
+        }
+    }
+
     /// <summary>Approve, reject or retime a finding. Returns the updated timeline.</summary>
     public async Task<Timeline?> PatchSegmentAsync(
         string mediaPath, int segmentId, object patch, CancellationToken cancellationToken)
@@ -352,13 +402,16 @@ public class WorkerClient
     /// the page can say why rather than "failed"; an unreachable worker sets
     /// <see cref="RenderResult.Unreachable"/>.
     /// </summary>
-    public async Task<RenderResult> RenderAsync(string mediaPath, CancellationToken cancellationToken)
+    public async Task<RenderResult> RenderAsync(
+        string mediaPath, string mode, CancellationToken cancellationToken)
     {
         try
         {
             using var client = NewClient();
             var url = $"{Base}/api/render?path={Uri.EscapeDataString(mediaPath)}";
-            using var response = await client.PostAsync(url, null, cancellationToken).ConfigureAwait(false);
+            using var response = await client
+                .PostAsJsonAsync(url, new { mode }, cancellationToken)
+                .ConfigureAwait(false);
             if (response.IsSuccessStatusCode)
             {
                 var job = await response.Content
@@ -659,6 +712,171 @@ public class WorkerClient
             return null;
         }
     }
+
+    /// <summary>
+    /// Worker-owned settings (media roots, VLM guidance/hosts, policy/profanity
+    /// toggles) the Settings/Advanced tabs edit — same opaque-JsonElement
+    /// pass-through as Schedule, for the same reason: the worker owns the shape
+    /// because it's the machine that actually acts on these values.
+    /// </summary>
+    public async Task<JsonElement?> GetWorkerSettingsAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var client = NewClient();
+            using var response = await client
+                .GetAsync($"{Base}/api/settings", cancellationToken)
+                .ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            return await response.Content
+                .ReadFromJsonAsync<JsonElement>(cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            _logger.LogWarning(ex, "Clean Media worker unreachable at {Url}", Config.WorkerUrl);
+            return null;
+        }
+    }
+
+    /// <summary>Replace the worker's settings. Returns the stored view, or null if unreachable.</summary>
+    public async Task<JsonElement?> SetWorkerSettingsAsync(JsonElement settings, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var client = NewClient();
+            using var request = new HttpRequestMessage(HttpMethod.Put, $"{Base}/api/settings")
+            {
+                Content = JsonContent.Create(settings),
+            };
+            using var response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            return await response.Content
+                .ReadFromJsonAsync<JsonElement>(cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            _logger.LogWarning(ex, "Clean Media worker unreachable at {Url}", Config.WorkerUrl);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// List subdirectories of <paramref name="path"/> on the worker's own
+    /// filesystem, for the media-roots folder picker — the browser is often on
+    /// a different machine from the worker, so a native file dialog can't work
+    /// here. Empty path asks the worker for somewhere sensible to start.
+    /// </summary>
+    public async Task<JsonElement?> BrowseAsync(string path, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var client = NewClient();
+            var url = $"{Base}/api/browse?path={Uri.EscapeDataString(path)}";
+            using var response = await client.GetAsync(url, cancellationToken).ConfigureAwait(false);
+            var body = await response.Content
+                .ReadFromJsonAsync<JsonElement>(cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            return body; // include the worker's own {"detail": "..."} on a 404/403 too
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            _logger.LogWarning(ex, "Clean Media worker unreachable at {Url}", Config.WorkerUrl);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The always-on recovery helper's base URL (worker/supervisor.py) — same
+    /// host as the worker, port + 1 by convention (see install-service.ps1/.sh,
+    /// which register it there). Computed rather than a separate setting, so
+    /// there is nothing extra to keep in sync, and reaching it never depends on
+    /// the worker itself being reachable.
+    /// </summary>
+    private static string SupervisorBase
+    {
+        get
+        {
+            var uri = new Uri(Base);
+            var builder = new UriBuilder(uri) { Port = uri.Port + 1 };
+            return builder.Uri.ToString().TrimEnd('/');
+        }
+    }
+
+    /// <summary>Whether the worker is up and whether the helper is currently allowed to act, or null if the helper itself is unreachable.</summary>
+    public async Task<JsonElement?> GetSupervisorStatusAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var client = NewClient(timeoutSeconds: 5);
+            using var response = await client
+                .GetAsync($"{SupervisorBase}/status", cancellationToken)
+                .ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            return await response.Content
+                .ReadFromJsonAsync<JsonElement>(cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            _logger.LogWarning(ex, "Clean Media recovery helper unreachable at {Url}", SupervisorBase);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// POSTs an action to the recovery helper (start/restart/stop/enable/
+    /// disable). Returns the helper's own JSON body even on a non-2xx — that's
+    /// how a disabled helper's "recovery helper is disabled" refusal reaches
+    /// the settings page — or null only when the helper itself can't be
+    /// reached at all.
+    /// </summary>
+    private async Task<JsonElement?> SupervisorPostAsync(string action, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var client = NewClient(timeoutSeconds: 15);
+            using var response = await client
+                .PostAsync($"{SupervisorBase}/{action}", null, cancellationToken)
+                .ConfigureAwait(false);
+            return await response.Content
+                .ReadFromJsonAsync<JsonElement>(cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            _logger.LogWarning(ex, "Clean Media recovery helper unreachable at {Url}", SupervisorBase);
+            return null;
+        }
+    }
+
+    public Task<JsonElement?> SupervisorStartAsync(CancellationToken cancellationToken) =>
+        SupervisorPostAsync("start", cancellationToken);
+
+    public Task<JsonElement?> SupervisorRestartAsync(CancellationToken cancellationToken) =>
+        SupervisorPostAsync("restart", cancellationToken);
+
+    public Task<JsonElement?> SupervisorStopAsync(CancellationToken cancellationToken) =>
+        SupervisorPostAsync("stop", cancellationToken);
+
+    public Task<JsonElement?> SupervisorEnableAsync(CancellationToken cancellationToken) =>
+        SupervisorPostAsync("enable", cancellationToken);
+
+    public Task<JsonElement?> SupervisorDisableAsync(CancellationToken cancellationToken) =>
+        SupervisorPostAsync("disable", cancellationToken);
 
     /// <summary>Review state for a page of the library, or null if the worker is unreachable.</summary>
     public async Task<List<MediaStatus>?> GetStatusAsync(
