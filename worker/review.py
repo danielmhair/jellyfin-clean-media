@@ -21,7 +21,14 @@ import time
 from pathlib import Path, PurePosixPath
 from typing import Optional
 
-from .cleancopy import cuts_of, is_clean_copy, source_of, to_source_ms
+from .cleancopy import (
+    cuts_of,
+    is_clean_copy,
+    merge_spans,
+    read_origin_record,
+    source_of,
+    to_source_ms,
+)
 from .models import Segment, Timeline
 from .render import BLUR_SIGMA
 from .settings import get_settings
@@ -462,27 +469,107 @@ def delete_segment(media: Path, segment_id: int) -> bool:
     return True
 
 
+#: A copy and its film count as the same length within this much. A re-encode
+#: moves the duration by a frame or two, and containers round; nothing near the
+#: length of a real cut.
+_SAME_LENGTH_MS = 1_500
+
+#: How closely the film's approved skips must add up to the footage actually
+#: missing from a copy before those skips are trusted as that copy's cut list.
+_CUTS_MATCH_MS = 2_000
+
+
+def _duration_ms(media: Path) -> Optional[int]:
+    """The file's length in ms, or None when it can't be probed."""
+    from .shots import media_duration
+
+    try:
+        seconds = media_duration(media)
+    except Exception:
+        return None  # an unreachable share or an unreadable file: just unknown
+    return int(seconds * 1000) if seconds and seconds > 0 else None
+
+
+def _inferred_cuts(copy: Path, film: Path) -> tuple[list[tuple[int, int]], bool]:
+    """What a copy with no origin record had cut out of it, and whether to trust it.
+
+    Copies rendered before origin records existed have to be placed some other
+    way, and guessing from today's approvals is not safe on its own — approvals
+    change after a render, and every changed one moves the answer.
+
+    So measure instead of assume. If the copy is the same length as the film,
+    nothing was cut and its clock is the film's clock, whatever the sidecar now
+    says. If it is shorter, the film's approved skips are only believed when
+    they add up to the footage actually missing. When they don't, the cuts are
+    unknown and the caller is told so rather than handed a plausible wrong
+    number.
+    """
+    copy_ms, film_ms = _duration_ms(copy), _duration_ms(film)
+    if copy_ms is None or film_ms is None:
+        return [], False
+
+    missing = film_ms - copy_ms
+    if missing <= _SAME_LENGTH_MS:
+        return [], True  # nothing was cut — a mute or a blur moves no timings
+
+    timeline = load_timeline(film)
+    skips = merge_spans(
+        (s.startMs, s.endMs)
+        for s in (timeline.segments if timeline else [])
+        if s.approved is True and s.recommendedAction == "skip"
+    )
+    accounted = sum(end - start for start, end in skips)
+    if skips and abs(accounted - missing) <= _CUTS_MATCH_MS:
+        return skips, True
+    return [], False
+
+
 def _redirect_to_source(
-    media: Path, start_ms: int, end_ms: int, reasoning: Optional[str]
-) -> tuple[Path, int, int, Optional[str]]:
+    media: Path,
+    start_ms: int,
+    end_ms: int,
+    reasoning: Optional[str],
+    approved: Optional[bool],
+) -> tuple[Path, int, int, Optional[str], Optional[bool]]:
     """Move a hand-added finding from a clean copy onto the film it came from.
 
     Returns the arguments unchanged for an ordinary file, or for a copy whose
     film can no longer be found — better a finding on the copy than a finding
-    dropped. The cut list comes from the copy's origin record, written when it
-    was rendered; without one the times are taken as they are, which is exactly
-    right whenever the copy has no cuts in it (mute and blur move nothing) and
-    the closest thing to right when it does.
+    dropped.
+
+    Cuts shift everything after them, so the flagged time is mapped back into
+    film time. The copy's origin record, written when it was rendered, makes
+    that exact. Without one — every copy rendered before those records existed —
+    the mapping is inferred from the two files' durations, and if it cannot be
+    established the finding still goes on the film (that is the only place it
+    survives a render) but is left *undecided* and says why. A finding whose
+    timing nobody can vouch for must not arrive pre-approved: acting on it would
+    mute or cut the wrong moment.
     """
     source = source_of(media)
     if source is None or source == media:
-        return media, start_ms, end_ms, reasoning
+        return media, start_ms, end_ms, reasoning, approved
 
-    cuts = cuts_of(media)
-    mapped_start = to_source_ms(start_ms, cuts)
-    mapped_end = to_source_ms(end_ms, cuts)
+    if read_origin_record(media) is not None:
+        cuts, trusted = cuts_of(media), True
+    else:
+        cuts, trusted = _inferred_cuts(media, source)
+
     note = f"flagged on {media.name}"
-    return source, mapped_start, mapped_end, f"{reasoning} ({note})" if reasoning else note
+    if not trusted:
+        note += (
+            " — timing unverified: that copy is shorter than the film and its "
+            "cuts are not on record, so check where this lands before approving"
+        )
+        approved = None
+
+    return (
+        source,
+        to_source_ms(start_ms, cuts),
+        to_source_ms(end_ms, cuts),
+        f"{reasoning} ({note})" if reasoning else note,
+        approved,
+    )
 
 
 def create_segment(
@@ -507,11 +594,12 @@ def create_segment(
     moment in it. A copy is rebuilt from the film's approvals on every render,
     so a finding recorded on the copy would be wiped by the next one; and
     because a render's cuts shorten the copy, the flagged time is shifted back
-    through them (:func:`worker.cleancopy.to_source_ms`) rather than taken at
-    face value.
+    through them rather than taken at face value. Where that shift cannot be
+    established, the finding arrives undecided instead of approved — see
+    :func:`_redirect_to_source`.
     """
-    media, start_ms, end_ms, reasoning = _redirect_to_source(
-        media, start_ms, end_ms, reasoning
+    media, start_ms, end_ms, reasoning, approved = _redirect_to_source(
+        media, start_ms, end_ms, reasoning, approved
     )
     timeline = load_timeline(media)
     if timeline is None:

@@ -234,3 +234,117 @@ def test_overwriting_a_numbered_copy_means_that_copy(tmp_path):
 
     assert job.mediaPath == str(film)
     assert job.options["renderOutputPath"] == str(second)
+
+
+# -- when the cuts are not on record ------------------------------------------
+# Every copy rendered before origin records existed has to be placed some other
+# way. Guessing from today's approvals alone is not safe — approvals change
+# after a render, and each changed one moves the answer — so the two files'
+# durations are measured and the guess is only used when it accounts for the
+# footage actually missing.
+
+
+@pytest.fixture
+def probe(monkeypatch):
+    """Stand in for ffprobe: hand each path a duration, in seconds."""
+    lengths = {}
+
+    def fake_duration(path):
+        return lengths[str(path)]
+
+    monkeypatch.setattr("worker.shots.media_duration", fake_duration)
+    return lengths
+
+
+def _skip_sidecar(media, spans, approved=True):
+    sidecar_for(media).write_text(
+        json.dumps({
+            "mediaFingerprint": "fp",
+            "segments": [{
+                "id": i + 1, "startMs": a, "endMs": b, "category": "suggestive",
+                "confidence": 1.0, "engine": "vlm", "recommendedAction": "skip",
+                "approved": approved,
+            } for i, (a, b) in enumerate(spans)],
+        }),
+        encoding="utf-8",
+    )
+
+
+def test_a_copy_the_same_length_as_the_film_keeps_its_timing(tmp_path, probe):
+    # Mute-only: nothing was cut, so the copy's clock is the film's clock — even
+    # though the sidecar happens to carry an approved skip that was never used.
+    film, clean = _film_with_clean_copy(tmp_path, cuts=None)
+    _skip_sidecar(film, [(600_000, 720_000)])
+    probe[str(film)] = probe[str(clean)] = 7200.0
+
+    create_segment(clean, 1_800_000, 1_803_000, "manual", "mute")
+
+    landed = load_timeline(film).segments[-1]
+    assert (landed.startMs, landed.endMs) == (1_800_000, 1_803_000)
+    assert landed.approved is True
+
+
+def test_approvals_that_account_for_the_missing_footage_are_trusted(tmp_path, probe):
+    film, clean = _film_with_clean_copy(tmp_path, cuts=None)
+    _skip_sidecar(film, [(600_000, 720_000)])          # two minutes approved
+    probe[str(film)] = 7200.0
+    probe[str(clean)] = 7080.0                          # ... and two minutes shorter
+
+    create_segment(clean, 1_800_000, 1_803_000, "manual", "skip")
+
+    landed = load_timeline(film).segments[-1]
+    assert (landed.startMs, landed.endMs) == (1_920_000, 1_923_000)
+    assert landed.approved is True                      # the numbers agree
+
+
+def test_a_flag_whose_timing_cannot_be_established_arrives_undecided(tmp_path, probe):
+    # The copy is short by five minutes, but the sidecar only accounts for two:
+    # it was rendered from a different set of approvals. Placing the flag by
+    # those approvals would land it three minutes off — so it goes on the film
+    # (the only place it survives a render) but nothing acts on it until a human
+    # has looked.
+    film, clean = _film_with_clean_copy(tmp_path, cuts=None)
+    _skip_sidecar(film, [(600_000, 720_000)])
+    probe[str(film)] = 7200.0
+    probe[str(clean)] = 6900.0
+
+    create_segment(clean, 1_800_000, 1_803_000, "manual", "skip")
+
+    landed = load_timeline(film).segments[-1]
+    assert landed.approved is None
+    assert "timing unverified" in (landed.reasoning or "")
+
+
+def test_an_unprobeable_copy_is_not_silently_trusted(tmp_path, probe):
+    film, clean = _film_with_clean_copy(tmp_path, cuts=None)
+    probe[str(film)] = 7200.0  # the copy's probe raises (KeyError) — share down
+
+    create_segment(clean, 1_800_000, 1_803_000, "manual", "skip")
+
+    assert load_timeline(film).segments[-1].approved is None
+
+
+def test_a_recorded_copy_is_trusted_without_probing_anything(tmp_path):
+    # The record is the exact answer, so no ffprobe fixture is needed here: if
+    # the code reached for one it would hit the real binary and this would hang
+    # or fail, which is the point.
+    film, clean = _film_with_clean_copy(tmp_path, cuts=[(600_000, 720_000)])
+
+    create_segment(clean, 1_800_000, 1_803_000, "manual", "skip")
+
+    landed = load_timeline(film).segments[-1]
+    assert (landed.startMs, landed.endMs) == (1_920_000, 1_923_000)
+    assert landed.approved is True
+
+
+def test_overlapping_cuts_are_counted_once(tmp_path):
+    # A render removes the union of two overlapping skips, not their sum.
+    # Adding both lengths back would push every later moment a minute too far.
+    from worker.cleancopy import merge_spans
+
+    film, clean = _film_with_clean_copy(
+        tmp_path, cuts=[(600_000, 720_000), (660_000, 780_000)]
+    )
+    assert cuts_of(clean) == [(600_000, 780_000)]        # 3 minutes, not 4
+    assert merge_spans([(0, 10), (10, 20), (40, 50)]) == [(0, 20), (40, 50)]
+    assert to_source_ms(1_800_000, cuts_of(clean)) == 1_980_000

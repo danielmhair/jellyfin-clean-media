@@ -204,16 +204,35 @@ def origin_record_for(clean: Path) -> Path:
     return clean.with_name(clean.stem + ORIGIN_SUFFIX)
 
 
+def merge_spans(spans) -> list[tuple[int, int]]:
+    """Overlapping or touching spans folded into one apiece.
+
+    Two approved skips can overlap — the same scene flagged by two engines, or
+    a hand retime run into its neighbour — and a render removes their *union*,
+    not their sum. Adding both lengths back would push every later moment too
+    far down the film, so the union is what has to be recorded and replayed.
+    """
+    ordered = sorted((int(a), int(b)) for a, b in spans if int(b) > int(a))
+    merged: list[tuple[int, int]] = []
+    for start, end in ordered:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
 def write_origin_record(clean: Path, source: Path, cuts: list[tuple[int, int]]) -> None:
     """Record what ``clean`` was rendered from, and the spans cut out of it.
 
-    ``cuts`` are in *source* time. Best-effort: a share that refuses the write
-    must not fail a render that already succeeded — the naming rule and today's
-    approvals still give a usable fallback (see :func:`source_of`).
+    ``cuts`` are in *source* time, and are merged before writing: what came out
+    of the film is their union. Best-effort: a share that refuses the write must
+    not fail a render that already succeeded — the naming rule and a duration
+    cross-check still give a usable fallback (see :func:`source_of`).
     """
     record = {
         "source": str(source),
-        "cuts": [[int(a), int(b)] for a, b in sorted(cuts)],
+        "cuts": [[a, b] for a, b in merge_spans(cuts)],
     }
     try:
         origin_record_for(clean).write_text(json.dumps(record, indent=2), encoding="utf-8")
@@ -285,7 +304,9 @@ def cuts_of(clean: Path) -> list[tuple[int, int]]:
             continue
         if end > start:
             cuts.append((start, end))
-    return sorted(cuts)
+    # Merged on the way in as well as on the way out: a record written before
+    # merging existed could still hold overlaps.
+    return merge_spans(cuts)
 
 
 def to_source_ms(ms: int, cuts: list[tuple[int, int]]) -> int:
