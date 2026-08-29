@@ -105,16 +105,32 @@ def browse_dir(path: str = "") -> dict:
 
             for letter in string.ascii_uppercase:
                 drive = f"{letter}:\\"
-                if drive not in seen and Path(drive).is_dir():
-                    entries.append({"name": drive, "path": drive})
+                if drive in seen:
+                    continue
+                try:
+                    # A stale/disconnected mapped network drive raises
+                    # OSError (e.g. WinError 1326, bad cached credentials)
+                    # rather than just returning False here — unlike a
+                    # missing local drive, which is_dir() handles quietly.
+                    if Path(drive).is_dir():
+                        entries.append({"name": drive, "path": drive})
+                except OSError:
+                    continue
         else:
             for extra in ("/", str(Path.home())):
-                if extra not in seen and Path(extra).is_dir():
-                    entries.append({"name": extra, "path": extra})
+                try:
+                    if extra not in seen and Path(extra).is_dir():
+                        entries.append({"name": extra, "path": extra})
+                except OSError:
+                    continue
         return {"path": "", "parent": None, "dirs": entries}
 
     target = Path(path)
-    if not target.is_dir():
+    try:
+        is_dir = target.is_dir()
+    except OSError as exc:
+        raise NotADirectoryError(path) from exc
+    if not is_dir:
         raise NotADirectoryError(path)
     dirs = []
     try:
@@ -1287,6 +1303,30 @@ kbd{font-family:ui-monospace,monospace}
 #D .swrow .swn{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #D .swrow .swc{font-size:11px;color:var(--dim2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
 #D .swrow .swcur-dot{color:var(--pick)}
+#D .tt .clock{cursor:text;border-bottom:1px dashed #4a5561;padding-bottom:1px}
+#D .tt .clock:hover{border-bottom-color:var(--pick);color:#cfe3ff}
+#D .tt input{width:9.5ch;background:#0d1117;color:var(--ink);border:1px solid var(--pick);border-radius:5px;
+  padding:1px 4px;font:inherit;font-variant-numeric:tabular-nums;outline:none}
+#D .renderbtn{flex:0 0 auto;padding:9px 15px;border-radius:9px;border:1px solid var(--line);
+  background:var(--panel2);color:var(--ink);font-size:12.5px;font-weight:600;cursor:pointer;white-space:nowrap}
+#D .renderbtn:hover:not(:disabled){border-color:var(--pick);color:#cfe3ff}
+#D .renderbtn:disabled{opacity:.55;cursor:default}
+#D .renderbtn.busy{border-color:var(--pick);color:#cfe3ff}
+/* The render dialog: two clear targets, never a silent overwrite. */
+#D .rov{position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;z-index:60}
+#D .rdlg{width:min(520px,94vw);background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px}
+#D .rdlg h2{margin:0 0 4px;font-size:16px}
+#D .rdlg .rsub{color:var(--dim2);font-size:12.5px;margin-bottom:14px}
+#D .rdlg .ropt{display:block;width:100%;text-align:left;padding:12px 14px;margin-bottom:8px;border-radius:10px;
+  border:1px solid var(--line);background:var(--panel2);color:var(--ink);font:inherit;cursor:pointer}
+#D .rdlg .ropt:hover{border-color:var(--pick)}
+#D .rdlg .ropt.on{border-color:var(--pick);background:#1b2836}
+#D .rdlg .ropt b{display:block;font-size:13.5px}
+#D .rdlg .ropt span{display:block;color:var(--dim2);font-size:11.5px;margin-top:2px;font-family:ui-monospace,monospace}
+#D .rdlg .rfoot{display:flex;gap:8px;justify-content:flex-end;margin-top:14px}
+#D .rdlg .rfoot button{padding:9px 15px;border-radius:9px;border:1px solid var(--line);background:var(--panel2);color:var(--ink);font:inherit;cursor:pointer}
+#D .rdlg .rfoot .go{background:var(--pick);border-color:var(--pick);color:#fff;font-weight:600}
+#D .rdlg .rmsg{color:var(--dim2);font-size:12px;margin-top:10px;min-height:1em}
 #D .swbadge{flex:0 0 auto;font-size:10.5px;font-weight:700;padding:3px 8px;border-radius:99px;letter-spacing:.2px}
 #D .swbadge.ready{background:#3a2c12;color:#f0c05a}
 #D .swbadge.in_progress{background:#152a3d;color:#7cc0ff}
@@ -1514,6 +1554,7 @@ kbd{font-family:ui-monospace,monospace}
           <div class="swlist" id="D-swlist"></div>
         </div>
       </div>
+      <button class="renderbtn" id="D-render" title="Write a clean copy from the findings you approved">🎬 Render clean copy</button>
       <div class="discreet-toggle on" id="D-discreet" title="Blur the picture so you can review without others seeing the content">
         <span class="sw"></span> Discreet mode
       </div>
@@ -1894,7 +1935,12 @@ function D_monitor(){
   document.getElementById('D-mnote').innerHTML='';   // picture is always visible now; badge + transport carry context
   mon.classList.toggle('scrubbing',D.scrubbing);
   mon.classList.toggle('loadingclip',D.loadingClip);
-  document.getElementById('D-tt').innerHTML=`<b>${fmtHMS(D.playMs)}</b> / ${fmtShort(RUNTIME_MS)}`;
+  // The clock is an entry point, not just a readout: click it and type a time
+  // to land on an exact moment, which dragging the playhead cannot do. Left
+  // alone while it is being typed in, or every redraw would wipe the entry.
+  const tt=document.getElementById('D-tt');
+  if(!tt.querySelector('input'))
+    tt.innerHTML=`<b class="clock" title="Click to type an exact time">${fmtHMS(D.playMs)}</b> / ${fmtShort(RUNTIME_MS)}`;
   document.getElementById('D-now').textContent = inside
     ? `now: #${s.id} ${s.category.replace(/_/g,' ')}` : 'now: clear';
   document.getElementById('D-pp').textContent=D.playing?'❚❚':'▶';
@@ -2457,6 +2503,131 @@ function D_seek(d){
 }
 
 // ---------- keyboard ----------
+// ---------- the clock: type an exact time to jump there ----------
+// Dragging gets you near a moment; a word mute needs the moment itself. Typing
+// "1:37.950" is the only way to land on it exactly.
+// Land the playhead on an absolute time, the way a click on the full-film bar
+// does: pan the editor if the moment is off-screen, and select the finding it
+// falls nearest, so the editor is showing the place you asked for.
+function D_jumpTo(ms){
+  if(D.playing)D_stop();
+  D.playMs=Math.max(0,Math.min(RUNTIME_MS,ms));
+  if(D.playMs<D.viewStart||D.playMs>D.viewEnd){
+    const span=D.viewEnd-D.viewStart;
+    D.viewStart=D.playMs-span/2; D.viewEnd=D.viewStart+span; D_clampView();
+  }
+  const n=D_nearest(D.playMs); if(n)D.sel=n.id;
+  D_render();
+}
+
+function D_clockEdit(){
+  const tt=document.getElementById('D-tt');
+  if(tt.querySelector('input'))return;
+  const inp=document.createElement('input');
+  inp.value=fmtHMS(D.playMs); inp.spellcheck=false;
+  inp.title='H:MM:SS.mmm, MM:SS.mmm or seconds';
+  tt.innerHTML=''; tt.appendChild(inp);
+  tt.append(` / ${fmtShort(RUNTIME_MS)}`);
+  inp.focus(); inp.select();
+  let done=false;
+  const finish=commit=>{
+    if(done)return; done=true;                 // blur fires again after Enter
+    const ms=commit?parseTime(inp.value):null;
+    if(ms!=null)D_jumpTo(ms); else D_monitor(); // D_jumpTo redraws; else restore
+  };
+  inp.onkeydown=e=>{
+    if(e.key==='Enter'){e.preventDefault();finish(true);}
+    else if(e.key==='Escape'){e.preventDefault();finish(false);}
+    e.stopPropagation();                        // j/k/space are page shortcuts
+  };
+  inp.onblur=()=>finish(true);
+}
+
+// ---------- render a clean copy, without leaving this page ----------
+// The findings you just approved are the whole input to a render, so the button
+// belongs beside them. An existing clean copy is a file someone may be part-way
+// through watching, so the choice to overwrite it is made here, in the open.
+function D_renderClick(){
+  const btn=document.getElementById('D-render');
+  btn.disabled=true;
+  fetch(`/api/render/plan?path=${encodeURIComponent(MEDIA)}`)
+    .then(r=>r.ok?r.json():Promise.reject(new Error('could not read the render plan')))
+    .then(plan=>{btn.disabled=false;D_renderDialog(plan);})
+    .catch(e=>{btn.disabled=false;alert(e.message||'could not reach the worker');});
+}
+
+function D_renderDialog(plan){
+  const approved=SEGS.filter(s=>s.approved===true).length;
+  const ov=document.createElement('div');
+  ov.className='rov';
+  const opts=plan.replaceExists
+    ? `<button class="ropt on" data-mode="replace"><b>Overwrite the ${esc(plan.replaceLabel)} copy</b>
+         <span>${esc(plan.replacePath)}</span></button>
+       <button class="ropt" data-mode="new"><b>Keep it, add a ${esc(plan.newLabel)} copy</b>
+         <span>${esc(plan.newPath)}</span></button>`
+    : `<button class="ropt on" data-mode="replace"><b>Write the ${esc(plan.newLabel)} copy</b>
+         <span>${esc(plan.replacePath)}</span></button>`;
+  ov.innerHTML=`<div class="rdlg">
+    <h2>Render a clean copy</h2>
+    <div class="rsub">${approved} approved finding${approved===1?'':'s'} will be applied${
+      plan.sourceIsCleanCopy?`, read from ${esc(plan.sourceName)}`:''}.</div>
+    ${opts}
+    <div class="rmsg" id="D-rmsg"></div>
+    <div class="rfoot"><button class="x">Cancel</button><button class="go">Start render</button></div>
+  </div>`;
+  document.body.appendChild(ov);
+  let mode=plan.replaceExists?'replace':'replace';
+  const close=()=>{if(ov.parentNode)ov.parentNode.removeChild(ov);document.removeEventListener('keydown',onKey);};
+  const onKey=e=>{if(e.key==='Escape'){e.preventDefault();close();}e.stopPropagation();};
+  document.addEventListener('keydown',onKey);
+  ov.onclick=e=>{if(e.target===ov)close();};
+  ov.querySelector('.x').onclick=close;
+  ov.querySelectorAll('.ropt').forEach(b=>b.onclick=()=>{
+    mode=b.dataset.mode;
+    ov.querySelectorAll('.ropt').forEach(x=>x.classList.toggle('on',x===b));
+  });
+  const go=ov.querySelector('.go');
+  go.onclick=()=>{
+    go.disabled=true; go.textContent='Starting…';
+    fetch(`/api/render?path=${encodeURIComponent(MEDIA)}`,{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})})
+      .then(r=>r.json().then(body=>r.ok?body:Promise.reject(new Error(body.detail||'the worker refused the render'))))
+      .then(job=>{close();D_renderWatch(job.id);})
+      .catch(e=>{
+        go.disabled=false; go.textContent='Start render';
+        ov.querySelector('#D-rmsg').textContent=e.message||'could not start the render';
+      });
+  };
+}
+
+// A render runs for a long time, so the button becomes the progress readout —
+// nothing to keep open, and it survives a reload by re-finding the job.
+function D_renderWatch(jobId){
+  const btn=document.getElementById('D-render');
+  btn.classList.add('busy'); btn.disabled=true;
+  const tick=()=>{
+    fetch(`/api/jobs/${encodeURIComponent(jobId)}`).then(r=>r.json()).then(job=>{
+      if(job.status==='rendered'){
+        btn.classList.remove('busy'); btn.disabled=false;
+        btn.textContent='✓ Clean copy written';
+        setTimeout(()=>{btn.textContent='🎬 Render clean copy';},6000);
+        return;
+      }
+      if(job.status==='failed'||job.status==='cancelled'){
+        btn.classList.remove('busy'); btn.disabled=false;
+        btn.textContent='🎬 Render clean copy';
+        alert(`Render ${job.status}: ${job.error||'no reason given'}`);
+        return;
+      }
+      const pct=Math.round((job.progress||0)*100);
+      btn.textContent=`⏳ Rendering ${pct}%`;
+      btn.title=job.stage||'';
+      setTimeout(tick,2000);
+    }).catch(()=>setTimeout(tick,5000));   // a blip must not abandon the render
+  };
+  tick();
+}
+
 // ---------- library switcher (top-left combobox) ----------
 let SW={open:false,q:'',items:[],active:-1,timer:null,total:0};
 function D_swOpen(){SW.open=true;document.getElementById('D-swpanel').classList.remove('hidden');
@@ -2589,6 +2760,8 @@ function D_init(){
     const move=ev=>{D.viewStart=vs0+(ev.clientX-sx)/rect.width*RUNTIME_MS;D.viewEnd=D.viewStart+span;D_clampView();D_filmtl();D_editor();};
     const up=()=>{document.removeEventListener('pointermove',move);document.removeEventListener('pointerup',up);D_render();};
     document.addEventListener('pointermove',move);document.addEventListener('pointerup',up);});
+  document.getElementById('D-render').onclick=D_renderClick;
+  document.getElementById('D-tt').onclick=e=>{if(e.target.classList.contains('clock'))D_clockEdit();};
   document.getElementById('D-mergemode').onclick=()=>{D.merge=!D.merge;if(!D.merge)D.picks.clear();D_render();};
   document.getElementById('D-mergego').onclick=D_doMerge;
   document.getElementById('D-mergeclear').onclick=()=>{D.picks.clear();D_render();};
