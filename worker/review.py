@@ -23,16 +23,18 @@ from typing import Optional
 
 from .cleancopy import (
     cuts_of,
-    is_clean_copy,
     merge_spans,
     read_origin_record,
     source_of,
     to_source_ms,
 )
+from .logging_config import get_logger
 from .models import Segment, Timeline
 from .render import BLUR_SIGMA
 from .settings import get_settings
 from .store import media_fingerprint
+
+logger = get_logger("review")
 
 THUMB_WIDTH = 480
 CLIP_PAD_S = 15.0
@@ -256,12 +258,24 @@ def review_target(media: Path) -> Path:
     """The file whose findings a review of ``media`` should show.
 
     Opening a clean copy — from a stale link, or the player's "review this
-    film" button while the copy is what's playing — shows the film instead.
-    The copy has no review decisions of its own: it is rebuilt from the film's
-    approvals every time it is rendered, so the film is where a decision has to
-    land to survive.
+    film" button while the copy is what's playing — normally shows the film
+    instead: a copy is rebuilt from the film's approvals on every render, so
+    the film is where a *new* decision has to land to survive. The one
+    exception is a copy that already holds findings of its own — flags made
+    before create_segment started redirecting to the source automatically
+    are stuck there and were deliberately left in place rather than
+    guess-migrated (a render can desync timestamps through cuts with no
+    origin record to map them back precisely). Reviewing such a copy has to
+    show *its own* timeline, or the findings it actually holds are
+    unreachable — bounced to a film page that doesn't have them.
     """
-    return source_of(media) or media
+    source = source_of(media)
+    if source is None:
+        return media
+    own = load_timeline(media)
+    if own is not None and own.segments:
+        return media
+    return source
 
 
 def load_timeline(media: Path) -> Optional[Timeline]:
@@ -306,20 +320,30 @@ def _film_summary(media: Path) -> dict:
         cached = _summary_cache.get(key)
     if cached is not None:
         return cached
-    tl = load_timeline(media)
-    if tl is None:
-        summ = {"count": 0, "undecided": 0}
+    # A single malformed sidecar (hand-edited, or a write cut short) must not
+    # 500 the whole library listing — every other film is still reviewable.
+    # Surface it as its own status instead of hiding or crashing on it.
+    try:
+        tl = load_timeline(media)
+    except Exception:
+        logger.exception("unreadable sidecar for %s — flagging as corrupt", media)
+        summ = {"count": 0, "undecided": 0, "corrupt": True}
     else:
-        summ = {
-            "count": len(tl.segments),
-            "undecided": sum(1 for s in tl.segments if s.approved is None),
-        }
+        if tl is None:
+            summ = {"count": 0, "undecided": 0}
+        else:
+            summ = {
+                "count": len(tl.segments),
+                "undecided": sum(1 for s in tl.segments if s.approved is None),
+            }
     with _summary_lock:
         _summary_cache[key] = summ
     return summ
 
 
-def _film_status(analyzed: bool, count: int, undecided: int) -> str:
+def _film_status(analyzed: bool, count: int, undecided: int, corrupt: bool = False) -> str:
+    if corrupt:
+        return "corrupt"               # sidecar exists but failed to parse
     if not analyzed:
         return "unanalyzed"            # no sidecar — search-only, opens for manual review
     if undecided <= 0:
@@ -344,7 +368,7 @@ def _match_rank(q: str, name: str) -> int:
 
 
 #: Order the default work-list puts statuses in: needs-your-attention first.
-_STATUS_ORDER = {"ready": 0, "in_progress": 1, "reviewed": 2, "unanalyzed": 3}
+_STATUS_ORDER = {"ready": 0, "in_progress": 1, "corrupt": 2, "reviewed": 3, "unanalyzed": 4}
 
 
 def library_view(query: str = "", limit: int = 50, offset: int = 0) -> dict:
@@ -353,16 +377,17 @@ def library_view(query: str = "", limit: int = 50, offset: int = 0) -> dict:
     With a ``query`` it fuzzy-matches **every** video in every collection
     (including unanalyzed ones, which open for manual review), ranked by match.
 
-    Rendered clean copies are excluded — they're outputs, not sources. Findings
-    are held against the film, and a render rebuilds the copy from it, so the
-    film is the only thing there is to review; opening a copy redirects there
-    (see :func:`review_target`).
+    Rendered clean copies list alongside their film like any other video —
+    a copy is normally just an output with nothing of its own to review (see
+    :func:`review_target`, which redirects opening one to the film), but a
+    copy that already holds findings of its own needs to be reachable to
+    review them, and the grid is how a reviewer gets back to it.
     """
     index, sidecars = _ensure_index()
     q = query.strip().lower()
     items: list[dict] = []
     for name, path in index.items():
-        if path.suffix.lower() not in VIDEO_EXTS or is_clean_copy(path):
+        if path.suffix.lower() not in VIDEO_EXTS:
             continue
         analyzed = sidecar_for(path).name.lower() in sidecars
         if not q and not analyzed:
@@ -370,7 +395,7 @@ def library_view(query: str = "", limit: int = 50, offset: int = 0) -> dict:
         if q and q not in name and not _subseq(q, name):
             continue
         summ = _film_summary(path) if analyzed else {"count": 0, "undecided": 0}
-        status = _film_status(analyzed, summ["count"], summ["undecided"])
+        status = _film_status(analyzed, summ["count"], summ["undecided"], summ.get("corrupt", False))
         items.append({
             "path": str(path),
             "name": path.stem,
@@ -1332,6 +1357,7 @@ kbd{font-family:ui-monospace,monospace}
 #D .swbadge.in_progress{background:#152a3d;color:#7cc0ff}
 #D .swbadge.reviewed{background:#12331f;color:#5ee27f}
 #D .swbadge.unanalyzed{background:#22262c;color:var(--dim)}
+#D .swbadge.corrupt{background:#3a1414;color:#ff6e6e}
 #D .swanalyze{flex:0 0 auto;font-size:10.5px;padding:3px 9px;background:#243244;color:#cfe3ff;border-radius:6px}
 #D .swanalyze:hover{background:#2d4054}
 #D .swempty{padding:16px 14px;color:var(--dim2);font-size:12.5px;line-height:1.5}
@@ -2643,7 +2669,7 @@ function D_swLoad(q){
 }
 function D_swBadge(it){
   const lbl={ready:it.undecidedCount+' to review',in_progress:it.undecidedCount+' left',
-    reviewed:'reviewed ✓',unanalyzed:'not analyzed'}[it.status]||it.status;
+    reviewed:'reviewed ✓',unanalyzed:'not analyzed',corrupt:'⚠ unreadable'}[it.status]||it.status;
   return `<span class="swbadge ${it.status}">${lbl}</span>`;
 }
 function D_swRender(){
@@ -2820,6 +2846,7 @@ input:focus{border-color:var(--pick)}
 .badge{flex:0 0 auto;font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:99px}
 .badge.ready{background:#3a2c12;color:#f0c05a}.badge.in_progress{background:#152a3d;color:#7cc0ff}
 .badge.reviewed{background:#12331f;color:#5ee27f}.badge.unanalyzed{background:#22262c;color:var(--dim)}
+.badge.corrupt{background:#3a1414;color:#ff6e6e}
 .empty{padding:18px 14px;color:var(--dim2);font-size:13px;line-height:1.5}
 ::-webkit-scrollbar{width:12px}::-webkit-scrollbar-thumb{background:#39424e;border:3px solid transparent;background-clip:padding-box;border-radius:99px}
 </style>
@@ -2833,7 +2860,7 @@ input:focus{border-color:var(--pick)}
 <script>
 let items=[],active=-1,q='',timer=null,total=0;
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
-function badge(it){const l={ready:it.undecidedCount+' to review',in_progress:it.undecidedCount+' left',reviewed:'reviewed ✓',unanalyzed:'not analyzed'}[it.status]||it.status;return `<span class="badge ${it.status}">${l}</span>`;}
+function badge(it){const l={ready:it.undecidedCount+' to review',in_progress:it.undecidedCount+' left',reviewed:'reviewed ✓',unanalyzed:'not analyzed',corrupt:'⚠ unreadable'}[it.status]||it.status;return `<span class="badge ${it.status}">${l}</span>`;}
 function load(query){const tok=(q=query);fetch(`/api/library?q=${encodeURIComponent(query)}&limit=80`).then(r=>r.json()).then(d=>{if(q!==tok)return;items=d.items||[];total=d.total||0;active=items.length?0:-1;render();}).catch(()=>{items=[];render();});}
 function render(){const head=document.getElementById('head'),list=document.getElementById('list');
   head.textContent=q?`${total} match${total===1?'':'es'}`:`${items.filter(x=>x.status!=='reviewed').length} to review · ${items.filter(x=>x.status==='reviewed').length} reviewed`;

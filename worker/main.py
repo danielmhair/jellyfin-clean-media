@@ -904,7 +904,15 @@ def status_for_media(req: StatusRequest) -> list[MediaStatus]:
             j.status in (JobStatus.completed, JobStatus.rendered) for j in film_jobs
         )
         if sidecar_exists(media) or just_analyzed:
-            timeline = timeline_for(media)
+            # A single malformed sidecar (hand-edited, or a write cut short)
+            # must not 500 this whole batch — every other film in the page is
+            # still reviewable, so report this one as errored and move on.
+            try:
+                timeline = timeline_for(media)
+            except Exception as exc:
+                log.exception("unreadable sidecar for %s", media)
+                status.sidecarError = str(exc)
+                timeline = None
             if timeline is not None:
                 status.analyzed = True
                 status.total = len(timeline.segments)

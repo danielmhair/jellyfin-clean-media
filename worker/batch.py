@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -116,6 +117,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-gap", type=float, default=6.0)
     parser.add_argument("--min-samples", type=int, default=1)
     parser.add_argument("--force", action="store_true", help="ignore cached results")
+    parser.add_argument(
+        "--worker-url",
+        default=os.environ.get("CLEANMEDIA_WORKER_URL", "http://127.0.0.1:8765"),
+        help="base URL of a running worker to nudge into refreshing its review "
+        "grid when the batch finishes (default: %(default)s, or $CLEANMEDIA_WORKER_URL). "
+        "Set this when the batch runs on a different host than the worker — "
+        "otherwise the review grid can show freshly analyzed films as "
+        "unanalyzed for up to 30 minutes.",
+    )
     args = parser.parse_args(argv)
 
     engines = [e.strip() for e in args.engines.split(",") if e.strip()]
@@ -161,21 +171,28 @@ def main(argv: list[str] | None = None) -> int:
     # Nudge a running worker to rebuild its media index, so the review grid
     # shows these freshly written sidecars now instead of after its TTL.
     # Best-effort: the worker may not be running, and that is fine.
-    _ping_reindex()
+    _ping_reindex(args.worker_url)
     return 0
 
 
-def _ping_reindex(port: int = 8765) -> None:
+def _ping_reindex(worker_url: str) -> None:
     import urllib.request
 
     try:
         req = urllib.request.Request(
-            f"http://127.0.0.1:{port}/api/reindex", data=b"", method="POST"
+            f"{worker_url.rstrip('/')}/api/reindex", data=b"", method="POST"
         )
         with urllib.request.urlopen(req, timeout=60):
             print("    (asked the worker to refresh its review grid)", flush=True)
-    except Exception:
-        pass  # no worker, or it is busy — the TTL will catch up
+    except Exception as exc:
+        # No worker there, or it is busy — the TTL will catch up. But this is
+        # also what a wrong --worker-url looks like (e.g. batch run on a
+        # different host than the worker), which silently leaves the review
+        # grid showing these films as unanalyzed for up to 30 minutes — so
+        # say why, instead of failing silently.
+        print(f"    (could not reach the worker at {worker_url} to refresh its "
+              f"review grid: {exc}; it will catch up within 30 min, or POST "
+              f"/api/reindex yourself)", flush=True)
 
 
 if __name__ == "__main__":

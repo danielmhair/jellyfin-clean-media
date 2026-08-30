@@ -215,3 +215,22 @@ def test_no_clean_copy_reads_false(client, tmp_path):
 
 def test_empty_request_is_answered_empty(client):
     assert client.post("/api/status", json={"paths": []}).json() == []
+
+
+def test_one_corrupt_sidecar_does_not_500_the_whole_page(client, tmp_path):
+    """A malformed sidecar (hand-edited, or a write cut short) used to raise
+    uncaught out of the batch loop, 500ing the grid for every film in the
+    request — not just the broken one."""
+    _film(tmp_path, "Fine.mkv", [_segment(1, approved=True)])
+    broken = _film(tmp_path, "Broken.mkv", [_segment(1)])
+    sidecar_for(broken).write_text(
+        sidecar_for(broken).read_text(encoding="utf-8") + "}", encoding="utf-8"
+    )
+
+    response = client.post("/api/status", json={"paths": ["Fine.mkv", "Broken.mkv"]})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body[0]["analyzed"] is True and body[0]["approved"] == 1
+    assert body[1]["analyzed"] is False
+    assert body[1]["sidecarError"]

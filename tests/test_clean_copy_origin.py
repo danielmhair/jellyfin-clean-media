@@ -155,7 +155,29 @@ def test_reviewing_a_clean_copy_reviews_the_film(tmp_path):
     assert review_target(film) == film
 
 
-def test_the_switcher_does_not_offer_clean_copies(tmp_path, monkeypatch):
+def test_reviewing_a_clean_copy_with_its_own_findings_reviews_the_copy(tmp_path):
+    """Legacy data: a flag made on a clean copy before create_segment started
+    redirecting to the source is stranded there on purpose (see
+    _redirect_to_source's docstring — guess-migrating it risks a wrong
+    timestamp with no origin record to map through). review_target must not
+    bounce a reviewer away from findings that genuinely live on the copy."""
+    film, clean = _film_with_clean_copy(tmp_path, cuts=None)
+    sidecar_for(clean).write_text(
+        json.dumps({
+            "mediaFingerprint": "fp",
+            "segments": [{
+                "id": 1, "startMs": 1000, "endMs": 2000, "category": "manual",
+                "confidence": 1.0, "engine": "manual", "recommendedAction": "skip",
+                "approved": True, "reasoning": "Flagged from remote at 0:01",
+            }],
+        }),
+        encoding="utf-8",
+    )
+    assert review_target(clean) == clean
+    assert review_target(film) == film
+
+
+def test_the_grid_lists_clean_copies_alongside_their_film(tmp_path, monkeypatch):
     monkeypatch.setenv("CLEANMEDIA_MEDIA_ROOTS", str(tmp_path))
     from worker.review import library_view, warm_media_index
 
@@ -167,7 +189,11 @@ def test_the_switcher_does_not_offer_clean_copies(tmp_path, monkeypatch):
     warm_media_index()
 
     names = [it["name"] for it in library_view("some film")["items"]]
-    assert names == ["Some Film (2010)"]   # the copy is an output, not a source
+    # A copy is reachable from the grid like any other video — this is how a
+    # reviewer gets back to one that holds findings of its own (legacy flags
+    # made before create_segment started redirecting to the source), see
+    # test_reviewing_a_clean_copy_with_its_own_findings_reviews_the_copy below.
+    assert names == ["Some Film (2010)", "Some Film (2010) - Clean"]
 
 
 # -- what a re-render reads, and what it writes --------------------------------

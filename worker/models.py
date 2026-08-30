@@ -180,6 +180,9 @@ class MediaStatus(BaseModel):
     #: Whether a rendered clean copy of this film exists on disk (a "- Clean"
     #: version beside the original, or one in a cleaned/ subfolder).
     cleanCopy: bool = False
+    #: Set when the sidecar exists but failed to parse (hand-edited, or a write
+    #: cut short), instead of letting it 500 the whole batch this film is in.
+    sidecarError: Optional[str] = None
 
 
 class StatusRequest(BaseModel):

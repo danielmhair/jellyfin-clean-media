@@ -289,6 +289,31 @@ def test_library_view_worklist_search_and_status(tmp_path, monkeypatch):
     assert hits[0]["status"] == "unanalyzed"
 
 
+def test_library_view_survives_one_corrupt_sidecar(tmp_path, monkeypatch):
+    """A malformed sidecar (hand-edited, or a write cut short) must not 500 the
+    whole switcher — every other film in the library stays listed and usable,
+    and the broken one is flagged rather than silently dropped."""
+    monkeypatch.setenv("CLEANMEDIA_MEDIA_ROOTS", str(tmp_path))
+    from worker.review import library_view, warm_media_index
+
+    def seg(i, approved):
+        return {"id": i, "startMs": i, "endMs": i + 1, "category": "profanity",
+                "confidence": 1.0, "engine": "e", "recommendedAction": "mute",
+                "approved": approved}
+
+    _library_film(tmp_path, "Action", "Bang (2020).mkv", [seg(1, None)])  # ready
+    broken = _library_film(tmp_path, "Action", "Broken (2021).mkv", [seg(1, None)])
+    sidecar_for(broken).write_text(
+        sidecar_for(broken).read_text(encoding="utf-8") + "}", encoding="utf-8"
+    )  # trailing garbage, same shape as a truncated/hand-edited write
+    warm_media_index()
+
+    work = library_view()["items"]
+    assert [it["name"] for it in work] == ["Bang (2020)", "Broken (2021)"]
+    assert work[0]["status"] == "ready"
+    assert work[1]["status"] == "corrupt"
+
+
 def test_library_view_summary_refreshes_after_a_decision(tmp_path, monkeypatch):
     """Deciding a finding must move a film out of 'ready' — the cached summary is
     invalidated on the sidecar write, so the switcher isn't stale."""
