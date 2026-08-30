@@ -15,6 +15,98 @@ without handing their media to someone else's service.
 
 ---
 
+## See it in action
+
+Here's the whole thing, start to finish. No coding — just copy-paste and
+clicking.
+
+### 1. Turn it on
+
+Paste this into a terminal:
+
+```bash
+bash scripts/install.sh
+```
+
+It grabs everything it needs on its own. When it's done, run:
+
+```bash
+scripts/worker.sh
+```
+
+...and leave that window open. That's the brain — it's what actually watches
+your movies.
+
+> 🖼️ **Screenshot TODO:** terminal right after install finishes.
+
+### 2. Plug it into Jellyfin
+
+**Dashboard → Plugins → Repositories → Add Repository**, paste this in:
+
+```
+https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/manifest.json
+```
+
+Then **Catalogue → Clean Media → Install**, restart Jellyfin. A new **Clean
+Media** button shows up in your menu.
+
+> 🖼️ **Screenshot TODO:** Clean Media in Jellyfin's main menu.
+
+### 3. Tell it where your movies are
+
+Open Clean Media → **Settings**. Type in the worker's address and the folder
+your movies are in. Hit **Test connection** — green means you're good.
+
+> 🖼️ **Screenshot TODO:** Settings tab, connected and green.
+
+### 4. Scan a movie
+
+**Queue** tab → pick a movie → hit **Profanity**. Takes about a minute.
+
+Want it to also catch nudity and sex scenes? Hit **Visual scenes** too —
+that one's way slower (hours), so try it on one movie before you go queue
+your whole library.
+
+> 🖼️ **Screenshot TODO:** a scan running with a progress bar.
+
+### 5. Check what it found
+
+Hit **🎬 Review library**, pick your movie. You'll see a list of everything
+it flagged, each with a plain description of what it is — a bad word, a
+scene, whatever. For each one you just tap **✂ Cut it** or **👁 Leave it**.
+
+Nothing actually happens until you tap Cut — so you're always in control.
+
+The picture stays blurred by default while you review, so nobody walking by
+sees anything they shouldn't.
+
+> 🖼️ **Screenshot TODO:** the review screen — a finding, its description,
+> the Cut/Leave buttons.
+
+### 6. Watch it, clean
+
+Cut a scene out? It just gets skipped automatically next time you hit play —
+nothing else to do.
+
+Muted a word or blurred something? Hit **Render clean copy** — it builds a
+second, cleaned version of the movie that shows up as a pickable option in
+Jellyfin. Your original file never gets touched, either way.
+
+> 🖼️ **Screenshot TODO:** Render clean copy button + the Clean version
+> showing up in Jellyfin.
+
+### 7. Bonus: catch stuff live
+
+Watching on the TV or your phone and a bad word sneaks through? Open Clean
+Media on your phone → **Remote** tab → tap **Flag now**. It saves that exact
+moment so you can go clean it up later.
+
+> 🖼️ **Screenshot TODO:** Remote tab on a phone with Flag now.
+
+That's it — install it, point it at your movies, scan, review, watch clean.
+
+---
+
 ## Why Clean Media
 
 Content filters on streaming services are someone else's opinion applied to
@@ -55,6 +147,7 @@ For the complete capability catalog, see [docs/FEATURES.md](docs/FEATURES.md).
 
 ## Contents
 
+- [See it in action](#see-it-in-action)
 - [Why Clean Media](#why-clean-media)
 - [How it works](#how-it-works)
 - [Detection engines](#detection-engines)
