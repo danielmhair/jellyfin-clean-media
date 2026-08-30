@@ -15,3 +15,4 @@ plugin/dist/
 .pytest-tmp/
 .playwright-cli/
 .cleanmedia.env
+eval/corpus/
