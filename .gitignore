@@ -16,3 +16,4 @@ plugin/dist/
 .playwright-cli/
 .cleanmedia.env
 eval/corpus/
+eval/results/

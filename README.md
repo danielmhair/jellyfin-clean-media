@@ -34,8 +34,7 @@ It grabs everything it needs on its own. When it's done, run:
 scripts/worker.sh
 ```
 
-...and leave that window open. That's the brain — it's what actually watches
-your movies.
+...and leave that window open. That's the brain — it's what actually watches your movies.
 
 > 🖼️ **Screenshot TODO:** terminal right after install finishes.
 
