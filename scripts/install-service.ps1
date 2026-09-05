@@ -123,8 +123,13 @@ function Stop-WorkerProcesses {
     $victims = @()
     $held = Get-NetTCPConnection -LocalPort $OnPort -State Listen -ErrorAction SilentlyContinue
     if ($held) { $victims += $held.OwningProcess }
+    # \s+ used to require "uvicorn worker.main" with a literal space between
+    # them, but the venv's uvicorn.exe wrapper produces
+    # `...\uvicorn.exe" worker.main:app` -- "uvicorn" is immediately followed
+    # by `.exe"`, not whitespace, so that never matched and let an orphan
+    # that had already dropped off the port survive every future -Restart.
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match 'uvicorn\s+worker\.main' } |
+        Where-Object { $_.CommandLine -match 'uvicorn.*worker\.main' } |
         ForEach-Object { $victims += $_.ProcessId }
 
     foreach ($procId in ($victims | Select-Object -Unique | Where-Object { $_ })) {
