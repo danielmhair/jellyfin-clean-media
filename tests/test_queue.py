@@ -9,6 +9,7 @@ persisted ``queuePosition``) lives here, so this is where it is pinned down.
 
 from __future__ import annotations
 
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -50,6 +51,45 @@ class _RecordingEngine(EngineAdapter):
     def analyze(self, media_path, fingerprint, options, progress):
         self.calls += 1
         self.order.append(Path(media_path).name)
+        progress(1.0, "done")
+        return Timeline(mediaFingerprint=fingerprint, segments=[]), None
+
+    def render(self, *args, **kwargs):
+        raise NotImplementedError
+
+
+class _ConcurrencyEngine(EngineAdapter):
+    """Blocks inside analyze() until released, tracking how many calls are in
+    flight at once — so a test can assert on overlap (or its absence) between
+    lanes, not just eventual completion order."""
+
+    resumable = False
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self._lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+        self.release = threading.Event()
+
+    def version(self) -> str:
+        return "1.0"
+
+    def health(self):
+        return {}
+
+    def capabilities(self):
+        return {}
+
+    def analyze(self, media_path, fingerprint, options, progress):
+        with self._lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            self.release.wait(timeout=5.0)
+        finally:
+            with self._lock:
+                self.active -= 1
         progress(1.0, "done")
         return Timeline(mediaFingerprint=fingerprint, segments=[]), None
 
@@ -216,6 +256,78 @@ def test_pause_holds_the_next_start_and_resume_releases_it(engine, tmp_path):
 
     q.set_paused(False)
     assert _wait(lambda: engine.order == ["Film 0.mkv"])  # resume releases it
+
+
+# -- lanes: vlm runs alongside general -----------------------------------------
+
+
+def test_vlm_lane_runs_concurrently_with_general_lane(tmp_path, monkeypatch):
+    """A whisper job and a vlm job both start without waiting on each other --
+    proving the two lanes are independent, not one worker sharing turns."""
+    import worker.queue as queue_mod
+
+    vlm = _ConcurrencyEngine("vlm")
+    whisper = _ConcurrencyEngine("whisper")
+    monkeypatch.setitem(queue_mod.ENGINES, "vlm", vlm)
+    monkeypatch.setitem(queue_mod.ENGINES, "whisper", whisper)
+
+    store = Store(db_path=tmp_path / "jobs.db")
+    q = JobQueue(store, allowed_fn=lambda now: True, poll_s=0.01)
+    q.submit(JobCreate(mediaPath=str(_media(tmp_path, 0)), engine="vlm"))
+    q.submit(JobCreate(mediaPath=str(_media(tmp_path, 1)), engine="whisper"))
+
+    assert _wait(lambda: vlm.active == 1 and whisper.active == 1)
+
+    vlm.release.set()
+    whisper.release.set()
+    assert _wait(lambda: vlm.active == 0 and whisper.active == 0)
+
+
+def test_two_vlm_jobs_still_run_one_at_a_time(tmp_path, monkeypatch):
+    """The vlm lane keeps its single-slot behaviour -- a second visual job
+    waits for the first, it doesn't split hosts or run alongside it."""
+    import worker.queue as queue_mod
+
+    vlm = _ConcurrencyEngine("vlm")
+    monkeypatch.setitem(queue_mod.ENGINES, "vlm", vlm)
+
+    store = Store(db_path=tmp_path / "jobs.db")
+    q = JobQueue(store, allowed_fn=lambda now: True, poll_s=0.01)
+    q.submit(JobCreate(mediaPath=str(_media(tmp_path, 0)), engine="vlm"))
+    second = q.submit(JobCreate(mediaPath=str(_media(tmp_path, 1)), engine="vlm"))
+
+    assert _wait(lambda: vlm.active == 1)
+    time.sleep(0.2)  # give a (buggy) second slot a chance to also claim it
+    assert vlm.active == 1
+    assert store.get_job(second.id).status == JobStatus.queued
+
+    vlm.release.set()
+    assert _wait(lambda: store.get_job(second.id).status == JobStatus.completed)
+    assert vlm.max_active == 1
+
+
+def test_two_general_lane_jobs_still_run_one_at_a_time(tmp_path, monkeypatch):
+    """The general lane is unchanged too -- two whisper jobs still serialize
+    (this stays true even though it's not a requirement, just a side effect
+    of the general lane keeping its single-slot behaviour)."""
+    import worker.queue as queue_mod
+
+    whisper = _ConcurrencyEngine("whisper")
+    monkeypatch.setitem(queue_mod.ENGINES, "whisper", whisper)
+
+    store = Store(db_path=tmp_path / "jobs.db")
+    q = JobQueue(store, allowed_fn=lambda now: True, poll_s=0.01)
+    q.submit(JobCreate(mediaPath=str(_media(tmp_path, 0)), engine="whisper"))
+    second = q.submit(JobCreate(mediaPath=str(_media(tmp_path, 1)), engine="whisper"))
+
+    assert _wait(lambda: whisper.active == 1)
+    time.sleep(0.2)
+    assert whisper.active == 1
+    assert store.get_job(second.id).status == JobStatus.queued
+
+    whisper.release.set()
+    assert _wait(lambda: store.get_job(second.id).status == JobStatus.completed)
+    assert whisper.max_active == 1
 
 
 # -- where the clean copy is written ------------------------------------------

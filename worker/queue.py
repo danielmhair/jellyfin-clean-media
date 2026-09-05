@@ -1,4 +1,13 @@
-"""Single-GPU job queue: one background worker thread processes jobs in order."""
+"""Job queue: two lanes run concurrently, each single-file within itself.
+
+The ``vlm`` lane claims queued visual-analysis jobs (one at a time — a VLM job
+already fans its own samples out across every configured Ollama host, see
+``vlm_engine.py``, so the lane itself never needs more than one slot). The
+``general`` lane claims everything else: whisper/subtitle/pureframe analysis
+and every render, one at a time. Splitting these into two lanes is what lets a
+whisper pass and a visual pass run at the same time; within a lane, order and
+one-at-a-time semantics are unchanged from before lanes existed.
+"""
 
 from __future__ import annotations
 
@@ -68,14 +77,19 @@ class JobQueue:
         self.store = store
         # The queue order lives on the jobs themselves (``queuePosition``), not
         # in an in-memory FIFO, so it can be reordered and survives a restart.
-        # The worker waits on this condition and, when woken (a submit, reorder,
-        # requeue, resume, or the poll_s timeout), runs the lowest-position
-        # runnable job. ``_paused`` holds the *start* of the next job — it never
-        # preempts the one already running. ``_running_id`` is that job, so it is
-        # excluded from the "waiting" count.
+        # Two lane threads (see _loop/_lane_for) each wait on this condition
+        # and, when woken (a submit, reorder, requeue, resume, or the poll_s
+        # timeout), run the lowest-position runnable job in their own lane.
+        # ``_paused`` holds the *start* of the next job in either lane — it
+        # never preempts one already running. ``_running_ids`` holds those, so
+        # they're excluded from the "waiting" count and from the other lane's
+        # selection.
         self._cond = threading.Condition()
         self._paused = False
-        self._running_id: Optional[str] = None
+        # One id per active lane (at most one "vlm" + one "general" job at a
+        # time). Every job in this set is already committed to a lane and must
+        # not be claimed again by the other lane's loop.
+        self._running_ids: set[str] = set()
         # Ids asked to stop. A queued job is skipped when its turn comes; a
         # running job aborts at its next progress tick (see _progress_cb).
         self._cancelled: set[str] = set()
@@ -93,8 +107,12 @@ class JobQueue:
         # starts, so it resumes in the original order rather than losing the
         # in-memory queue on restart.
         self._recover()
-        self._worker = threading.Thread(target=self._loop, daemon=True, name="job-worker")
-        self._worker.start()
+        self._workers = [
+            threading.Thread(target=self._loop, args=(lane,), daemon=True, name=f"job-worker-{lane}")
+            for lane in ("vlm", "general")
+        ]
+        for w in self._workers:
+            w.start()
 
     # -- crash/restart recovery ----------------------------------------------
 
@@ -180,8 +198,23 @@ class JobQueue:
         pos = job.queuePosition if job.queuePosition is not None else math.inf
         return (pos, job.createdAt)
 
-    def _select_runnable(self) -> Optional[Job]:
-        """The lowest-position job that may start right now, or None.
+    @staticmethod
+    def _lane_for(job: Job) -> str:
+        """Which lane claims this job: ``"vlm"`` or ``"general"``.
+
+        Only a *queued* vlm-engine job is GPU-inference-bound in the way that
+        needs its own lane. Everything else — whisper/subtitle/pureframe
+        analysis, and every ``rendering`` job regardless of which engine
+        produced the analysis it renders from (renders are ffmpeg/CPU-bound,
+        not GPU-inference-bound) — shares the general lane, one at a time,
+        exactly as the single worker loop behaved before lanes existed.
+        """
+        if job.status == JobStatus.queued and job.engine == "vlm":
+            return "vlm"
+        return "general"
+
+    def _select_runnable(self, lane: str) -> Optional[Job]:
+        """The lowest-position job in ``lane`` that may start right now, or None.
 
         Runnable means: a render (``rendering`` — never schedule-gated) or an
         analysis job (``queued``) while the schedule window is open. Selection
@@ -196,12 +229,16 @@ class JobQueue:
         best: Optional[Job] = None
         best_key: Optional[tuple] = None
         for job in self.store.list_jobs():
+            if job.id in self._running_ids:
+                continue  # already claimed by the other lane
             if job.status == JobStatus.rendering:
                 pass  # renders are never gated by the schedule
             elif job.status == JobStatus.queued:
                 if not allowed:
                     continue
             else:
+                continue
+            if self._lane_for(job) != lane:
                 continue
             if job.id in self._cancelled:
                 continue  # cancelled mid-flight, status not yet reflected
@@ -210,8 +247,8 @@ class JobQueue:
                 best, best_key = job, key
         return best
 
-    def _claim_next(self) -> Job:
-        """Block until a runnable job exists, then mark and return it.
+    def _claim_next(self, lane: str) -> Job:
+        """Block until a runnable job exists in ``lane``, then mark and return it.
 
         Woken by ``_cond`` on any queue change, and every ``poll_s`` regardless,
         so a schedule window opening or a paused flag clearing is re-evaluated
@@ -219,9 +256,9 @@ class JobQueue:
         """
         while True:
             with self._cond:
-                job = self._select_runnable()
+                job = self._select_runnable(lane)
                 if job is not None:
-                    self._running_id = job.id
+                    self._running_ids.add(job.id)
                     return job
                 self._announce_schedule_hold()
                 self._cond.wait(timeout=self._poll_s)
@@ -373,14 +410,14 @@ class JobQueue:
         return job
 
     def queue_size(self) -> int:
-        """How many jobs are waiting to start (queued/rendering, not the running one)."""
+        """How many jobs are waiting to start (queued/rendering, not a running one)."""
         with self._cond:
-            running = self._running_id
+            running = set(self._running_ids)
         n = 0
         for job in self.store.list_jobs():
             if (
                 job.status in (JobStatus.queued, JobStatus.rendering)
-                and job.id != running
+                and job.id not in running
                 and job.id not in self._cancelled
             ):
                 n += 1
@@ -487,15 +524,15 @@ class JobQueue:
 
     # -- worker thread --------------------------------------------------------
 
-    def _loop(self) -> None:
+    def _loop(self, lane: str) -> None:
         while True:
-            job = self._claim_next()  # blocks until a runnable job is available
+            job = self._claim_next(lane)  # blocks until a runnable job is available
             job_id = job.id
             kind = self._kind_for(job)
             if kind is None or job.status == JobStatus.cancelled:
                 # Raced to a terminal/cancelled state between select and claim.
                 with self._cond:
-                    self._running_id = None
+                    self._running_ids.discard(job_id)
                 with self._cancel_lock:
                     self._cancelled.discard(job_id)
                 continue
@@ -537,7 +574,7 @@ class JobQueue:
                 )
             finally:
                 with self._cond:
-                    self._running_id = None
+                    self._running_ids.discard(job_id)
                     # Wake at once so the next job starts without waiting out a
                     # full poll_s — matters for the FIFO-fast test cadence.
                     self._cond.notify_all()

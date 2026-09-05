@@ -1,5 +1,14 @@
 <!-- Next plugin release changelog. Claude Code writes the user-facing notes here with each plugin change; the release workflow uses it as the changelog, then resets this file. Empty => the release falls back to the commit message. -->
 
+## A profanity pass and a visual pass can now run at the same time
+
+The worker used to run one analysis job at a time no matter what it was, so
+queuing a visual (VLM) pass for one film and a profanity (whisper) pass for
+another meant the second just waited its turn. Now those two kinds of work run
+in parallel automatically — visual analysis still runs one film at a time
+(using every configured GPU host for that one film, same as before), and so
+does profanity analysis, but the two no longer block each other.
+
 ## Fixed: some videos could never finish a profanity (whisper) pass
 
 A handful of videos — ones spliced from more than one source, such as a DVD
