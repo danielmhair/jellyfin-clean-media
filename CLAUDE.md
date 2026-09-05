@@ -189,6 +189,21 @@ release; it reads the note from the `CHANGELOG` env var.
   ASR word spans, clamped, small pad. Truly exact timing needs forced
   alignment / CrisperWhisper (`timingModel` option) — some subtitle lines are
   simply mistimed vs the audio and no algorithm can place those.
+- **A sequential audio decode can stop short partway through a film** — on a
+  DVD rip that spliced extra content into the main feature, at the exact
+  point of the splice — even against an already-local, byte-verified copy,
+  and lands at the *identical* timestamp on repeated attempts (unlike a real
+  flaky-share drop, which lands somewhere different each time, so "retrying
+  more" never helps here). It's *not* corruption sitting at that instant:
+  seeking straight to just past the break and decoding from there reads
+  cleanly, on every audio track — a fresh seek reinitializes the demuxer
+  instead of carrying forward whatever state the discontinuity broke. This
+  hit both faster-whisper's own PyAV-based decode and a plain sequential
+  ffmpeg extraction identically, so `whisper_engine.py` now extracts audio
+  with ffmpeg first, and when that comes up short, seeks past the break for
+  a second pass and stitches the two onto one continuous timeline
+  (`_extract_audio` / `_stitch_past_break`) rather than retrying the same
+  doomed sequential read.
 - **VLM = Ollama Qwen3-VL, `-instruct` tags mandatory** (bare tags are
   thinking models and return no answer). 4B is the minimum usable size; 2B
   hallucinates wildly. **Confidence scores are uncalibrated** (0.98 on an ice

@@ -1,5 +1,18 @@
 <!-- Next plugin release changelog. Claude Code writes the user-facing notes here with each plugin change; the release workflow uses it as the changelog, then resets this file. Empty => the release falls back to the commit message. -->
 
+## Fixed: some videos could never finish a profanity (whisper) pass
+
+A handful of videos — ones spliced from more than one source, such as a DVD
+rip with extra scenes cut into the main feature — always failed the whisper
+profanity pass partway through, even after every retry, with an error
+claiming a dropped network read. It wasn't actually the network: playback
+software can read past the splice point fine, but a straight sequential
+transcription trips on it every time. The transcription step now extracts
+the audio with ffmpeg first, and if that comes up short, picks back up right
+after the trouble spot and stitches the two pieces together, instead of
+retrying the exact same read and failing the same way again. Re-queue the
+audio pass on any film that previously failed this way.
+
 ## Fixed: one damaged review file could blank out the whole review page
 
 If a single film's `.cleanmedia.json` review file was damaged — cut short by
@@ -7,7 +20,12 @@ an interrupted write, or edited by hand and left invalid — opening the review
 page (or the collection grid's per-film progress dots) could fail for your
 **entire library**, showing nothing at all instead of just that one film. A
 damaged file is now reported as its own status ("unreadable") so every other
-film still lists and opens normally.
+film still lists and opens normally. Opening *that* film's own review page no
+longer shows a bare server error either — it names the exact file to fix and
+explains that the film itself is untouched. And saving a review decision now
+writes safely (to a temp file, then swapped in) instead of overwriting the
+file in place, so a save interrupted by a worker restart can no longer leave
+a half-written, damaged file behind in the first place.
 
 ## Fixed: freshly analyzed films could sit unlit for up to 30 minutes
 

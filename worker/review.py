@@ -11,6 +11,7 @@ any future render. Nothing acts on a finding until it is approved.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -286,10 +287,27 @@ def load_timeline(media: Path) -> Optional[Timeline]:
 
 
 def save_timeline(media: Path, timeline: Timeline) -> None:
-    """Write the sidecar. This is the record of every review decision."""
-    sidecar_for(media).write_text(
-        json.dumps(timeline.model_dump(), indent=2), encoding="utf-8"
+    """Write the sidecar. This is the record of every review decision.
+
+    Written to a temp file in the same directory and swapped in with
+    ``os.replace`` (atomic on both POSIX and Windows), rather than truncating
+    the sidecar in place — a save interrupted mid-write (worker restart, a
+    dropped network-share write) must never leave a half-written or
+    corrupted file behind, since that's every review decision made on the
+    film so far.
+    """
+    path = sidecar_for(media)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp"
     )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(timeline.model_dump(), indent=2))
+        os.replace(tmp_name, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp_name)
+        raise
     _invalidate_summary(media)  # its review counts changed
 
 

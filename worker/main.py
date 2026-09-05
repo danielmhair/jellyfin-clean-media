@@ -73,6 +73,7 @@ from .review import (
     resolve_media,
     set_approvals,
     sidecar_exists,
+    sidecar_for,
     stream_command,
     update_segment,
     warm_media_index,
@@ -448,7 +449,22 @@ def review_page(path: str = "") -> HTMLResponse:
     # A clean copy holds no decisions of its own — it is rebuilt from the film's
     # approvals on every render — so reviewing one reviews the film.
     media = review_target(media)
-    timeline = load_timeline(media)
+    try:
+        timeline = load_timeline(media)
+    except Exception as exc:
+        # A malformed sidecar (hand-edited, or a write cut short) must not 500
+        # with a bare stack trace, and must not silently open an empty Studio
+        # either — saving from there would overwrite the damaged file with an
+        # empty one, destroying findings that may still be hand-recoverable
+        # (the JSON is often intact but for one stray character). Surface the
+        # problem and the exact file to fix, matching how the library grid
+        # already reports this sidecar as "corrupt" rather than crashing.
+        log.exception("unreadable sidecar for %s", media)
+        raise HTTPException(
+            500,
+            f"{sidecar_for(media)} exists but failed to parse ({exc}). Fix or "
+            "remove it, then reload — the film's video is untouched.",
+        ) from exc
     if timeline is None:
         # No analysis — open an empty Studio for manual review. The real
         # fingerprint is written when the first segment is added (create_segment).

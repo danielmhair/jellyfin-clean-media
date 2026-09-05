@@ -68,9 +68,96 @@ class WhisperEngine(EngineAdapter):
     def _transcript_path(self, media_path: Path) -> Path:
         return media_path.with_name(media_path.stem + ".whisper.json")
 
+    def _extract_audio(self, media_path: Path, progress: ProgressCb) -> Path:
+        """Pre-extract the default audio track to a local mono 16kHz WAV.
+
+        faster-whisper decodes straight from the source container via PyAV,
+        and a sequential decode can stop short partway through even against
+        an already-local, byte-verified copy. Measured on one film: a plain
+        ffmpeg extraction (also sequential, from the same local copy) hit the
+        identical wall — but seeking straight to just past that timestamp and
+        decoding from there read cleanly, on every audio track. That is the
+        signature of a mid-file timestamp discontinuity, not corruption at
+        that instant: a DVD rip that spliced extra content into the main
+        feature is the usual cause. A fresh seek reinitializes the demuxer's
+        state instead of carrying the bad state forward, so a sequential
+        read that comes up short is followed by one more pass starting where
+        it broke, then the two are stitched onto one continuous timeline
+        (``_stitch_past_break``) rather than retried as-is — retrying the
+        same sequential read only reproduces the same break.
+        """
+        import subprocess
+
+        expected_s = media_duration(media_path)
+        wav_path = media_path.with_name(media_path.stem + ".cleanmedia-audio.wav")
+
+        def ffmpeg_extract(dst: Path, start_s: float = 0.0) -> None:
+            cmd = ["ffmpeg", "-v", "error", "-y"]
+            if start_s:
+                cmd += ["-ss", f"{start_s:.3f}"]
+            cmd += [
+                "-i", str(media_path),
+                "-map", "0:a:0", "-vn", "-sn",
+                "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+                str(dst),
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"ffmpeg audio extraction failed: {proc.stderr.strip()}"
+                )
+
+        def stitch_past_break(first_s: float) -> None:
+            remainder = wav_path.with_name(wav_path.stem + ".part2.wav")
+            ffmpeg_extract(remainder, start_s=first_s)
+            stitched = wav_path.with_name(wav_path.stem + ".stitched.wav")
+            concat_list = wav_path.with_name(wav_path.stem + ".concat.txt")
+            # Reference inputs by bare filename with cwd set to their folder,
+            # not full paths — the concat demuxer's list format doesn't need
+            # to deal with Windows drive letters/backslashes that way.
+            concat_list.write_text(
+                f"file '{wav_path.name}'\nfile '{remainder.name}'\n",
+                encoding="utf-8",
+            )
+            proc = subprocess.run(
+                [
+                    "ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0",
+                    "-i", str(concat_list), "-c", "copy", str(stitched),
+                ],
+                cwd=str(wav_path.parent), capture_output=True, text=True,
+            )
+            remainder.unlink(missing_ok=True)
+            concat_list.unlink(missing_ok=True)
+            if proc.returncode != 0:
+                raise RuntimeError(f"ffmpeg concat failed: {proc.stderr.strip()}")
+            wav_path.unlink(missing_ok=True)
+            stitched.rename(wav_path)
+
+        def run() -> Path:
+            ffmpeg_extract(wav_path)
+            got_s = media_duration(wav_path)
+            if expected_s and got_s < expected_s * 0.98:
+                progress(0.0, f"decode broke at {got_s:.0f}s — stitching past it")
+                stitch_past_break(got_s)
+                got_s = media_duration(wav_path)
+                if expected_s and got_s < expected_s * 0.98:
+                    raise RuntimeError(
+                        f"extracted only {got_s:.0f}s of audio from a "
+                        f"{expected_s:.0f}s film, even after stitching past "
+                        "one break"
+                    )
+            return wav_path
+
+        progress(0.0, "extracting audio track")
+        return retry_media_read(
+            run,
+            transient=(RuntimeError,),
+            on_retry=lambda exc: progress(0.0, f"retrying audio extraction: {exc}"),
+        )
+
     def _transcribe(
         self,
-        media_path: Path,
+        audio_path: Path,
         model_name: str,
         progress: ProgressCb,
         vad_filter: bool = False,
@@ -98,41 +185,37 @@ class WhisperEngine(EngineAdapter):
         # before the profanity. So expect this to help substantially but not
         # to close the gap: a human-written subtitle track got 9 of 9, which
         # is why the subtitle engine is preferred wherever one exists.
-        # faster-whisper decodes the whole audio up front (via PyAV) inside this
-        # call — before transcribe() returns — so a flaky-share read that drops
-        # mid-decode surfaces right here, and a retry re-reads the file cleanly.
         #
-        # The exception *class* is the trap this originally got wrong: a dropped
-        # SMB read raises PyAV's av.error.ArgumentError (EINVAL 22), which is a
-        # *ValueError*, not an OSError — so a filter of only (OSError, RuntimeError)
-        # never matched it, and every drop failed the job with zero retries. It
-        # bit only the largest films, whose full read runs long enough to reliably
-        # hit a drop. Catch av.error.FFmpegError (the base of ArgumentError and
-        # PyAV's other I/O errors); keep OSError for ENOENT 2 and RuntimeError for
-        # faster-whisper's own wrapping. A genuinely broken file fails every
-        # attempt and the last error surfaces unchanged. A full-film read off this
-        # share drops most of the time, so give it more attempts than the default.
+        # `audio_path` is already a plain WAV extracted by ffmpeg
+        # (_extract_audio) rather than the source film — PyAV's demux of the
+        # WAV is trivial, so a short decode here means the *WAV* was cut
+        # short (a local-disk hiccup, not a share drop). Kept as a cheap
+        # invariant check either way: this project's recurring failure mode
+        # is a step that reports success while covering only part of the
+        # film. The exception classes below still matter for that: a dropped
+        # read can surface as PyAV's av.error.ArgumentError (EINVAL 22),
+        # which is a *ValueError*, not an OSError — a filter of only
+        # (OSError, RuntimeError) never matches it, so real drops sail
+        # through with zero retries. Catch av.error.FFmpegError (the base of
+        # ArgumentError and PyAV's other I/O errors) alongside OSError
+        # (ENOENT 2) and RuntimeError (faster-whisper's own wrapping). A
+        # genuinely broken WAV fails every attempt and the last error
+        # surfaces unchanged.
         import av.error
 
-        expected_s = media_duration(media_path)
+        expected_s = media_duration(audio_path)
 
         def run():
             segments, info = model.transcribe(
-                str(media_path),
+                str(audio_path),
                 word_timestamps=True,
                 vad_filter=vad_filter,
                 beam_size=5,
             )
-            # PyAV raises on a dropped decode, but guard the one case it might
-            # not: a partial read that ends like a clean EOF would silently
-            # transcribe only the film's opening and report it "clean" — the
-            # invariant-not-exit-code failure this project keeps hitting. The
-            # container duration is a cheap header read (reliable even when the
-            # body decode is not); a short decode is a dropped read, so retry it.
             if expected_s and info.duration and info.duration < expected_s * 0.98:
                 raise TransientMediaRead(
                     f"decoded only {info.duration:.0f}s of a {expected_s:.0f}s "
-                    "film — dropped share read, retrying"
+                    "audio track, retrying"
                 )
             return segments, info
 
@@ -140,7 +223,6 @@ class WhisperEngine(EngineAdapter):
             run,
             transient=(OSError, RuntimeError, av.error.FFmpegError),
             on_retry=lambda exc: progress(0.01, f"retrying after read error: {exc}"),
-            backoffs=(3.0, 6.0, 9.0, 12.0, 15.0, 20.0, 30.0),
         )
         duration = info.duration or 1.0
 
@@ -197,12 +279,16 @@ class WhisperEngine(EngineAdapter):
             # (worker/staging.py). The transcript sidecar stays keyed to the
             # original media_path; only the decode reads the staged copy.
             with local_media(media_path, progress) as decode_path:
-                transcript = self._transcribe(
-                    decode_path,
-                    model_name,
-                    progress,
-                    vad_filter=bool(options.get("vadFilter", False)),
-                )
+                audio_path = self._extract_audio(decode_path, progress)
+                try:
+                    transcript = self._transcribe(
+                        audio_path,
+                        model_name,
+                        progress,
+                        vad_filter=bool(options.get("vadFilter", False)),
+                    )
+                finally:
+                    audio_path.unlink(missing_ok=True)
             transcript_path.write_text(
                 json.dumps(transcript, indent=1), encoding="utf-8"
             )
