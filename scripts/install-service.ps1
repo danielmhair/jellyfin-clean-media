@@ -141,9 +141,17 @@ function Stop-WorkerProcesses {
         # half-done, with the worker killed but not yet relaunched.
         cmd /c "taskkill /F /T /PID $procId >nul 2>nul"
     }
-    Start-Sleep -Seconds 2
-    $still = Get-NetTCPConnection -LocalPort $OnPort -State Listen -ErrorAction SilentlyContinue
-    return ($null -eq $still)
+    # /T kills the whole process tree, and if the worker had ffmpeg/whisper
+    # children running at the moment of the stop, tearing that tree down can
+    # take longer than a couple of seconds — a single fixed sleep-then-check
+    # here previously reported a false "still held, reboot to clear it" for a
+    # port that would have freed itself moments later. Poll instead.
+    foreach ($i in 1..10) {
+        Start-Sleep -Seconds 1
+        $still = Get-NetTCPConnection -LocalPort $OnPort -State Listen -ErrorAction SilentlyContinue
+        if ($null -eq $still) { return $true }
+    }
+    return $false
 }
 
 function Wait-Healthy {

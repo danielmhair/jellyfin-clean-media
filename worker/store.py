@@ -19,6 +19,10 @@ from .models import Job, JobStatus, Segment, Timeline
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
+TERMINAL_STATUSES = frozenset(
+    {JobStatus.completed, JobStatus.failed, JobStatus.cancelled, JobStatus.rendered}
+)
+
 
 def default_db_path() -> Path:
     """Where the jobs DB lives, overridable via ``CLEANMEDIA_DB``.
@@ -89,11 +93,27 @@ class Store:
             row = conn.execute("SELECT data FROM jobs WHERE id = ?", (job_id,)).fetchone()
         return Job.model_validate_json(row["data"]) if row else None
 
-    def list_jobs(self) -> list[Job]:
+    def list_jobs(self, recent_terminal: Optional[int] = None) -> list[Job]:
+        """Every job, newest first.
+
+        ``recent_terminal`` caps how many *finished* jobs (completed/failed/
+        cancelled/rendered) come back, keeping every active one regardless —
+        the queue and dashboard need the full active set to schedule and
+        report progress correctly, but a poller that just wants "what's
+        happening + recent history" (the review UI's queue tab) would
+        otherwise get a response that grows forever as the library is
+        worked through. Left ``None`` (the default, and what every internal
+        caller uses) returns the complete, unbounded history.
+        """
         with self._lock, self._connect() as conn:
             rows = conn.execute("SELECT data FROM jobs").fetchall()
         jobs = [Job.model_validate_json(r["data"]) for r in rows]
-        return sorted(jobs, key=lambda j: j.createdAt, reverse=True)
+        jobs.sort(key=lambda j: j.createdAt, reverse=True)
+        if recent_terminal is None:
+            return jobs
+        active = [j for j in jobs if j.status not in TERMINAL_STATUSES]
+        terminal = [j for j in jobs if j.status in TERMINAL_STATUSES][:recent_terminal]
+        return sorted(active + terminal, key=lambda j: j.createdAt, reverse=True)
 
     def delete_job(self, job_id: str) -> bool:
         with self._lock, self._connect() as conn:

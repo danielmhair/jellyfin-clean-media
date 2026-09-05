@@ -29,6 +29,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from ..models import Segment, Timeline
 from ..policy import DEFAULT_FIELD_GUIDANCE, OBSERVATIONS, Policy, classify, observe_json_footer
@@ -56,6 +57,44 @@ DEFAULT_NUM_GPU = 37
 # Frames are downscaled before inference: image size drives visual token
 # count, which dominates latency far more than model size does.
 FRAME_WIDTH = 512
+
+# Whether this machine's own GPU is currently driving inference for a running
+# visual pass. Whisper (and the subtitle engine's precise-timing pass) load
+# their own CUDA model on this SAME machine, so if one starts while this
+# host is still working a visual pass, they fight the local Ollama host for
+# the one card instead of genuinely running in parallel -- the queue's two
+# lanes are only independent resources when the visual pass's local host and
+# whisper's CUDA aren't the same physical GPU. The general lane checks this
+# before claiming a whisper job (see queue.py); dangaming2-style remote hosts
+# are unaffected and keep helping the visual pass regardless.
+_local_lock = threading.Lock()
+_local_workers = 0
+
+
+def _is_local_host(host: str) -> bool:
+    try:
+        return urlparse(host).hostname in ("localhost", "127.0.0.1", "::1")
+    except ValueError:
+        return False
+
+
+def local_host_busy() -> bool:
+    """True while a worker thread is actively using this machine's GPU for a running visual pass."""
+    with _local_lock:
+        return _local_workers > 0
+
+
+def _local_host_worker_started() -> None:
+    global _local_workers
+    with _local_lock:
+        _local_workers += 1
+
+
+def _local_host_worker_stopped() -> None:
+    global _local_workers
+    with _local_lock:
+        _local_workers -= 1
+
 
 def _prompt_digest(prompt: str) -> str:
     """Stable across processes, unlike hash(), which is seed-randomised."""
@@ -494,6 +533,9 @@ class VLMEngine(EngineAdapter):
             def worker(host: str) -> None:
                 nonlocal live
                 fails = 0
+                is_local = _is_local_host(host)
+                if is_local:
+                    _local_host_worker_started()
                 # The whole body is under try/finally: the ``live`` decrement and
                 # the "drained" sentinel MUST fire even if something in here
                 # throws, or the consumer blocks forever on result_q waiting for
@@ -533,6 +575,8 @@ class VLMEngine(EngineAdapter):
                             # un-done on disk so a resume retries it — and carry on.
                             result_q.put(("give_up", shot, when, exc))
                 finally:
+                    if is_local:
+                        _local_host_worker_stopped()
                     with state_lock:
                         live -= 1
                         if live == 0:

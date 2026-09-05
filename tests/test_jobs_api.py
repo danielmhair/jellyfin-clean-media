@@ -14,7 +14,7 @@ before it is resumed.
 import pytest
 from fastapi.testclient import TestClient
 
-from worker.main import app, jobs, store
+from worker.main import RECENT_JOBS_LIMIT, app, jobs, store
 from worker.models import Job, JobStatus
 
 
@@ -83,6 +83,25 @@ def test_requeue_of_a_completed_job_is_400(client, paused_queue):
     _plant(paused_queue, "c1", status=JobStatus.completed)
 
     assert client.post("/api/jobs/c1/requeue").status_code == 400
+
+
+# -- job listing ----------------------------------------------------------
+
+
+def test_job_list_caps_finished_history_but_keeps_every_active_job(client, paused_queue):
+    # A poller (the plugin's queue tab) hits this every few seconds forever;
+    # unbounded terminal history would make the response grow for as long as
+    # the worker keeps running (see RECENT_JOBS_LIMIT in worker/main.py).
+    for i in range(RECENT_JOBS_LIMIT + 20):
+        _plant(paused_queue, f"done{i}", status=JobStatus.completed)
+    _plant(paused_queue, "active1", status=JobStatus.queued)
+    _plant(paused_queue, "active2", status=JobStatus.running)
+
+    body = client.get("/api/jobs").json()
+
+    assert len(body) == RECENT_JOBS_LIMIT + 2
+    ids = {j["id"] for j in body}
+    assert "active1" in ids and "active2" in ids
 
 
 # -- pause / resume -----------------------------------------------------------

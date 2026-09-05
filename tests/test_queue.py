@@ -330,6 +330,44 @@ def test_two_general_lane_jobs_still_run_one_at_a_time(tmp_path, monkeypatch):
     assert whisper.max_active == 1
 
 
+def test_whisper_waits_while_this_machines_gpu_is_busy_with_a_visual_pass(
+    tmp_path, monkeypatch
+):
+    """Whisper loads its own CUDA model on this same machine, so it must not
+    start while ``vlm_engine`` reports this machine's own GPU is actively
+    driving a running visual pass -- that would fight the local Ollama host
+    for the one card instead of genuinely running in parallel. A different
+    general-lane job that doesn't touch the GPU is unaffected."""
+    import worker.queue as queue_mod
+    from worker.engines import vlm_engine as vlm_engine_mod
+
+    whisper = _RecordingEngine()
+    other = _RecordingEngine()
+    monkeypatch.setitem(queue_mod.ENGINES, "whisper", whisper)
+    monkeypatch.setitem(queue_mod.ENGINES, "subtitles", other)
+    monkeypatch.setattr(vlm_engine_mod, "local_host_busy", lambda: True)
+
+    store = Store(db_path=tmp_path / "jobs.db")
+    q = JobQueue(store, allowed_fn=lambda now: True, poll_s=0.01)
+    whisper_job = q.submit(
+        JobCreate(mediaPath=str(_media(tmp_path, 0)), engine="whisper")
+    )
+    q.submit(JobCreate(mediaPath=str(_media(tmp_path, 1)), engine="subtitles"))
+
+    # The GPU-free general-lane job goes ahead; whisper holds.
+    assert _wait(lambda: other.calls == 1)
+    time.sleep(0.2)
+    assert whisper.calls == 0
+    held = store.get_job(whisper_job.id)
+    assert held.status == JobStatus.queued
+    assert held.stage == "waiting for the visual pass to free this machine's GPU"
+
+    # Once the visual pass frees this machine's GPU, whisper is released.
+    monkeypatch.setattr(vlm_engine_mod, "local_host_busy", lambda: False)
+    q._signal()
+    assert _wait(lambda: whisper.calls == 1)
+
+
 # -- where the clean copy is written ------------------------------------------
 # Jellyfin only groups files as selectable *versions* of one movie when they
 # share a per-movie folder and each name begins, character for character, with

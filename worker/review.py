@@ -40,6 +40,12 @@ logger = get_logger("review")
 THUMB_WIDTH = 480
 CLIP_PAD_S = 15.0
 
+#: Review clips are short-lived scratch files a reviewer waits on live, so
+#: speed matters more than the visual quality that ``render.py`` optimizes
+#: for — GPU encode (proven working there, see ``use_nvenc``) turns the
+#: blocking transcode from several seconds of CPU x264 into roughly one.
+CLIP_VIDEO_ENCODE_ARGS = ["-c:v", "h264_nvenc", "-preset", "p1", "-rc", "vbr", "-cq", "26"]
+
 #: Engine identity for findings an administrator added by hand. Never runs,
 #: so a merge always keeps its segments.
 MANUAL_ENGINE = "manual"
@@ -947,7 +953,7 @@ def build_preview_clip(
         "-t", f"{win_dur:.3f}",
         "-filter_complex", filter_complex,
         "-map", "[outv]", "-map", "[outa]",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
+        *CLIP_VIDEO_ENCODE_ARGS,
         "-c:a", "aac", "-b:a", "128k",
         "-movflags", "+faststart", str(out),
     ]
@@ -1016,7 +1022,7 @@ def build_clip(
             "-ss", f"{start:.3f}", "-i", str(media), "-t", f"{duration:.3f}",
             "-map", "0:v:0", "-map", "0:a:0?",
             "-vf", "scale=640:-2",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
+            *CLIP_VIDEO_ENCODE_ARGS,
             *audio_args,
             "-movflags", "+faststart", str(out),
         ],
@@ -1049,7 +1055,7 @@ def _build_voice_clip(
                 "-i", str(wav),
                 "-map", "0:v:0", "-map", "1:a:0", "-shortest",
                 "-vf", "scale=640:-2",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
+                *CLIP_VIDEO_ENCODE_ARGS,
                 "-c:a", "aac", "-b:a", "128k",
                 "-movflags", "+faststart", str(out),
             ],
@@ -1378,6 +1384,7 @@ kbd{font-family:ui-monospace,monospace}
 #D .swbadge.corrupt{background:#3a1414;color:#ff6e6e}
 #D .swanalyze{flex:0 0 auto;font-size:10.5px;padding:3px 9px;background:#243244;color:#cfe3ff;border-radius:6px}
 #D .swanalyze:hover{background:#2d4054}
+#D .swanalyze.busy{opacity:.6;pointer-events:none}
 #D .swempty{padding:16px 14px;color:var(--dim2);font-size:12.5px;line-height:1.5}
 #D .discreet-toggle{margin-left:auto;display:flex;align-items:center;gap:9px;font-size:12.5px;color:var(--dim);
   background:var(--panel2);border:1px solid var(--line);border-radius:99px;padding:6px 12px;cursor:pointer;user-select:none}
@@ -1451,6 +1458,10 @@ kbd{font-family:ui-monospace,monospace}
 #D .monitor.loadingclip .cliploading{display:flex}
 #D .monitor .cliploading .spin{width:15px;height:15px;border-radius:99px;border:2px solid #3b6ea5;border-top-color:transparent;animation:D-spin .8s linear infinite}
 @keyframes D-spin{to{transform:rotate(360deg)}}
+/* Generic inline spinner for anything else waiting on a fetch (the switcher
+   list, the render plan, …) — currentColor so it fits wherever it's dropped. */
+#D .spin{display:inline-block;width:11px;height:11px;border-radius:99px;border:2px solid currentColor;
+  border-top-color:transparent;opacity:.7;animation:D-spin .8s linear infinite;vertical-align:-2px;margin-right:6px}
 #D .transport{display:flex;align-items:center;gap:12px;margin:10px auto 0;max-width:640px}
 #D .transport button{background:var(--panel2)}
 #D .transport .pp{background:#fff;color:#000;font-weight:700;width:42px;height:42px;border-radius:99px;font-size:16px}
@@ -1495,6 +1506,8 @@ kbd{font-family:ui-monospace,monospace}
 #D .edfilm .edfilmimg{position:absolute;inset:0;width:100%;height:100%;object-fit:fill;display:block}
 #D .edfilm .shotmark{position:absolute;top:0;bottom:0;width:2px;background:#ffffff66;pointer-events:none;z-index:2}
 #D .edwave{display:block;background:#0c0c0d;cursor:crosshair}
+#D .wavespin{position:absolute;top:4px;right:6px;width:13px;height:13px;border-radius:99px;
+  border:2px solid #6b7580;border-top-color:transparent;animation:D-spin .8s linear infinite;pointer-events:none}
 #D .edlane{position:relative;height:52px;margin-top:6px;background:#14181d;border-radius:6px;overflow:hidden;cursor:crosshair}
 #D .edlane .keeplane{position:absolute;inset:0;display:grid;place-items:center;color:#3f6d4e;font-size:10.5px;text-transform:uppercase;letter-spacing:.4px;pointer-events:none}
 #D .region{position:absolute;top:4px;bottom:4px;border-radius:6px;cursor:grab;overflow:hidden;border:1px solid;box-shadow:0 2px 6px #0006}
@@ -1506,6 +1519,8 @@ kbd{font-family:ui-monospace,monospace}
 #D .region .redge{position:absolute;top:0;bottom:0;width:9px;cursor:ew-resize;z-index:4}
 #D .region .redge.l{left:0} #D .region .redge.r{right:0}
 #D .edph{position:absolute;top:0;bottom:0;width:2px;background:#fff;box-shadow:0 0 5px #000;z-index:8;pointer-events:none}
+#D .edph.buffering{animation:D-phbuffer .9s ease-in-out infinite}
+@keyframes D-phbuffer{0%,100%{opacity:1}50%{opacity:.35}}
 #D .edsel{position:absolute;top:0;bottom:0;background:rgba(88,166,255,.22);border-left:2px solid #58a6ff;border-right:2px solid #58a6ff;z-index:6;pointer-events:none;display:none}
 #D .edtools{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:12px}
 #D .edtools button{font-size:12px}
@@ -2020,6 +2035,7 @@ function D_editor(){
       <div class="edtrack" style="width:${W}px" id="D-edtrack">
         <div class="edfilm" style="width:${W}px">${strip}${shots}</div>
         <canvas class="edwave" width="${W}" height="46" style="width:${W}px"></canvas>
+        <div class="wavespin" id="D-wavespin" hidden></div>
         <div class="edlane" style="width:${W}px" id="D-edlane"><div class="keeplane">plays normally where no region covers</div></div>
         <div class="edsel" id="D-edsel"></div>
         <div class="edph" id="D-edph"></div>
@@ -2172,15 +2188,18 @@ function D_drawWave(W){
   draw(null);
   if(span>HEAVY_MS)return;
   const tok=key;D.peaksKey=key;
+  const spin=document.getElementById('D-wavespin');
+  if(spin)spin.hidden=false;
   fetch(`/api/peaks?path=${encodeURIComponent(MEDIA)}&startMs=${Math.round(vs)}&endMs=${Math.round(ve)}&pad=0`)
     .then(r=>r.json()).then(d=>{
       if(D.peaksKey!==tok)return;   // a newer window won the race
+      if(spin)spin.hidden=true;
       D.peaks=d.peaks||[];
       const cv2=document.querySelector('#D-edcard canvas');
       if(cv2){const w2=cv2.width;const ctx=cv2.getContext('2d');ctx.clearRect(0,0,w2,46);ctx.fillStyle='#3a4650';
         const n=D.peaks.length,bw=w2/(n||1);
         for(let i=0;i<n;i++){const h=Math.max(2,D.peaks[i]*42);ctx.fillRect(i*bw,(46-h)/2,Math.max(1,bw-0.4),h);}}
-    }).catch(()=>{D.peaksKey=null;});
+    }).catch(()=>{if(D.peaksKey===tok){D.peaksKey=null;if(spin)spin.hidden=true;}});
 }
 
 function D_edresult(s,winStart,winEnd){
@@ -2198,22 +2217,24 @@ function D_add(){
   const st=D.playMs,en=Math.min(st+1500,D.viewEnd);
   if(en-st<200){D_ednote('playhead at edge');return;}
   const src=D_get(D.sel);
+  D_ednote('adding…');
   createSeg({startMs:Math.round(st),endMs:Math.round(en),category:src?src.category:'manual',
     recommendedAction:'skip',approved:true,reasoning:'added by hand'})
-    .then(seg=>refetch().then(()=>{D.sel=seg.id;D_render();}))
+    .then(seg=>refetch().then(()=>{D.sel=seg.id;D_ednote('');D_render();}))
     .catch(()=>D_ednote('could not add'));
 }
 function D_split(){
   const r=SEGS.find(x=>D.playMs>x.startMs+100&&D.playMs<x.endMs-100);
   if(!r){D_ednote('put the playhead inside a region to split');return;}
   const cut=Math.round(D.playMs), origEnd=r.endMs;
+  D_ednote('splitting…');
   // Second half becomes a new finding carrying the original's category/action/decision;
   // the original is shortened to the playhead. Two findings, gap-free — delete the
   // middle piece later to keep a beat.
   createSeg({startMs:cut,endMs:origEnd,category:r.category,recommendedAction:r.recommendedAction,
     approved:r.approved,reasoning:r.reasoning||''})
     .then(()=>patchSeg(r.id,{endMs:cut}))
-    .then(()=>refetch().then(()=>{const keep=D_get(r.id);if(keep)D.sel=keep.id;D_render();}))
+    .then(()=>refetch().then(()=>{const keep=D_get(r.id);if(keep)D.sel=keep.id;D_ednote('');D_render();}))
     .catch(()=>D_ednote('could not split'));
 }
 function D_delRegion(){
@@ -2221,7 +2242,8 @@ function D_delRegion(){
   D_deleteFinding(r);
 }
 function D_deleteFinding(r){
-  deleteSeg(r.id).then(()=>refetch().then(()=>{const n=D_nearest(D.playMs);D.sel=n?n.id:null;D_render();}))
+  D_ednote('deleting…');
+  deleteSeg(r.id).then(()=>refetch().then(()=>{const n=D_nearest(D.playMs);D.sel=n?n.id:null;D_ednote('');D_render();}))
     .catch(()=>D_ednote('could not delete'));
 }
 
@@ -2322,9 +2344,11 @@ function D_doMerge(){
   const cats=new Set(picked.map(p=>p.category));
   if(picked.length<2||cats.size!==1)return;
   const ids=picked.map(p=>p.id);
+  const btn=document.getElementById('D-mergego');
+  btn.disabled=true;const label=btn.textContent;btn.textContent='Merging…';
   mergeSeg(ids,'skip').then(()=>refetch().then(()=>{
     D.picks.clear();D.merge=false;const n=D_nearest(D.playMs);D.sel=n?n.id:null;D_render();}))
-    .catch(()=>D_ednote('could not merge'));
+    .catch(()=>{D_ednote('could not merge');btn.disabled=false;btn.textContent=label;});
 }
 
 // ---------- playback (Phase 1: per-window clip, with real audio) ----------
@@ -2410,11 +2434,16 @@ function D_saLoad(winStart,winEnd){
   if(sa.key===key&&(sa.buf||sa.loading))return;    // already have (or fetching) this window
   const ctx=D_saCtx(); if(!ctx)return;
   sa.key=key; sa.buf=null; sa.loading=true; sa.winStart=winStart; sa.winEnd=winEnd;
+  // A drag with no scrub sound yet reads as broken, not loading — pulse the
+  // playhead while its window decodes so it's clearly "still fetching."
+  const ph=document.getElementById('D-edph'); if(ph)ph.classList.add('buffering');
   fetch(`/api/scrub_audio?path=${encodeURIComponent(MEDIA)}&startMs=${winStart}&endMs=${winEnd}`)
     .then(r=>r.ok?r.arrayBuffer():Promise.reject())
     .then(ab=>ctx.decodeAudioData(ab))
-    .then(buf=>{if(D.sa.key===key){D.sa.buf=buf;D.sa.loading=false;}})
-    .catch(()=>{if(D.sa.key===key)D.sa.loading=false;});
+    .then(buf=>{if(D.sa.key===key){D.sa.buf=buf;D.sa.loading=false;
+      const p=document.getElementById('D-edph');if(p)p.classList.remove('buffering');}})
+    .catch(()=>{if(D.sa.key===key){D.sa.loading=false;
+      const p=document.getElementById('D-edph');if(p)p.classList.remove('buffering');}});
 }
 // Load a fresh window only when the cursor nears/leaves the buffered one, so a
 // slow drag reuses the buffer and only a big jump refetches.
@@ -2680,10 +2709,13 @@ function D_swClose(){SW.open=false;document.getElementById('D-swpanel').classLis
 function D_swToggle(){SW.open?D_swClose():D_swOpen();}
 function D_swLoad(q){
   const tok=(SW.q=q);
+  const head=document.getElementById('D-swhead'),list=document.getElementById('D-swlist');
+  if(head)head.textContent='';
+  if(list)list.innerHTML='<div class="swempty"><span class="spin"></span>Loading…</div>';
   fetch(`/api/library?q=${encodeURIComponent(q)}&limit=60`).then(r=>r.json()).then(d=>{
     if(SW.q!==tok)return;                 // a newer keystroke already fired
     SW.items=d.items||[];SW.total=d.total||0;SW.active=SW.items.length?0:-1;D_swRender();
-  }).catch(()=>{SW.items=[];SW.total=0;D_swRender();});
+  }).catch(()=>{if(SW.q!==tok)return;SW.items=[];SW.total=0;D_swRender();});
 }
 function D_swBadge(it){
   const lbl={ready:it.undecidedCount+' to review',in_progress:it.undecidedCount+' left',
@@ -2707,17 +2739,19 @@ function D_swRender(){
   }).join('');
   list.querySelectorAll('.swrow').forEach(row=>row.onclick=e=>{
     const i=+row.dataset.i;
-    if(e.target.closest('.swanalyze')){e.stopPropagation();D_swAnalyze(SW.items[i]);return;}
+    const an=e.target.closest('.swanalyze');
+    if(an){e.stopPropagation();D_swAnalyze(an,SW.items[i]);return;}
     D_swPick(SW.items[i]);
   });
 }
 // Open ANY video for review — even unanalyzed (empty Studio, review by hand).
 function D_swPick(it){location.href='/api/review?path='+encodeURIComponent(it.path);}
-function D_swAnalyze(it){
+function D_swAnalyze(el,it){
   if(!confirm('Queue analysis (profanity + visual) for “'+it.name+'”?\nThe visual pass is GPU-heavy and can take hours.'))return;
+  el.textContent='Queuing…';el.classList.add('busy');
   Promise.all(['subtitles','vlm'].map(engine=>fetch('/api/jobs',{method:'POST',
     headers:{'Content-Type':'application/json'},body:JSON.stringify({mediaPath:it.path,engine})})))
-    .then(()=>D_swLoad(SW.q)).catch(()=>{});
+    .then(()=>D_swLoad(SW.q)).catch(()=>{el.textContent='Analyze';el.classList.remove('busy');});
 }
 function D_swScroll(){const el=document.querySelector('#D-swlist .swrow.active');if(el)el.scrollIntoView({block:'nearest'});}
 function D_swKey(e){
@@ -2866,6 +2900,9 @@ input:focus{border-color:var(--pick)}
 .badge.reviewed{background:#12331f;color:#5ee27f}.badge.unanalyzed{background:#22262c;color:var(--dim)}
 .badge.corrupt{background:#3a1414;color:#ff6e6e}
 .empty{padding:18px 14px;color:var(--dim2);font-size:13px;line-height:1.5}
+.spin{display:inline-block;width:12px;height:12px;border-radius:99px;border:2px solid currentColor;
+  border-top-color:transparent;opacity:.7;animation:review-spin .7s linear infinite;vertical-align:-2px;margin-right:7px}
+@keyframes review-spin{to{transform:rotate(360deg)}}
 ::-webkit-scrollbar{width:12px}::-webkit-scrollbar-thumb{background:#39424e;border:3px solid transparent;background-clip:padding-box;border-radius:99px}
 </style>
 <div class="wrap">
@@ -2879,7 +2916,10 @@ input:focus{border-color:var(--pick)}
 let items=[],active=-1,q='',timer=null,total=0;
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 function badge(it){const l={ready:it.undecidedCount+' to review',in_progress:it.undecidedCount+' left',reviewed:'reviewed ✓',unanalyzed:'not analyzed',corrupt:'⚠ unreadable'}[it.status]||it.status;return `<span class="badge ${it.status}">${l}</span>`;}
-function load(query){const tok=(q=query);fetch(`/api/library?q=${encodeURIComponent(query)}&limit=80`).then(r=>r.json()).then(d=>{if(q!==tok)return;items=d.items||[];total=d.total||0;active=items.length?0:-1;render();}).catch(()=>{items=[];render();});}
+function load(query){const tok=(q=query);
+  document.getElementById('list').innerHTML='<div class="empty"><span class="spin"></span>Loading…</div>';
+  document.getElementById('head').textContent='';
+  fetch(`/api/library?q=${encodeURIComponent(query)}&limit=80`).then(r=>r.json()).then(d=>{if(q!==tok)return;items=d.items||[];total=d.total||0;active=items.length?0:-1;render();}).catch(()=>{if(q!==tok)return;items=[];render();});}
 function render(){const head=document.getElementById('head'),list=document.getElementById('list');
   head.textContent=q?`${total} match${total===1?'':'es'}`:`${items.filter(x=>x.status!=='reviewed').length} to review · ${items.filter(x=>x.status==='reviewed').length} reviewed`;
   if(!items.length){list.innerHTML=`<div class="empty">${q?'No video matches “'+esc(q)+'”.':'Nothing analyzed yet — search a title to open it for manual review.'}</div>`;return;}

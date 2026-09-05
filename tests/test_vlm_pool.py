@@ -222,6 +222,69 @@ def test_all_hosts_down_aborts_with_checkpoint(tmp_path, monkeypatch):
     json.loads(checkpoint.read_text(encoding="utf-8"))  # valid JSON
 
 
+def test_local_host_busy_tracks_a_localhost_worker(tmp_path, monkeypatch):
+    """``local_host_busy()`` is what the queue's general lane checks before
+    letting a whisper job start (whisper loads its own CUDA model on this
+    same machine). It must be true only while a worker thread is actually
+    driving inference against this machine's own host -- not a remote pool
+    host -- and must clear once that worker is done."""
+    from worker.engines import vlm_engine as vlm_engine_mod
+
+    media, cache, _ = _make_film(tmp_path, n_shots=5)
+    eng = VLMEngine()
+    monkeypatch.setattr(eng, "_grab", lambda m, when: b"jpeg")
+
+    seen_busy = threading.Event()
+    release = threading.Event()
+
+    def fake_ask(host, model, jpeg, prompt, num_ctx=2048, num_gpu=None):
+        if host == "http://localhost:11434":
+            assert vlm_engine_mod.local_host_busy()
+            seen_busy.set()
+        release.wait(timeout=5.0)
+        return {}
+
+    monkeypatch.setattr(eng, "_ask", fake_ask)
+    assert not vlm_engine_mod.local_host_busy()
+
+    th = threading.Thread(
+        target=_run,
+        args=(eng, media, cache, ["http://localhost:11434", "http://remote:11434"]),
+        daemon=True,
+    )
+    th.start()
+    try:
+        assert seen_busy.wait(timeout=5.0), "localhost worker never ran"
+        assert vlm_engine_mod.local_host_busy()
+    finally:
+        release.set()
+        th.join(timeout=5.0)
+    assert not th.is_alive()
+    assert not vlm_engine_mod.local_host_busy()
+
+
+def test_local_host_busy_stays_false_for_a_remote_only_pool(tmp_path, monkeypatch):
+    """A pool of only remote hosts never touches this machine's own GPU, so
+    it must never report busy -- whisper should be free to run alongside it."""
+    from worker.engines import vlm_engine as vlm_engine_mod
+
+    media, cache, _ = _make_film(tmp_path, n_shots=5)
+    eng = VLMEngine()
+    monkeypatch.setattr(eng, "_grab", lambda m, when: b"jpeg")
+
+    seen_busy = []
+
+    def fake_ask(host, model, jpeg, prompt, num_ctx=2048, num_gpu=None):
+        seen_busy.append(vlm_engine_mod.local_host_busy())
+        return {}
+
+    monkeypatch.setattr(eng, "_ask", fake_ask)
+    _run(eng, media, cache, ["http://a:11434", "http://b:11434"])
+
+    assert seen_busy and not any(seen_busy)
+    assert not vlm_engine_mod.local_host_busy()
+
+
 def test_hosts_env_default(monkeypatch):
     eng = VLMEngine()
     monkeypatch.setenv("CLEANMEDIA_VLM_HOSTS", "http://x:11434, http://y:11434/")

@@ -7,6 +7,15 @@ already fans its own samples out across every configured Ollama host, see
 and every render, one at a time. Splitting these into two lanes is what lets a
 whisper pass and a visual pass run at the same time; within a lane, order and
 one-at-a-time semantics are unchanged from before lanes existed.
+
+That said, a whisper job loads its own CUDA model on this same worker
+machine, so it is only genuinely a different resource from the visual pass
+when the visual pass isn't currently using this machine's own GPU (a remote
+pool host, e.g. a second machine's Ollama, doesn't count). The general lane
+holds a queued whisper job back while ``vlm_engine.local_host_busy()`` says
+this machine's GPU is in active use for a running visual pass, so the
+machine already helping that pass keeps helping it rather than defecting to
+a lower-priority whisper job — see ``_select_runnable``.
 """
 
 from __future__ import annotations
@@ -28,7 +37,7 @@ from .cleancopy import (
     render_target,
     write_origin_record,
 )
-from .engines import ENGINES
+from .engines import ENGINES, vlm_engine
 from .logging_config import get_logger
 from .models import Job, JobCreate, JobStatus, Timeline
 from .render import approved_for_render, render as render_clean
@@ -242,6 +251,19 @@ class JobQueue:
                 continue
             if job.id in self._cancelled:
                 continue  # cancelled mid-flight, status not yet reflected
+            if (
+                job.status == JobStatus.queued
+                and job.engine == "whisper"
+                and vlm_engine.local_host_busy()
+            ):
+                # Whisper loads its own CUDA model on this same machine, so
+                # starting it while a visual pass is actively using this
+                # machine's own GPU (as opposed to only a remote pool host)
+                # would fight Ollama for the one card instead of genuinely
+                # running in parallel. Leave it queued; a render or another
+                # general-lane job that doesn't touch the local GPU is still
+                # free to go ahead of it.
+                continue
             key = self._order_key(job)
             if best_key is None or key < best_key:
                 best, best_key = job, key
@@ -261,6 +283,8 @@ class JobQueue:
                     self._running_ids.add(job.id)
                     return job
                 self._announce_schedule_hold()
+                if lane == "general":
+                    self._announce_gpu_hold()
                 self._cond.wait(timeout=self._poll_s)
 
     def _announce_schedule_hold(self) -> None:
@@ -285,6 +309,32 @@ class JobQueue:
                 log.info(
                     "job %s waiting for scheduled hours (%s on %s)",
                     job.id, job.engine, _name(job),
+                )
+
+    def _announce_gpu_hold(self) -> None:
+        """Mark queued whisper jobs as waiting when this machine's own GPU is why.
+
+        Mirrors ``_announce_schedule_hold``: only called once the general
+        lane has nothing else runnable, so a whisper job blocked by
+        ``vlm_engine.local_host_busy()`` (see ``_select_runnable``) still
+        tells the administrator why it hasn't started, instead of just
+        sitting at "queued". Written only on the transition.
+        """
+        if self._paused or not vlm_engine.local_host_busy():
+            return
+        hold_stage = "waiting for the visual pass to free this machine's GPU"
+        for job in self.store.list_jobs():
+            if (
+                job.status == JobStatus.queued
+                and job.engine == "whisper"
+                and job.id not in self._cancelled
+                and job.stage != hold_stage
+            ):
+                job.stage = hold_stage
+                self.store.save_job(job)
+                log.info(
+                    "job %s waiting for this machine's GPU to free up (whisper on %s)",
+                    job.id, _name(job),
                 )
 
     def _signal(self) -> None:

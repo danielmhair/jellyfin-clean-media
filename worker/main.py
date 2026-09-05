@@ -11,6 +11,7 @@ import platform
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -351,9 +352,16 @@ def create_job(req: JobCreate) -> Job:
         raise HTTPException(400, str(exc))
 
 
+#: How many finished jobs the queue poll shows before they age out of view.
+#: The plugin's queue tab polls this every few seconds forever, so an
+#: unbounded history would make every poll's payload (and the "recent" list
+#: it renders) grow for as long as the worker keeps running.
+RECENT_JOBS_LIMIT = 20
+
+
 @app.get("/api/jobs", response_model=list[Job])
 def list_jobs() -> list[Job]:
-    return store.list_jobs()
+    return store.list_jobs(recent_terminal=RECENT_JOBS_LIMIT)
 
 
 @app.post("/api/jobs/cancel-all")
@@ -851,6 +859,16 @@ def segments_for_media(path: str, approvedOnly: bool = True) -> Timeline:
     return timeline
 
 
+#: Bound on how many paths a status batch resolves/reads at once. Each path
+#: costs a couple of blocking filesystem calls (resolve, and — once a film is
+#: analyzed — a sidecar read + clean-copy check), often over SMB/NAS at tens
+#: of ms apiece; running them one at a time made a full-library batch take
+#: as long as every film's I/O added up. They touch no shared mutable state
+#: (the index/store below are already lock-protected for concurrent reads),
+#: so a small thread pool hides that latency instead of paying it serially.
+_STATUS_FAN_OUT = 16
+
+
 @app.post("/api/status", response_model=list[MediaStatus])
 def status_for_media(req: StatusRequest) -> list[MediaStatus]:
     """Review state for a page of the library, in one round trip.
@@ -860,6 +878,10 @@ def status_for_media(req: StatusRequest) -> list[MediaStatus]:
     has, how many are still awaiting a decision, and whether analysis is
     queued or running.
     """
+    paths = req.paths or []
+    if not paths:
+        return []
+
     # Match jobs by file name rather than fingerprint: fingerprinting reads
     # 24MB per film, which is far too slow for a whole page of a library. Keep
     # every job per name (newest first), not just one: a film can have several
@@ -880,13 +902,11 @@ def status_for_media(req: StatusRequest) -> list[MediaStatus]:
             stage=job.stage, error=job.error, engine=job.engine,
         )
 
-    out: list[MediaStatus] = []
-    for path in req.paths or []:
+    def status_for_one(path: str) -> MediaStatus:
         status = MediaStatus(path=path)
         media = resolve_media(path)
         if media is None:
-            out.append(status)
-            continue
+            return status
 
         status.resolvedPath = str(media)
         film_jobs = jobs_by_name.get(media.name.lower(), [])
@@ -941,8 +961,11 @@ def status_for_media(req: StatusRequest) -> list[MediaStatus]:
                 status.cleanCopy = _has_clean_copy(media, film_jobs)
 
         status.enginesDone = sorted(engines_done)
-        out.append(status)
-    return out
+        return status
+
+    with ThreadPoolExecutor(max_workers=min(_STATUS_FAN_OUT, len(paths))) as pool:
+        # map() preserves input order even though workers finish out of order.
+        return list(pool.map(status_for_one, paths))
 
 
 @app.post("/api/reindex")

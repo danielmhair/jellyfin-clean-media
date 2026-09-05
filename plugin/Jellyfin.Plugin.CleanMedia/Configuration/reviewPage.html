@@ -164,7 +164,7 @@
                                     </label>
                                 </div>
                                 <div class="dotlegend" id="CmDotLegend" hidden></div>
-                                <div class="collist" id="CmAddList"></div>
+                                <div class="collist" id="CmAddList"><div class="empty"><span class="cm-spin"></span>Loading…</div></div>
                             </div>
                         </div>
 
@@ -384,6 +384,13 @@
 .cmRoot .pdot.on{background:var(--dc);border-color:transparent;box-shadow:0 0 0 2px rgba(255,255,255,.05);}
 .cmRoot .pdot.busy{border-color:var(--dc);animation:cmpulse 1.1s ease-in-out infinite;}
 @keyframes cmpulse{0%,100%{opacity:.35}50%{opacity:1}}
+/* Shared inline spinner for anything waiting on a fetch: a list still loading,
+   a button mid-request. currentColor so it matches whatever it's dropped into. */
+@keyframes cmspin{to{transform:rotate(360deg)}}
+.cmRoot .cm-spin{display:inline-block;width:11px;height:11px;border-radius:99px;
+  border:2px solid currentColor;border-top-color:transparent;opacity:.7;
+  animation:cmspin .7s linear infinite;vertical-align:-2px;margin-right:6px;}
+.cmRoot .cmbtn.busy,.cmRoot .iconbtn.busy{opacity:.7;cursor:default;}
 .cmRoot .dotlegend{display:flex;align-items:center;gap:13px;flex-wrap:wrap;margin:2px 2px 9px;
   font-size:10.5px;letter-spacing:.04em;color:var(--cm-muted);text-transform:none;font-weight:600;}
 .cmRoot .dotlegend[hidden]{display:none;}
@@ -818,6 +825,17 @@
         });
     }
 
+    // Disable a row button and mark it busy for the life of one request. Every
+    // caller below re-renders the whole row on success (loadJobs/applyReorder),
+    // which naturally clears this — the .catch is only there so a network
+    // failure (which skips that re-render) doesn't leave the button stuck.
+    function busyWhile(b, promise) {
+        if (b) { b.disabled = true; b.classList.add('busy'); }
+        return promise.catch(function (err) {
+            if (b) { b.disabled = false; b.classList.remove('busy'); }
+            throw err;
+        });
+    }
     function wireRowButtons() {
         page.querySelectorAll('#tab-queue [data-cancel]').forEach(function (b) {
             b.onclick = function () {
@@ -831,7 +849,7 @@
                         : 'It will be taken out of the queue. You can re-queue it later.',
                     confirmText: running ? 'Cancel analysis' : 'Remove'
                 }).then(function (yes) {
-                    if (yes) { api('DELETE', 'Jobs/' + encodeURIComponent(id), {}).then(loadJobs); }
+                    if (yes) { busyWhile(b, api('DELETE', 'Jobs/' + encodeURIComponent(id), {})).then(loadJobs).catch(function () {}); }
                 });
             };
         });
@@ -844,16 +862,16 @@
                         + 'and your review decisions are kept.',
                     confirmText: 'Remove'
                 }).then(function (yes) {
-                    if (yes) { api('DELETE', 'Jobs/' + encodeURIComponent(id), {}).then(loadJobs); }
+                    if (yes) { busyWhile(b, api('DELETE', 'Jobs/' + encodeURIComponent(id), {})).then(loadJobs).catch(function () {}); }
                 });
             };
         });
         page.querySelectorAll('#tab-queue [data-requeue]').forEach(function (b) {
             b.onclick = function () {
-                api('POST', 'Jobs/' + encodeURIComponent(b.getAttribute('data-requeue')) + '/Requeue', {}).then(function (res) {
+                busyWhile(b, api('POST', 'Jobs/' + encodeURIComponent(b.getAttribute('data-requeue')) + '/Requeue', {})).then(function (res) {
                     if (res && res.error) { page.querySelector('#CmQueueMsg').textContent = res.error; }
                     loadJobs();
-                });
+                }).catch(function () {});
             };
         });
         page.querySelectorAll('#tab-queue [data-review]').forEach(function (b) {
@@ -863,27 +881,27 @@
             };
         });
         page.querySelectorAll('#tab-queue [data-open]').forEach(function (b) {
-            b.onclick = function () { openFilmInJellyfin(b.getAttribute('data-open'), b.getAttribute('data-openfallback')); };
+            b.onclick = function () { openFilmInJellyfin(b, b.getAttribute('data-open'), b.getAttribute('data-openfallback')); };
         });
         page.querySelectorAll('#tab-queue [data-top]').forEach(function (b) {
-            b.onclick = function () { moveInQueue(b.getAttribute('data-top'), 'top'); };
+            b.onclick = function () { moveInQueue(b, b.getAttribute('data-top'), 'top'); };
         });
         page.querySelectorAll('#tab-queue [data-bottom]').forEach(function (b) {
-            b.onclick = function () { moveInQueue(b.getAttribute('data-bottom'), 'bottom'); };
+            b.onclick = function () { moveInQueue(b, b.getAttribute('data-bottom'), 'bottom'); };
         });
     }
 
     // Send the new Up-next order to the worker, then re-render from its truth.
-    function applyReorder(ids) {
-        api('POST', 'Jobs/Reorder', {}, { ids: ids }).then(function (res) {
+    function applyReorder(b, ids) {
+        return busyWhile(b, api('POST', 'Jobs/Reorder', {}, { ids: ids })).then(function (res) {
             if (res && res.jobs) { state.jobs = res.jobs; renderQueue(); }
             else { loadJobs(); }
-        });
+        }).catch(function () {});
     }
-    function moveInQueue(id, where) {
+    function moveInQueue(b, id, where) {
         var order = classify().upnext.map(function (j) { return j.id; }).filter(function (x) { return x !== id; });
         if (where === 'top') { order.unshift(id); } else { order.push(id); }
-        applyReorder(order);
+        applyReorder(b, order);
     }
 
     // When a render finishes, its clean copy is a new file Jellyfin hasn't seen.
@@ -924,11 +942,12 @@
         try { if (window.Emby && Emby.Page && Emby.Page.show) { Emby.Page.show('/' + url); return; } } catch (e) { /* fall through */ }
         window.location.hash = '#/' + url;
     }
-    function openFilmInJellyfin(renderedPath, mediaPath) {
+    function openFilmInJellyfin(b, renderedPath, mediaPath) {
         var msg = page.querySelector('#CmQueueMsg');
         var query = { path: renderedPath || mediaPath || '' };
         if (mediaPath) { query.fallback = mediaPath; }
-        api('GET', 'ItemForPath', query).then(function (res) {
+        busyWhile(b, api('GET', 'ItemForPath', query)).then(function (res) {
+            b.disabled = false; b.classList.remove('busy');
             if (!res || !res.itemId) { msg.textContent = 'That film isn’t in your Jellyfin library.'; return; }
             msg.textContent = res.isCleanCopy ? ''
                 : 'Opened in Jellyfin — pick the “Clean” version in the player. (If it isn’t listed yet, the library scan may still be running.)';
@@ -962,7 +981,7 @@
                 var idx = order.indexOf(id) + (after ? 1 : 0);
                 order.splice(idx, 0, dragId);
                 clearDrop();
-                applyReorder(order);
+                applyReorder(null, order);
             });
         });
     }
@@ -1083,16 +1102,22 @@
             var t = TYPES[e];
             var label = e === 'render' ? 'Clean copy' : t.tag;
             return '<span class="lg"><span class="d" style="--dc:' + t.color + '"></span>' + esc(label) + '</span>';
-        }).join('');
+        }).join('') + '<span class="lg" id="CmDotChecking" hidden><span class="cm-spin"></span>checking…</span>';
     }
     // Light up each film row's dots from the worker's per-film status, in one
     // batch call. enginesDone -> lit; an active job for that engine -> pulsing;
-    // the trailing "clean" dot lights when a rendered clean copy exists.
+    // the trailing "clean" dot lights when a rendered clean copy exists. The
+    // dots themselves start faint either way, so without this the film picker
+    // gives no sign the batch check is still running (see the "takes forever"
+    // report — the check itself got faster, but it's still not instant).
     function annotateFilmStatuses() {
         var els = page.querySelectorAll('#CmAddList [data-dots]');
         if (!els.length) { return; }
         var ids = Array.prototype.map.call(els, function (el) { return el.getAttribute('data-dots'); });
+        var spin = page.querySelector('#CmDotChecking');
+        if (spin) { spin.hidden = false; }
         api('POST', 'Status', {}, { itemIds: ids }).then(function (res) {
+            if (spin) { spin.hidden = true; }
             if (!res || res.unreachable || !res.items) { return; }
             var byId = {};
             res.items.forEach(function (it) { byId[normId(it.itemId)] = it; });
@@ -1116,7 +1141,7 @@
                     dot.title = TYPES[e].tag + (isDone ? ': done' : busy ? ': running' : ': not run');
                 });
             });
-        }).catch(function () { /* leave dots faint if the worker is unreachable */ });
+        }).catch(function () { if (spin) { spin.hidden = true; } /* leave dots faint if the worker is unreachable */ });
     }
     function wireAddClicks() {
         page.querySelectorAll('#CmAddList [data-col]').forEach(function (el) {
@@ -1140,6 +1165,7 @@
     function runSearch(term) {
         state.searchTerm = term;
         if (!term) { state.films = []; renderAdd(); return; }
+        page.querySelector('#CmAddList').innerHTML = '<div class="empty"><span class="cm-spin"></span>Searching…</div>';
         var srt = sortDef();
         ApiClient.getJSON(ApiClient.getUrl('Items', {
             SearchTerm: term, IncludeItemTypes: 'Movie,Episode', Recursive: true,
@@ -1355,6 +1381,7 @@
                     var out = page.querySelector('#CmQueueMsg');
                     if (ok.length) { out.textContent = 'Queued ' + name + ': ' + ok.map(function (r) { return r.tag; }).join(', ') + '.'; }
                     loadJobs();
+                    if (ok.length) { annotateFilmStatuses(); }
                     if (bad.length) {
                         msg.style.color = '#e3b341';
                         msg.textContent = 'Couldn’t queue ' + bad.map(function (r) { return r.tag; }).join(', ')
@@ -1516,6 +1543,7 @@
     }
 
     function loadSettings() {
+        page.querySelectorAll('.cmSaveStateEl').forEach(function (el) { el.innerHTML = '<span class="cm-spin"></span>Loading settings…'; });
         return ApiClient.getPluginConfiguration(pluginId).then(function (config) {
             page.querySelector('#CmWorkerUrl').value = config.WorkerUrl || '';
             page.querySelector('#CmTimeout').value = config.TimeoutSeconds || 15;
@@ -1531,7 +1559,9 @@
                 if (view && view.unreachable) { return; }
                 fillWorkerSettings(view);
             }).catch(function () { /* leave defaults */ });
-        }).then(clearDirty);
+        }).then(clearDirty).catch(function (err) {
+            page.querySelectorAll('.cmSaveStateEl').forEach(function (el) { el.textContent = 'Could not load settings: ' + err; });
+        });
     }
 
     function saveSettings() {
@@ -1920,6 +1950,10 @@
     function openReview(itemId) {
         // Open synchronously so the popup blocker allows it, then redirect.
         var win = window.open('', '_blank');
+        if (win) {
+            win.document.write('<body style="background:#111318;color:#8a94a3;font:14px system-ui;'
+                + 'display:flex;align-items:center;justify-content:center;height:100vh;margin:0">Opening review…</body>');
+        }
         api('GET', 'ReviewUrl', { itemId: itemId }).then(function (res) {
             if (res && res.url) { if (win) { win.location = res.url; } else { window.location = res.url; } }
             else if (win) { win.close(); }
@@ -2002,23 +2036,27 @@
     // queue controls
     page.querySelector('#CmShowAll').onclick = function () { state.hidden = {}; renderQueue(); };
     page.querySelector('#CmCancelAll').onclick = function () {
+        var b = page.querySelector('#CmCancelAll');
         cmConfirm({
             title: 'Cancel everything?',
             message: 'All queued and running jobs will be cancelled. Finished jobs and their analyses are kept.',
             confirmText: 'Cancel all'
         }).then(function (yes) {
             if (!yes) { return; }
-            api('POST', 'Jobs/CancelAll', {}).then(function (res) {
+            busyWhile(b, api('POST', 'Jobs/CancelAll', {})).then(function (res) {
+                b.disabled = false; b.classList.remove('busy');
                 if (res && res.cancelled != null) { page.querySelector('#CmQueueMsg').textContent = 'Cancelled ' + res.cancelled + ' job(s).'; }
                 loadJobs();
-            });
+            }).catch(function () {});
         });
     };
     page.querySelector('#CmPause').onclick = function () {
-        api('POST', 'Jobs/Pause', {}, { paused: !state.paused }).then(function (res) {
+        var b = page.querySelector('#CmPause');
+        busyWhile(b, api('POST', 'Jobs/Pause', {}, { paused: !state.paused })).then(function (res) {
+            b.disabled = false; b.classList.remove('busy');
             if (res && res.paused != null) { state.paused = !!res.paused; }
             renderQueue();
-        });
+        }).catch(function () {});
     };
     page.querySelector('#CmFilmSearch').addEventListener('input', function () {
         var term = this.value.trim();
