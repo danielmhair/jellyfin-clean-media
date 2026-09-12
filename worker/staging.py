@@ -78,10 +78,19 @@ def local_media(
     expected = path.stat().st_size  # a stat is metadata-only: reliable on the share
     staging_dir = Path(tempfile.mkdtemp(prefix="cleanmedia-stage-"))
     try:
+        gb = expected / 1024**3
         if progress is not None:
-            progress(0.0, f"staging {path.name} to local disk ({expected / 1024**3:.1f} GB)")
+            progress(0.0, f"staging {path.name} to local disk ({gb:.1f} GB)")
+
+        def on_percent(pct: float) -> None:
+            if progress is not None:
+                progress(
+                    min(pct / 100, 0.99),
+                    f"staging {path.name} to local disk ({pct:.0f}% of {gb:.1f} GB)",
+                )
+
         dst = staging_dir / path.name
-        _robocopy(path, dst)
+        _robocopy(path, dst, on_percent if progress is not None else None)
         got = dst.stat().st_size
         if got != expected:
             raise OSError(
@@ -93,27 +102,120 @@ def local_media(
         shutil.rmtree(staging_dir, ignore_errors=True)
 
 
-def _robocopy(src: Path, dst: Path) -> None:
+@contextlib.contextmanager
+def local_output(
+    path: Path, progress: Optional[Callable[[float, str], None]] = None
+) -> Iterator[Path]:
+    """Yield a local path to write to; copy it to ``path`` only on success.
+
+    The write-side counterpart to :func:`local_media`. A render writes for
+    hours straight, and the same flaky share that drops a long sequential
+    *read* drops a long sequential *write* too — ffmpeg cannot resume a
+    dropped write, only restart it, so a multi-hour render straight to the
+    share may never finish cleanly. Rendering to local disk and moving the
+    finished file with one resumable robocopy sidesteps that: nothing is ever
+    written at ``path`` until the local render is complete, so a failed
+    render never leaves a broken file on the share. A local ``path`` is used
+    unchanged (tests, local media pay nothing).
+    """
+    if not _is_unc(path) or shutil.which("robocopy") is None:
+        yield path
+        return
+
+    staging_dir = Path(tempfile.mkdtemp(prefix="cleanmedia-outstage-"))
+    local_path = staging_dir / path.name
+    try:
+        yield local_path
+        expected = local_path.stat().st_size
+        gb = expected / 1024**3
+        if progress is not None:
+            progress(0.99, f"copying {path.name} to the network ({gb:.1f} GB)")
+
+        def on_percent(pct: float) -> None:
+            if progress is not None:
+                # Pinned at 0.99, same as the message above: the numeric
+                # fraction must not regress this late in an hours-long render
+                # just because the final network copy has its own 0-100%.
+                progress(
+                    0.99,
+                    f"copying {path.name} to the network ({pct:.0f}% of {gb:.1f} GB)",
+                )
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _robocopy(local_path, path, on_percent if progress is not None else None)
+        got = path.stat().st_size
+        if got != expected:
+            raise OSError(
+                f"network copy of {path.name} is {got} bytes, the local "
+                f"render is {expected} — copy stopped short"
+            )
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+
+def _robocopy(
+    src: Path, dst: Path, on_percent: Optional[Callable[[float], None]] = None
+) -> None:
     """Copy one file with robocopy's restartable mode, raising on real failure.
 
     robocopy addresses a *file within a directory*, not path-to-path, and signals
     result through its exit code: 0-7 are success (bit 0 = files copied, bit 1 =
     extras, bit 2 = mismatches), 8 and above mean a copy failed. Treating any
     non-zero as failure — the usual mistake — would reject a normal success.
+
+    Without ``on_percent``, robocopy's own progress output is suppressed
+    (``/NP``) and the whole run is captured in one blocking call. With it, the
+    same per-file percentage is kept instead, so a caller's progress bar moves
+    during a multi-minute copy instead of sitting still until it finishes or
+    fails.
     """
-    proc = subprocess.run(
-        [
-            "robocopy", str(src.parent), str(dst.parent), src.name,
-            "/Z",       # restartable mode: resume a partial file across dropped reads
-            "/R:100",   # retry a failed read up to 100 times ...
-            "/W:2",     # ... waiting 2s between tries (a re-established SMB session)
-            "/NP", "/NDL", "/NJH", "/NJS", "/NC", "/NS",  # quiet: no per-file noise
-        ],
-        capture_output=True,
-        text=True,
+    args = [
+        "robocopy", str(src.parent), str(dst.parent), src.name,
+        "/Z",       # restartable mode: resume a partial file across dropped reads
+        "/R:100",   # retry a failed read up to 100 times ...
+        "/W:2",     # ... waiting 2s between tries (a re-established SMB session)
+        "/NDL", "/NJH", "/NJS", "/NC", "/NS",  # quiet: no per-file noise
+    ]
+    if on_percent is None:
+        proc = subprocess.run(args + ["/NP"], capture_output=True, text=True)
+        if proc.returncode >= 8:
+            raise OSError(
+                f"robocopy failed (exit {proc.returncode}) staging {src.name}:\n"
+                f"{proc.stdout}\n{proc.stderr}"
+            )
+        return
+
+    # robocopy rewrites its percentage in place with a bare \r, not a \n, so
+    # iterating stdout by line (which only splits on \n) never sees it — read
+    # byte by byte and treat either as a line terminator.
+    proc = subprocess.Popen(
+        args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace",
     )
+    assert proc.stdout is not None
+    tail: list[str] = []
+    buf = ""
+    while True:
+        ch = proc.stdout.read(1)
+        if ch == "":
+            break
+        if ch not in "\r\n":
+            buf += ch
+            continue
+        line = buf.strip()
+        buf = ""
+        if not line:
+            continue
+        tail.append(line)
+        del tail[:-40]
+        if line.endswith("%"):
+            try:
+                on_percent(float(line[:-1]))
+            except ValueError:
+                pass
+    proc.wait()
     if proc.returncode >= 8:
         raise OSError(
             f"robocopy failed (exit {proc.returncode}) staging {src.name}:\n"
-            f"{proc.stdout}\n{proc.stderr}"
+            + "\n".join(tail)
         )

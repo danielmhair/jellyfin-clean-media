@@ -21,6 +21,7 @@ from typing import Optional
 
 from .models import Segment, Timeline
 from .engines.base import ProgressCb
+from .staging import local_output
 
 BLUR_SIGMA = 30
 
@@ -129,7 +130,10 @@ def build_command(
     if skip and not duration_s:
         raise ValueError("duration_s is required to render skips")
 
-    cmd = ["ffmpeg", "-y", "-i", str(media_path)]
+    # DVD rips (MakeMKV) sometimes carry a malformed packet in a bitmap
+    # subtitle track; without this, ffmpeg aborts the whole remux on that one
+    # bad packet well into an otherwise-clean file instead of dropping it.
+    cmd = ["ffmpeg", "-y", "-fflags", "+discardcorrupt", "-i", str(media_path)]
     audio_in = "0"
     if audio_path is not None:
         # Raw PCM carries no header, so its rate/layout must be declared before
@@ -251,62 +255,74 @@ def _run_render(
             f"{final_path.stem}.cm-partial{final_path.suffix}"
         )
 
-    cmd, n_blur, n_mute = build_command(
-        media_path, timeline, output_path, use_nvenc=use_nvenc, duration_s=duration_s,
-        audio_path=audio_path, audio_sr=audio_sr, audio_ch=audio_ch,
-    )
-    n_skip = len(
-        [
-            s
-            for s in timeline.segments
-            if s.approved is not False and s.recommendedAction == "skip"
-        ]
-    )
-    # Global flags must precede the output path or ffmpeg ignores them.
-    cmd = cmd[:1] + ["-nostdin", "-nostats", "-progress", "pipe:1"] + cmd[1:]
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    progress(
-        0.0, f"rendering: {n_blur} blur, {n_skip} skip, {n_mute} mute segment(s)"
-    )
-
-    # stderr goes to a file, never an undrained pipe: ffmpeg blocks forever
-    # once a pipe nobody is reading fills up.
+    # ffmpeg writes to local disk, never straight to the share: a render runs
+    # for hours, same shape as the sequential read staged in worker/staging.py,
+    # and the same flaky share drops a write partway through just as it drops
+    # a read — but ffmpeg cannot resume a dropped write. local_output() is a
+    # no-op for a local output_path, so nothing changes for tests/local media.
     try:
-        with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as err:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=err,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+        with local_output(output_path, progress) as write_path:
+            cmd, n_blur, n_mute = build_command(
+                media_path, timeline, write_path, use_nvenc=use_nvenc, duration_s=duration_s,
+                audio_path=audio_path, audio_sr=audio_sr, audio_ch=audio_ch,
             )
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                if line.startswith("out_time_ms=") and duration_s:
-                    try:
-                        secs = int(line.split("=", 1)[1]) / 1_000_000
-                    except ValueError:
-                        continue
-                    progress(
-                        min(secs / duration_s, 0.99), f"rendered {secs / 60:.1f} min"
-                    )
-            proc.wait()
-            if proc.returncode != 0:
-                err.seek(0)
-                raise RuntimeError(f"ffmpeg render failed:\n{err.read()[-2000:]}")
+            n_skip = len(
+                [
+                    s
+                    for s in timeline.segments
+                    if s.approved is not False and s.recommendedAction == "skip"
+                ]
+            )
+            # Global flags must precede the output path or ffmpeg ignores them.
+            cmd = cmd[:1] + ["-nostdin", "-nostats", "-progress", "pipe:1"] + cmd[1:]
 
-        if not output_path.exists():
-            raise RuntimeError(f"ffmpeg reported success but {output_path} is missing")
-        if in_place:
-            # Same directory, so this is a rename: the old copy is replaced only
-            # now that a complete new one exists.
-            os.replace(output_path, final_path)
+            write_path.parent.mkdir(parents=True, exist_ok=True)
+            progress(
+                0.0, f"rendering: {n_blur} blur, {n_skip} skip, {n_mute} mute segment(s)"
+            )
+
+            # stderr goes to a file, never an undrained pipe: ffmpeg blocks
+            # forever once a pipe nobody is reading fills up.
+            with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as err:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=err,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    if line.startswith("out_time_ms=") and duration_s:
+                        try:
+                            secs = int(line.split("=", 1)[1]) / 1_000_000
+                        except ValueError:
+                            continue
+                        progress(
+                            min(secs / duration_s, 0.99), f"rendered {secs / 60:.1f} min"
+                        )
+                proc.wait()
+                if proc.returncode != 0:
+                    err.seek(0)
+                    raise RuntimeError(f"ffmpeg render failed:\n{err.read()[-2000:]}")
+
+            if not write_path.exists():
+                raise RuntimeError(f"ffmpeg reported success but {write_path} is missing")
+            # local_output copies write_path -> output_path on a clean exit
+            # from this block, and skips it entirely if we raised above.
     except BaseException:
+        # For a local (unstaged) output_path this is the very file ffmpeg was
+        # writing — never leave a half file behind. For a network path,
+        # local_output() never touched it, so this is a harmless no-op.
         if in_place:
-            output_path.unlink(missing_ok=True)  # never leave a half file behind
+            output_path.unlink(missing_ok=True)
         raise
+
+    if in_place:
+        # Same directory, so this is a rename: the old copy is replaced only
+        # now that a complete new one exists.
+        os.replace(output_path, final_path)
 
     progress(1.0, f"wrote {final_path.name}")
     return final_path

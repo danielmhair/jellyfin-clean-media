@@ -79,6 +79,15 @@ public class AnalyzeRequest
     /// it is genuinely one of that item's versions.
     /// </remarks>
     public string? Path { get; set; }
+
+    /// <summary>Re-run even if this engine already completed for this exact file.</summary>
+    /// <remarks>
+    /// Without this, the worker treats a resubmit of an unchanged file as an
+    /// accidental duplicate and hands back the old result untouched — correct
+    /// for a batch script re-run, wrong when an administrator explicitly
+    /// re-queues a "Done" pass wanting fresh findings.
+    /// </remarks>
+    public bool Force { get; set; }
 }
 
 /// <summary>A film to render a clean copy for.</summary>
@@ -523,13 +532,16 @@ public class CleanMediaController : ControllerBase
             var path = PathFor(itemId, request.Path);
             if (path is null)
             {
+                // Surfaced explicitly rather than skipped, so the caller sees
+                // a real reason instead of guessing one from a missing entry.
+                queued.Add(new { itemId, jobId = (string?)null, error = "item not found in the Jellyfin library" });
                 continue;
             }
 
             try
             {
                 var job = await _worker
-                    .SubmitJobAsync(path, request.Engine, cancellationToken)
+                    .SubmitJobAsync(path, request.Engine, request.Force, cancellationToken)
                     .ConfigureAwait(false);
                 queued.Add(new { itemId, jobId = job?.Id, status = job?.Status });
             }
@@ -600,11 +612,16 @@ public class CleanMediaController : ControllerBase
         });
     }
 
-    /// <summary>Jobs the worker knows about, for progress and cancellation.</summary>
+    /// <summary>
+    /// Jobs the worker knows about, for progress and cancellation.
+    /// <paramref name="recentLimit"/> caps how many finished jobs come back
+    /// (active jobs are always returned in full); the queue tab raises it
+    /// as the admin scrolls the Recent panel.
+    /// </summary>
     [HttpGet("Jobs")]
-    public async Task<ActionResult<object>> Jobs(CancellationToken cancellationToken)
+    public async Task<ActionResult<object>> Jobs(int recentLimit = 20, CancellationToken cancellationToken = default)
     {
-        var jobs = await _worker.ListJobsAsync(cancellationToken).ConfigureAwait(false);
+        var jobs = await _worker.ListJobsAsync(recentLimit > 0 ? recentLimit : 20, cancellationToken).ConfigureAwait(false);
         if (jobs is null)
         {
             return Ok(new { unreachable = true });

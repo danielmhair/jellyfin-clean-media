@@ -376,14 +376,21 @@ public class WorkerClient
     }
 
     /// <summary>Queue a film for analysis.</summary>
+    /// <remarks>
+    /// Resolving the caller's path can trigger a full (re)walk of the media
+    /// roots when the worker's cached index has gone stale — 15-20+ seconds
+    /// on a large NAS library — so this uses a generous timeout floor rather
+    /// than the (often short) configured default, which was measured racing
+    /// that rebuild and losing by a fraction of a second.
+    /// </remarks>
     public async Task<WorkerJob?> SubmitJobAsync(
-        string mediaPath, string engine, CancellationToken cancellationToken)
+        string mediaPath, string engine, bool force, CancellationToken cancellationToken)
     {
-        using var client = NewClient();
+        using var client = NewClient(Math.Max(Config.TimeoutSeconds, 45));
         using var response = await client
             .PostAsJsonAsync(
                 $"{Base}/api/jobs",
-                new { mediaPath, engine },
+                new { mediaPath, engine, force },
                 cancellationToken)
             .ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
@@ -483,14 +490,20 @@ public class WorkerClient
         }
     }
 
-    /// <summary>Every job the worker knows about, or null if it is unreachable.</summary>
-    public async Task<List<WorkerJob>?> ListJobsAsync(CancellationToken cancellationToken)
+    /// <summary>
+    /// Every job the worker knows about, or null if it is unreachable.
+    /// <paramref name="recentLimit"/> caps how many *finished* jobs come back
+    /// (active jobs are always returned in full) — the queue tab raises this
+    /// as the admin scrolls its Recent panel instead of fetching the whole
+    /// history on every poll.
+    /// </summary>
+    public async Task<List<WorkerJob>?> ListJobsAsync(int recentLimit, CancellationToken cancellationToken)
     {
         try
         {
             using var client = NewClient();
             return await client
-                .GetFromJsonAsync<List<WorkerJob>>($"{Base}/api/jobs", cancellationToken)
+                .GetFromJsonAsync<List<WorkerJob>>($"{Base}/api/jobs?recentLimit={recentLimit}", cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)

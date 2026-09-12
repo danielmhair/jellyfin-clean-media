@@ -55,6 +55,10 @@ class JobCreate(BaseModel):
     mediaPath: str
     engine: str = "pureframe"
     options: dict[str, Any] = Field(default_factory=dict)
+    #: Skip the "unchanged file, reuse the old completed result" dedup — an
+    #: admin explicitly re-running a "Done" pass wants fresh findings, not
+    #: the same result handed back untouched.
+    force: bool = False
 
 
 class Job(BaseModel):

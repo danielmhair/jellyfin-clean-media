@@ -569,7 +569,10 @@
         sessions: [], remotePoll: null, padMs: 1500,  // Remote tab: what's playing
         updating: false,             // true while an "Update now" apply is in flight
         guidanceDefault: {},         // observation key -> default VLM guidance text
-        restarting: false            // true while a Restart-worker is in flight
+        restarting: false,           // true while a Restart-worker is in flight
+        recentLimit: 20,             // how many finished jobs to fetch — grows as the Recent panel is scrolled
+        recentExhausted: false,      // true once the worker has no more finished jobs than we've already loaded
+        recentLoading: false         // guards against piling up requests while one "load more" fetch is in flight
     };
 
     // Observation keys the VLM answers, in prompt order, with a human label
@@ -611,7 +614,9 @@
     }
     function typeTag(t) { var d = TYPES[t]; return '<span class="type-tag" style="background:' + hex(d.color, .16) + ';color:' + d.color + '">' + d.tag + '</span>'; }
 
-    // ---- job classification (one GPU: one active job at a time) ----------
+    // ---- job classification (up to 3 lanes can be genuinely active at
+    // once: one VLM pass, one whisper/subtitle/pureframe pass, and one
+    // render — see worker/queue.py) --------------------------------------
     function isRenderingActive(j) {
         return j.status === 'rendering' && ((j.progress || 0) > 0 || (j.stage && j.stage.indexOf('queued') === -1));
     }
@@ -654,33 +659,52 @@
     //  QUEUE
     // ======================================================================
     function loadJobs() {
-        return api('GET', 'Jobs', {}).then(function (res) {
+        return api('GET', 'Jobs', { recentLimit: state.recentLimit }).then(function (res) {
             if (res.unreachable) {
                 page.querySelector('#CmQueueMsg').textContent = 'Worker unreachable — check the Worker URL on the Settings tab.';
                 state.jobs = [];
+                state.recentLoading = false;
                 renderQueue();
                 return;
             }
             page.querySelector('#CmQueueMsg').textContent = '';
             state.jobs = res.jobs || [];
+            // The worker caps finished jobs at recentLimit — fewer than that
+            // coming back means we've already fetched its whole history.
+            var finishedCount = state.jobs.filter(isTerminal).length;
+            state.recentExhausted = finishedCount < state.recentLimit;
+            state.recentLoading = false;
             detectNewRenders();
             renderQueue();
             schedulePoll();
         }).catch(function (err) {
+            state.recentLoading = false;
             page.querySelector('#CmQueueMsg').textContent = 'Could not load the queue: ' + err;
         });
+    }
+
+    // Grow how much finished-job history we ask for, then re-fetch — the
+    // Recent panel calls this when scrolled near its bottom.
+    function loadMoreRecent() {
+        if (state.recentLoading || state.recentExhausted) { return; }
+        state.recentLoading = true;
+        state.recentLimit += 20;
+        loadJobs();
     }
 
     function classify() {
         // Decide what is genuinely active from the FULL job set, then apply the
         // view filter only for display. A running/rendering job that a chip has
-        // hidden still holds the (single) GPU — so hiding it must NOT promote a
-        // queued job (e.g. a render waiting its turn) into "Running now" and
-        // make it look like it's running when it isn't.
+        // hidden still holds its lane — so hiding it must NOT promote a queued
+        // job (e.g. a render waiting its turn) into "Running now" and make it
+        // look like it's running when it isn't.
+        //
+        // A running analysis pass and an active render are different lanes and
+        // can both be true at once (up to a VLM pass, a whisper/subtitle/
+        // pureframe pass, AND a render, all at the same time) — busyAll is
+        // every such job, not "whichever kind exists first".
         var all = state.jobs;
-        var runningAll = all.filter(function (j) { return j.status === 'running'; });
-        var renderingAll = all.filter(isRenderingActive);
-        var busyAll = runningAll.length ? runningAll : renderingAll;
+        var busyAll = all.filter(isActive);
         var pendingAll = all.filter(isPending).sort(byPos);
 
         var activeAll;
@@ -775,7 +799,9 @@
         Q.innerHTML = g.upnext.length
             ? g.upnext.map(function (j, i) { return rowQueued(j, i, g.upnext.length); }).join('')
             : '<div class="empty">Queue is empty</div>';
-        R.innerHTML = g.recent.length ? g.recent.map(rowRecent).join('') : '<div class="empty">Nothing finished yet</div>';
+        var recentFooter = state.recentLoading ? '<div class="empty"><span class="cm-spin"></span>Loading more…</div>'
+            : (!state.recentExhausted && g.recent.length ? '<div class="empty">Scroll for more…</div>' : '');
+        R.innerHTML = (g.recent.length ? g.recent.map(rowRecent).join('') : '<div class="empty">Nothing finished yet</div>') + recentFooter;
         page.querySelector('#CmCActive').textContent = g.active.length;
         page.querySelector('#CmCQueued').textContent = g.upnext.length;
         page.querySelector('#CmCRecent').textContent = g.recent.length;
@@ -1186,9 +1212,15 @@
         if (engine === 'render') {
             var busy = ((st && st.jobs) || []).find(function (j) { return j.engine === 'render'; });
             var approved = (st && st.approved) || 0;
+            var pending = (st && st.pending) || 0;
             if (busy) { ps = { kind: 'busy', badge: busy.status === 'queued' ? 'Queued' : 'Rendering' }; note = 'Already in the queue.'; disabled = true; canSel = false; }
             else if (approved > 0) { ps = { kind: 'todo', badge: 'Ready' }; note = approved + ' approved finding' + (approved === 1 ? '' : 's') + ' to apply.'; }
-            else { ps = { kind: 'warn', badge: 'Nothing approved' }; note = 'Approve findings in review first.'; disabled = true; canSel = false; }
+            else if (pending > 0) { ps = { kind: 'warn', badge: 'Nothing approved' }; note = 'Approve findings in review first.'; disabled = true; canSel = false; }
+            // Zero approved with zero pending means every finding was reviewed
+            // and deliberately left in — that's a real, complete decision, not
+            // an unreviewed film, so it must not read as "go approve something".
+            else if (st && st.total > 0) { ps = { kind: 'done', badge: 'Nothing to cut' }; note = 'Reviewed — every finding was left in, so there’s nothing to render.'; disabled = true; canSel = false; }
+            else { ps = { kind: 'warn', badge: 'Nothing approved' }; note = 'Run a pass and approve findings first.'; disabled = true; canSel = false; }
         } else {
             ps = passState(engine, st);
             if (ps.kind === 'busy') { note = 'Already in the queue for this film.'; disabled = true; canSel = false; }
@@ -1370,9 +1402,17 @@
                             return { tag: c.def.tag, ok: !!(r && r.jobId), err: r && (r.error || (r.unreachable && 'worker unreachable')) };
                         }).catch(function (e) { return { tag: c.def.tag, ok: false, err: String(e) }; });
                     }
-                    return api('POST', 'Analyze', {}, { itemIds: [itemId], engine: c.engine, path: chosen }).then(function (r) {
-                        var q = (r.queued || []).filter(function (x) { return x.jobId; });
-                        return { tag: c.def.tag, ok: q.length > 0, err: q.length ? null : 'not found under media roots' };
+                    // force: re-running an already-"Done" pass must produce fresh
+                    // findings, not the worker's unchanged-file dedup handing back
+                    // the same old result silently.
+                    return api('POST', 'Analyze', {}, {
+                        itemIds: [itemId], engine: c.engine, path: chosen, force: c.ps.kind === 'done',
+                    }).then(function (r) {
+                        var row = (r.queued || [])[0];
+                        return {
+                            tag: c.def.tag, ok: !!(row && row.jobId),
+                            err: row && !row.jobId ? (row.error || 'no job returned') : null,
+                        };
                     }).catch(function (e) { return { tag: c.def.tag, ok: false, err: String(e) }; });
                 });
                 Promise.all(calls).then(function (results) {
@@ -2035,6 +2075,10 @@
 
     // queue controls
     page.querySelector('#CmShowAll').onclick = function () { state.hidden = {}; renderQueue(); };
+    page.querySelector('#CmRecent').addEventListener('scroll', function () {
+        var el = this;
+        if (el.scrollTop + el.clientHeight >= el.scrollHeight - 80) { loadMoreRecent(); }
+    });
     page.querySelector('#CmCancelAll').onclick = function () {
         var b = page.querySelector('#CmCancelAll');
         cmConfirm({

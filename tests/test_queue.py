@@ -24,7 +24,7 @@ from worker.cleancopy import (
     render_plan,
 )
 from worker.queue import JobQueue
-from worker.store import Store
+from worker.store import Store, media_fingerprint
 
 BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -156,6 +156,49 @@ def test_submit_assigns_increasing_positions(engine, tmp_path):
 
     positions = [store.get_job(jid).queuePosition for jid in ids]
     assert positions == [0, 1, 2]  # each submission goes to the back
+
+
+def test_submit_reuses_completed_result_for_unchanged_file(engine, tmp_path):
+    """An accidental duplicate submit (unchanged file, same engine) must not
+
+    burn GPU time re-analysing — it gets the existing completed job back.
+    """
+    store = Store(db_path=tmp_path / "jobs.db")
+    q = JobQueue(store, allowed_fn=lambda now: False, poll_s=0.01)
+    media = _media(tmp_path, 1)
+    done = Job(
+        id="done1", mediaPath=str(media), engine="fake",
+        mediaFingerprint=media_fingerprint(media), status=JobStatus.completed,
+        createdAt=BASE,
+    )
+    store.save_job(done)
+
+    reused = q.submit(JobCreate(mediaPath=str(media), engine="fake"))
+
+    assert reused.id == "done1"
+    assert engine.calls == 0
+
+
+def test_submit_force_bypasses_reuse_and_queues_fresh_analysis(engine, tmp_path):
+    """An admin explicitly re-running a "Done" pass wants new findings, not
+
+    the same completed job handed back untouched — force=True must skip the
+    unchanged-file reuse shortcut.
+    """
+    store = Store(db_path=tmp_path / "jobs.db")
+    q = JobQueue(store, allowed_fn=lambda now: False, poll_s=0.01)
+    media = _media(tmp_path, 1)
+    done = Job(
+        id="done1", mediaPath=str(media), engine="fake",
+        mediaFingerprint=media_fingerprint(media), status=JobStatus.completed,
+        createdAt=BASE,
+    )
+    store.save_job(done)
+
+    fresh = q.submit(JobCreate(mediaPath=str(media), engine="fake", force=True))
+
+    assert fresh.id != "done1"
+    assert fresh.status == JobStatus.queued
 
 
 # -- reorder ------------------------------------------------------------------

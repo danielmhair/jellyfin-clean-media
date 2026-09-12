@@ -1,12 +1,20 @@
-"""Job queue: two lanes run concurrently, each single-file within itself.
+"""Job queue: three lanes run concurrently, each single-file within itself.
 
 The ``vlm`` lane claims queued visual-analysis jobs (one at a time — a VLM job
 already fans its own samples out across every configured Ollama host, see
 ``vlm_engine.py``, so the lane itself never needs more than one slot). The
-``general`` lane claims everything else: whisper/subtitle/pureframe analysis
-and every render, one at a time. Splitting these into two lanes is what lets a
-whisper pass and a visual pass run at the same time; within a lane, order and
-one-at-a-time semantics are unchanged from before lanes existed.
+``general`` lane claims whisper/subtitle/pureframe analysis, one at a time.
+The ``render`` lane claims every render (a ``rendering`` job), also one at a
+time. Splitting these into three lanes is what lets a whisper pass, a visual
+pass and a render run at once; within a lane, order and one-at-a-time
+semantics are unchanged from before lanes existed.
+
+A render earns its own lane rather than sharing ``general``: it is
+ffmpeg/CPU-bound (a mute-only render never touches the GPU at all; a blur or
+skip render uses the NVENC hardware encoder, a different unit from the CUDA
+compute whisper and the VLM use), so it is never fighting either analysis
+pass for the same resource, and there is no reason to make a rendered-and-
+ready film wait behind an hours-long transcription pass.
 
 That said, a whisper job loads its own CUDA model on this same worker
 machine, so it is only genuinely a different resource from the visual pass
@@ -41,6 +49,7 @@ from .engines import ENGINES, vlm_engine
 from .logging_config import get_logger
 from .models import Job, JobCreate, JobStatus, Timeline
 from .render import approved_for_render, render as render_clean
+from .staging import local_media
 from .store import Store, media_fingerprint
 
 log = get_logger("queue")
@@ -95,9 +104,9 @@ class JobQueue:
         # selection.
         self._cond = threading.Condition()
         self._paused = False
-        # One id per active lane (at most one "vlm" + one "general" job at a
-        # time). Every job in this set is already committed to a lane and must
-        # not be claimed again by the other lane's loop.
+        # One id per active lane (at most one "vlm" + one "general" + one
+        # "render" job at a time). Every job in this set is already committed
+        # to a lane and must not be claimed again by another lane's loop.
         self._running_ids: set[str] = set()
         # Ids asked to stop. A queued job is skipped when its turn comes; a
         # running job aborts at its next progress tick (see _progress_cb).
@@ -118,7 +127,7 @@ class JobQueue:
         self._recover()
         self._workers = [
             threading.Thread(target=self._loop, args=(lane,), daemon=True, name=f"job-worker-{lane}")
-            for lane in ("vlm", "general")
+            for lane in ("vlm", "general", "render")
         ]
         for w in self._workers:
             w.start()
@@ -209,17 +218,21 @@ class JobQueue:
 
     @staticmethod
     def _lane_for(job: Job) -> str:
-        """Which lane claims this job: ``"vlm"`` or ``"general"``.
+        """Which lane claims this job: ``"vlm"``, ``"render"`` or ``"general"``.
 
-        Only a *queued* vlm-engine job is GPU-inference-bound in the way that
-        needs its own lane. Everything else — whisper/subtitle/pureframe
-        analysis, and every ``rendering`` job regardless of which engine
-        produced the analysis it renders from (renders are ffmpeg/CPU-bound,
-        not GPU-inference-bound) — shares the general lane, one at a time,
-        exactly as the single worker loop behaved before lanes existed.
+        A *queued* vlm-engine job is GPU-inference-bound in the way that needs
+        its own lane. A ``rendering`` job — regardless of which engine
+        produced the analysis it renders from — is ffmpeg/CPU-bound (or
+        NVENC-bound for a blur/skip render), a different resource from either
+        analysis pass, so it gets its own lane too rather than queuing behind
+        an hours-long transcription. Everything else (whisper/subtitle/
+        pureframe analysis) shares the general lane, one at a time, exactly as
+        the single worker loop behaved before lanes existed.
         """
         if job.status == JobStatus.queued and job.engine == "vlm":
             return "vlm"
+        if job.status == JobStatus.rendering:
+            return "render"
         return "general"
 
     def _select_runnable(self, lane: str) -> Optional[Job]:
@@ -353,7 +366,15 @@ class JobQueue:
             raise ValueError(f"unknown engine '{req.engine}'; installed: {list(ENGINES)}")
 
         fingerprint = media_fingerprint(media)
-        duplicate = self.store.find_completed_by_fingerprint(fingerprint, req.engine)
+        # An unforced submit of an unchanged file is treated as an accidental
+        # duplicate (a batch script re-run, a double click) and gets the old
+        # result back rather than burning GPU time on identical work. An
+        # admin explicitly asking to re-run a "Done" pass means the opposite
+        # — they want fresh findings — so force=True skips this reuse.
+        duplicate = (
+            None if req.force
+            else self.store.find_completed_by_fingerprint(fingerprint, req.engine)
+        )
         if duplicate:
             log.info(
                 "job %s: reusing completed %s result for %s (no re-analysis)",
@@ -784,16 +805,23 @@ class JobQueue:
         # Skips shorten the film, so the renderer needs its true length to work
         # out the spans to keep. Mute/blur-only renders don't, so skip the probe.
         needs_duration = any(s.recommendedAction == "skip" for s in approved)
-        duration = media_duration(media) if needs_duration else None
 
         assert timeline is not None  # approved is non-empty, so it loaded
-        rendered = render_clean(
-            media,
-            Timeline(mediaFingerprint=timeline.mediaFingerprint, segments=approved),
-            output,
-            self._progress_cb(job),
-            duration_s=duration,
-        )
+        # A render is a full-length sequential read, same shape as whisper's
+        # transcription pass — and the same flaky share drops it partway
+        # through (at a different point each run), so ffmpeg must decode from
+        # a local copy rather than the network share. The sidecar/origin
+        # record stay keyed to the original media path; only the read is
+        # local.
+        with local_media(media, self._progress_cb(job)) as decode_path:
+            duration = media_duration(decode_path) if needs_duration else None
+            rendered = render_clean(
+                decode_path,
+                Timeline(mediaFingerprint=timeline.mediaFingerprint, segments=approved),
+                output,
+                self._progress_cb(job),
+                duration_s=duration,
+            )
 
         # Leave a trail from the copy back to the film and the cuts applied, so
         # a moment flagged while watching the copy can be placed in the film.
