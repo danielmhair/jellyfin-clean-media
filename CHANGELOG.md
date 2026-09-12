@@ -11,6 +11,10 @@ New entries are added automatically by the release workflow from the notes in
 [Releases page](../../releases) and in `manifest.json`.
 
 <!-- releases -->
+## 0.2.29.0 — 2026-09-12
+
+- Fixed a clean copy silently losing its audio's language tag and "default" marking whenever the render included a cut scene (not just a mute/blur) — Jellyfin would show the clean version's audio with no language and not pre-selected. The clean copy's audio is now tagged and marked default again, matching the original.
+
 ## 0.2.28.0 — 2026-09-12
 
 - Queue tab: the Recent list no longer stops at 20 finished jobs — scroll down and it loads more, so your whole job history stays reachable.
