@@ -105,6 +105,40 @@ def test_skip_uses_trim_concat_not_setpts_framerate():
     assert "-c:s" not in cmd
 
 
+def test_skip_restores_audio_language_and_default_disposition():
+    """The filter graph's [outv]/[outa] pads are new streams with no lineage
+
+    to the source — ffmpeg does not carry a mapped stream's language tag or
+    "default" disposition through a labeled filter pad the way it does a
+    direct -map, so a skip render would otherwise silently lose its audio
+    language and revert every track to "not default".
+    """
+    cmd, _, _ = build_command(
+        Path("in.mkv"),
+        _tl(_seg(1, 10_000, 12_000, "skip")),
+        Path("out.mkv"),
+        duration_s=60.0,
+    )
+    assert cmd[cmd.index("-map_metadata:s:v:0") + 1] == "0:s:v:0"
+    assert cmd[cmd.index("-map_metadata:s:a:0") + 1] == "0:s:a:0"
+    assert cmd[cmd.index("-disposition:v:0") + 1] == "default"
+    assert cmd[cmd.index("-disposition:a:0") + 1] == "default"
+
+
+def test_mute_only_does_not_touch_metadata_or_disposition():
+    """A direct -map (no filter graph) already carries the source stream's
+
+    language/disposition through untouched, so nothing needs restoring —
+    and no flag with a hardcoded "default" should overwrite a non-default
+    track on a file that never goes through the skip's filter graph.
+    """
+    cmd, _, _ = build_command(
+        Path("in.mkv"), _tl(_seg(1, 1000, 2000, "mute")), Path("out.mkv")
+    )
+    assert "-map_metadata:s:v:0" not in cmd
+    assert "-disposition:a:0" not in cmd
+
+
 def test_skip_requires_duration():
     with pytest.raises(ValueError):
         build_command(

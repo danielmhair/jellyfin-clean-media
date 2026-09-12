@@ -151,6 +151,17 @@ def build_command(
         cmd += ["-filter_complex", _cut_filter_complex(keeps, blur_expr, mute_expr, audio_in)]
         # A cut shortens the timeline; copied subtitles would drift out of sync.
         cmd += ["-map", "[outv]", "-map", "[outa]", "-sn"]
+        # The filter graph's [outv]/[outa] pads are new streams with no
+        # lineage to the source: unlike a direct -map, ffmpeg does not carry
+        # the mapped stream's language tag or "default" disposition through a
+        # labeled filter pad, so without this every skip render silently lost
+        # its audio language and reverted its tracks to "not default".
+        cmd += [
+            "-map_metadata:s:v:0", "0:s:v:0",
+            "-map_metadata:s:a:0", f"{audio_in}:s:a:0",
+            "-disposition:v:0", "default",
+            "-disposition:a:0", "default",
+        ]
     else:
         cmd += ["-map", "0:v:0", "-map", f"{audio_in}:a:0", "-map", "0:s?"]
         if blur_expr:

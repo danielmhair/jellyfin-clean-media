@@ -12,7 +12,7 @@ obj/
 *.vlm-progress.json
 *.srt
 plugin/dist/
-.pytest-tmp/
+.pytest-*/
 .playwright-cli/
 .cleanmedia.env
 eval/corpus/
