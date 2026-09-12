@@ -11,6 +11,10 @@ New entries are added automatically by the release workflow from the notes in
 [Releases page](../../releases) and in `manifest.json`.
 
 <!-- releases -->
+## 0.2.30.0 — 2026-09-12
+
+- Fixed re-running a "Done" whisper or visual pass finishing suspiciously fast and changing nothing — the previous fix only stopped the queue from handing back the same old job, but whisper's own cached transcript and the visual pass's own saved progress were still silently reused underneath it. Re-running a pass now genuinely starts over for both.
+
 ## 0.2.29.0 — 2026-09-12
 
 - Fixed a clean copy silently losing its audio's language tag and "default" marking whenever the render included a cut scene (not just a mute/blur) — Jellyfin would show the clean version's audio with no language and not pre-selected. The clean copy's audio is now tagged and marked default again, matching the original.

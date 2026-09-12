@@ -9,6 +9,14 @@
     "imageUrl": "",
     "versions": [
       {
+        "version": "0.2.30.0",
+        "changelog": "- Fixed re-running a \"Done\" whisper or visual pass finishing suspiciously fast and changing nothing \u2014 the previous fix only stopped the queue from handing back the same old job, but whisper's own cached transcript and the visual pass's own saved progress were still silently reused underneath it. Re-running a pass now genuinely starts over for both.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.30.0.zip",
+        "checksum": "a2ea4f49c8680dc06c8c4d6cc8115fe0",
+        "timestamp": "2026-09-12T16:43:16"
+      },
+      {
         "version": "0.2.29.0",
         "changelog": "- Fixed a clean copy silently losing its audio's language tag and \"default\" marking whenever the render included a cut scene (not just a mute/blur) \u2014 Jellyfin would show the clean version's audio with no language and not pre-selected. The clean copy's audio is now tagged and marked default again, matching the original.",
         "targetAbi": "10.11.0.0",
