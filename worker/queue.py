@@ -382,12 +382,23 @@ class JobQueue:
             )
             return duplicate
 
+        options = dict(req.options)
+        if req.force:
+            # Skipping the reuse shortcut above only stops the queue from
+            # handing back the same completed job — each engine keeps its own
+            # on-disk cache below that (whisper's transcript sidecar, the
+            # VLM's .vlm-progress.json checkpoint), which would otherwise
+            # still load old work and finish in a fraction of a second
+            # instead of genuinely re-analysing. force has to reach both.
+            options.setdefault("forceTranscribe", True)
+            options.setdefault("restart", True)
+
         job = Job(
             id=uuid.uuid4().hex[:12],
             mediaPath=str(media),
             engine=req.engine,
             mediaFingerprint=fingerprint,
-            options=req.options,
+            options=options,
         )
         with self._cond:
             job.queuePosition = self._alloc_position()

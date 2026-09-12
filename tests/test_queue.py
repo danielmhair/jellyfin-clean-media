@@ -201,6 +201,27 @@ def test_submit_force_bypasses_reuse_and_queues_fresh_analysis(engine, tmp_path)
     assert fresh.status == JobStatus.queued
 
 
+def test_submit_force_also_tells_the_engine_to_ignore_its_own_cache(engine, tmp_path):
+    """Bypassing the queue's reuse shortcut is not enough on its own — whisper
+
+    keeps a transcript sidecar and the VLM keeps a .vlm-progress.json
+    checkpoint, each independent of the queue and each capable of handing
+    back old work in a fraction of a second. force must reach both, not just
+    stop the queue from short-circuiting.
+    """
+    store = Store(db_path=tmp_path / "jobs.db")
+    q = JobQueue(store, allowed_fn=lambda now: False, poll_s=0.01)
+    media = _media(tmp_path, 1)
+
+    forced = q.submit(JobCreate(mediaPath=str(media), engine="fake", force=True))
+    plain = q.submit(JobCreate(mediaPath=str(_media(tmp_path, 2)), engine="fake"))
+
+    assert forced.options.get("forceTranscribe") is True
+    assert forced.options.get("restart") is True
+    assert "forceTranscribe" not in plain.options
+    assert "restart" not in plain.options
+
+
 # -- reorder ------------------------------------------------------------------
 
 
