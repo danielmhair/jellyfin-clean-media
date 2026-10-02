@@ -111,10 +111,23 @@ function Assert-Elevated {
     }
 }
 
+# Every worker process, by command line rather than by port. \s+ used to
+# require "uvicorn worker.main" with a literal space between them, but the
+# venv's uvicorn.exe wrapper produces `...\uvicorn.exe" worker.main:app` --
+# "uvicorn" is immediately followed by `.exe"`, not whitespace, so that never
+# matched and let an orphan that had already dropped off the port survive
+# every future -Restart.
+function Get-WorkerProcessIds {
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match 'uvicorn.*worker\.main' } |
+        Select-Object -ExpandProperty ProcessId
+}
+
 # Ending the task kills its launcher, but the uvicorn grandchild it spawned is
 # orphaned and keeps the port — and once orphaned it runs in the S4U service
 # context, which only an *elevated* taskkill (or SYSTEM) can terminate. So a
-# clean stop is: end the task, then hunt down whatever still holds the port.
+# clean stop is: end the task, then hunt down whatever still holds the port
+# AND any worker process that no longer does.
 function Stop-WorkerProcesses {
     param([int]$OnPort)
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -123,14 +136,7 @@ function Stop-WorkerProcesses {
     $victims = @()
     $held = Get-NetTCPConnection -LocalPort $OnPort -State Listen -ErrorAction SilentlyContinue
     if ($held) { $victims += $held.OwningProcess }
-    # \s+ used to require "uvicorn worker.main" with a literal space between
-    # them, but the venv's uvicorn.exe wrapper produces
-    # `...\uvicorn.exe" worker.main:app` -- "uvicorn" is immediately followed
-    # by `.exe"`, not whitespace, so that never matched and let an orphan
-    # that had already dropped off the port survive every future -Restart.
-    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match 'uvicorn.*worker\.main' } |
-        ForEach-Object { $victims += $_.ProcessId }
+    $victims += @(Get-WorkerProcessIds)
 
     foreach ($procId in ($victims | Select-Object -Unique | Where-Object { $_ })) {
         # taskkill /F reaches the S4U-context orphan that Stop-Process cannot.
@@ -145,11 +151,15 @@ function Stop-WorkerProcesses {
     # children running at the moment of the stop, tearing that tree down can
     # take longer than a couple of seconds — a single fixed sleep-then-check
     # here previously reported a false "still held, reboot to clear it" for a
-    # port that would have freed itself moments later. Poll instead.
+    # port that would have freed itself moments later. Poll instead. Done
+    # means the port is free AND no worker process is left: a worker whose
+    # listener died holds no port, so checking the port alone calls a
+    # still-running zombie "stopped".
     foreach ($i in 1..10) {
         Start-Sleep -Seconds 1
         $still = Get-NetTCPConnection -LocalPort $OnPort -State Listen -ErrorAction SilentlyContinue
-        if ($null -eq $still) { return $true }
+        $alive = @(Get-WorkerProcessIds)
+        if ($null -eq $still -and $alive.Count -eq 0) { return $true }
     }
     return $false
 }
@@ -274,14 +284,21 @@ if ($null -eq $uv) {
     throw "uv not found. Install it with: winget install astral-sh.uv"
 }
 
-# Something already holds the port — a hand-started worker, or a previous
-# task's orphaned uvicorn. Reclaim it rather than dying on a bind error that
-# only surfaces in the log. On reinstall (or restart) this is the normal case.
+# Stop whatever is running before relaunching — not only when it holds the
+# port. A worker whose listener has died (see the --loop note on the launcher
+# below) holds no port but is still alive, and it keeps its task instance
+# "running" too; with -MultipleInstances IgnoreNew, the Start-ScheduledTask
+# further down is then silently ignored. That used to make -Restart print
+# "Restarted" and wait on a worker that was never actually restarted.
 $inUse = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-if ($null -ne $inUse) {
-    Write-Host "Port $Port is in use; reclaiming it..."
+$running = @(Get-WorkerProcessIds)
+$taskBusy = (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue).State -eq 'Running'
+if ($null -ne $inUse -or $running.Count -gt 0 -or $taskBusy) {
+    Write-Host "Stopping the running worker..."
     if (-not (Stop-WorkerProcesses -OnPort $Port)) {
-        throw "Port $Port is still held after trying to stop it. Reboot to clear it, then re-run."
+        $left = @(Get-WorkerProcessIds) -join ', '
+        throw ("The old worker is still running after trying to stop it " +
+               "(port $Port held, or worker PIDs left: $left). Reboot to clear it, then re-run.")
     }
 }
 
@@ -301,6 +318,16 @@ $vlmLine = if (-not [string]::IsNullOrWhiteSpace($VlmHosts)) {
 } else { '' }
 
 # Generated, not checked in: every value below is machine-specific.
+#
+# --loop asyncio:SelectorEventLoop: uvicorn's default on Windows is the
+# Proactor loop, and when a client resets its connection before the Proactor
+# has accepted it (routine after Modern Standby -- every request Jellyfin left
+# hanging while the laptop slept is reset at once on wake), Windows reports
+# WinError 64 and asyncio *closes the listening socket for good*. The process
+# stays alive but never answers again, which is how the worker sat dead from
+# a sleep until someone noticed. The selector loop logs that same failed
+# accept and keeps listening. Nothing in the worker uses asyncio subprocesses,
+# the one thing the selector loop can't do on Windows.
 $cmd = @"
 @echo off
 rem Generated by scripts\install-service.ps1 -- edits here are overwritten on reinstall.
@@ -313,7 +340,7 @@ for %%A in ("$logPath") do if %%~zA GTR 10485760 del "$logPath"
 
 echo. >> "$logPath"
 echo ==== starting worker on port $Port ==== >> "$logPath"
-"$uv" run uvicorn worker.main:app --host 0.0.0.0 --port $Port >> "$logPath" 2>&1
+"$uv" run uvicorn worker.main:app --host 0.0.0.0 --port $Port --loop asyncio:SelectorEventLoop >> "$logPath" 2>&1
 "@
 Set-Content -Path $launcher -Value $cmd -Encoding ASCII
 
@@ -439,6 +466,14 @@ $supervisorSettings = New-ScheduledTaskSettingsSet `
     -MultipleInstances IgnoreNew -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
     -ExecutionTimeLimit ([TimeSpan]::Zero)
 $supervisorPrincipal = New-ScheduledTaskPrincipal -UserId $user -LogonType S4U -RunLevel Highest
+
+# Same -MultipleInstances IgnoreNew trap as the worker: a supervisor already
+# running would make the Start below a no-op and keep serving its old code
+# indefinitely. Stop it (it runs elevated S4U, so taskkill, not Stop-Process).
+Stop-ScheduledTask -TaskName $SupervisorTaskName -ErrorAction SilentlyContinue
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match 'worker\.supervisor' } |
+    ForEach-Object { cmd /c "taskkill /F /T /PID $($_.ProcessId) >nul 2>nul" }
 
 Register-ScheduledTask -TaskName $SupervisorTaskName -Action $supervisorAction `
     -Trigger $supervisorTrigger -Settings $supervisorSettings -Principal $supervisorPrincipal `

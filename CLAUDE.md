@@ -220,5 +220,14 @@ release; it reads the note from the `CHANGELOG` env var.
 - **Windows service** is a Task Scheduler task (S4U). It orphans an unkillable
   uvicorn child on stop, so **restart with `install-service.ps1 -Restart`**
   (elevated) — a bare Stop/Start leaves stale code serving on the port.
+- **The worker must run uvicorn's selector loop on Windows**
+  (`--loop asyncio:SelectorEventLoop`, in both launchers). The default
+  Proactor loop *closes its listening socket for good* when a client resets
+  mid-accept (`WinError 64`, "network name is no longer available" — it is
+  not the NAS), which happens routinely when a laptop wakes from Modern
+  Standby. The process stays alive but answers nothing, holds no port, and
+  keeps its task "running" — so any stop/restart must find worker processes
+  by command line, not just by port. Reproduced in
+  `tests/test_windows_listener.py`.
 - **Worker reachability**: a Jellyfin server in a Docker bridge can't reach a
   Tailscale IP; use the LAN address.

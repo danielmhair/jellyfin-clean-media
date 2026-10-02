@@ -18,4 +18,13 @@ export CLEANMEDIA_MEDIA_ROOTS="${CLEANMEDIA_MEDIA_ROOTS:-$PWD/movies}"
 echo "media roots: $CLEANMEDIA_MEDIA_ROOTS"
 [ -n "${CLEANMEDIA_VLM_HOSTS:-}" ] && echo "vlm hosts:   $CLEANMEDIA_VLM_HOSTS"
 echo "listening on http://0.0.0.0:$PORT"
-"$UV" run uvicorn worker.main:app --host 0.0.0.0 --port "$PORT"
+
+# On Windows, uvicorn defaults to the Proactor event loop, which closes its
+# listening socket for good when a client resets mid-accept (WinError 64 —
+# routine after the machine wakes from sleep). See install-service.ps1.
+LOOP_ARGS=()
+case "${OSTYPE:-}" in
+  msys*|cygwin*|win32*) LOOP_ARGS=(--loop asyncio:SelectorEventLoop) ;;
+esac
+# The +-guard: macOS's bash 3.2 treats an empty array as unbound under set -u.
+"$UV" run uvicorn worker.main:app --host 0.0.0.0 --port "$PORT" ${LOOP_ARGS[@]+"${LOOP_ARGS[@]}"}

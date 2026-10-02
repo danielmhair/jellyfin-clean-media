@@ -134,11 +134,17 @@ class WindowsController:
     def _kill_orphans(self, log: logging.Logger) -> None:
         # Mirrors install-service.ps1's Stop-WorkerProcesses: end the task,
         # then hunt down whatever still holds the port (the orphaned uvicorn
-        # child Task Scheduler doesn't track once the launcher .cmd exits).
+        # child Task Scheduler doesn't track once the launcher .cmd exits) AND
+        # any worker process by command line — a worker whose listener died
+        # holds no port but is still alive, and the port-only hunt left it
+        # running while the restart's schtasks /run was silently ignored.
         subprocess.run(["schtasks", "/end", "/tn", self.task_name], capture_output=True)
         ps = (
             "Get-NetTCPConnection -LocalPort %d -State Listen -ErrorAction SilentlyContinue "
-            "| ForEach-Object { taskkill /F /T /PID $_.OwningProcess }"
+            "| ForEach-Object { taskkill /F /T /PID $_.OwningProcess }; "
+            "Get-CimInstance Win32_Process "
+            "| Where-Object { $_.CommandLine -match 'uvicorn.*worker\\.main' } "
+            "| ForEach-Object { taskkill /F /T /PID $_.ProcessId }"
         ) % self.worker_port
         subprocess.run(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps],
