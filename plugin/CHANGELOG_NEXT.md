@@ -1,4 +1,1 @@
 <!-- Next plugin release changelog. Claude Code writes the user-facing notes here with each plugin change; the release workflow uses it as the changelog, then resets this file. Empty => the release falls back to the commit message. -->
-
-- Fixed the Windows worker silently going dead after the PC woke from sleep — it stayed running but stopped answering anything, until someone noticed and restarted it. It now keeps answering through sleep and wake. Re-run `install-service.ps1 -Restart` once to pick this up.
-- Fixed `install-service.ps1 -Restart` (and the Desktop icon's and the plugin's "Restart worker") sometimes reporting a restart without actually restarting anything, when the old worker had stopped answering. They now stop the old worker no matter what state it's in, and fail with a clear message if it won't die.

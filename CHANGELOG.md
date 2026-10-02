@@ -11,6 +11,11 @@ New entries are added automatically by the release workflow from the notes in
 [Releases page](../../releases) and in `manifest.json`.
 
 <!-- releases -->
+## 0.2.31.0 — 2026-10-02
+
+- Fixed the Windows worker silently going dead after the PC woke from sleep — it stayed running but stopped answering anything, until someone noticed and restarted it. It now keeps answering through sleep and wake. Re-run `install-service.ps1 -Restart` once to pick this up.
+- Fixed `install-service.ps1 -Restart` (and the Desktop icon's and the plugin's "Restart worker") sometimes reporting a restart without actually restarting anything, when the old worker had stopped answering. They now stop the old worker no matter what state it's in, and fail with a clear message if it won't die.
+
 ## 0.2.30.0 — 2026-09-12
 
 - Fixed re-running a "Done" whisper or visual pass finishing suspiciously fast and changing nothing — the previous fix only stopped the queue from handing back the same old job, but whisper's own cached transcript and the visual pass's own saved progress were still silently reused underneath it. Re-running a pass now genuinely starts over for both.

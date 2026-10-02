@@ -9,6 +9,14 @@
     "imageUrl": "",
     "versions": [
       {
+        "version": "0.2.31.0",
+        "changelog": "- Fixed the Windows worker silently going dead after the PC woke from sleep \u2014 it stayed running but stopped answering anything, until someone noticed and restarted it. It now keeps answering through sleep and wake. Re-run `install-service.ps1 -Restart` once to pick this up.\n- Fixed `install-service.ps1 -Restart` (and the Desktop icon's and the plugin's \"Restart worker\") sometimes reporting a restart without actually restarting anything, when the old worker had stopped answering. They now stop the old worker no matter what state it's in, and fail with a clear message if it won't die.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/danielmhair/jellyfin-clean-media/main/plugin/releases/clean-media-0.2.31.0.zip",
+        "checksum": "0e1ac63ae81ebe9c94be5aa9cdbefe85",
+        "timestamp": "2026-10-02T03:31:24"
+      },
+      {
         "version": "0.2.30.0",
         "changelog": "- Fixed re-running a \"Done\" whisper or visual pass finishing suspiciously fast and changing nothing \u2014 the previous fix only stopped the queue from handing back the same old job, but whisper's own cached transcript and the visual pass's own saved progress were still silently reused underneath it. Re-running a pass now genuinely starts over for both.",
         "targetAbi": "10.11.0.0",
